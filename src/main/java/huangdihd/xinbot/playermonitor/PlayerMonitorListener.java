@@ -15,17 +15,29 @@ import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 final class PlayerMonitorListener implements Listener {
+    private static final int MAX_STAT_ATTEMPTS = 3;
+
     private final PlayerMonitorService service;
     private final PluginLog log;
     private final Logger logger;
     private final MonitorSettingsStore settings;
     private final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
+    private final Map<String, Integer> statAttempts = new ConcurrentHashMap<>();
     private final StatQueue statQueue;
+    private final ScheduledExecutorService retryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "XinPlayerMonitor-stat-retry");
+        thread.setDaemon(true);
+        return thread;
+    });
     private volatile boolean gameActive;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
@@ -40,14 +52,19 @@ final class PlayerMonitorListener implements Listener {
                 command -> {
                     Bot.INSTANCE.sendCommand(command);
                     String playerName = command.substring("stat ".length());
+                    statAttempts.merge(playerName, 1, Integer::sum);
                     log.info("sent stat for " + playerName);
                     logger.info("Sent stat for {}.", playerName);
                 },
                 statResponses::expect);
+        retryExecutor.scheduleWithFixedDelay(this::retryTimedOutStats, 100L, 100L, TimeUnit.MILLISECONDS);
     }
 
     void close() {
         statQueue.close();
+        retryExecutor.shutdownNow();
+        statResponses.clear();
+        statAttempts.clear();
     }
 
     @EventHandler
@@ -55,6 +72,8 @@ final class PlayerMonitorListener implements Listener {
         gameActive = event.getServer() == Server.Game;
         onlinePlayers.clear();
         statQueue.clear();
+        statResponses.clear();
+        statAttempts.clear();
         log.info(gameActive ? "entered Game; monitoring enabled" : "left Game; monitoring disabled");
         logger.info(gameActive
                 ? "Entered Game; started scanning online players."
@@ -86,6 +105,8 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
+        statResponses.cancel(playerName);
+        statAttempts.remove(playerName);
         if (!onlinePlayers.remove(playerName)) {
             return;
         }
@@ -120,9 +141,11 @@ final class PlayerMonitorListener implements Listener {
         if (!gameActive) {
             return;
         }
+        retryTimedOutStats();
         statResponses.accept(event.getText()).ifPresent(captured -> {
             try {
                 service.recordStat(captured.playerName(), captured.snapshot());
+                statAttempts.remove(captured.playerName());
                 log.info("recorded stat for " + captured.playerName());
                 logger.info("Recorded stat for {}.", captured.playerName());
             } catch (IOException error) {
@@ -162,6 +185,19 @@ final class PlayerMonitorListener implements Listener {
             }
         }
         return queued;
+    }
+
+    private void retryTimedOutStats() {
+        for (String playerName : statResponses.expire()) {
+            int attempts = statAttempts.getOrDefault(playerName, 0);
+            if (gameActive && onlinePlayers.contains(playerName) && attempts < MAX_STAT_ATTEMPTS) {
+                logger.warn("Stat response timed out for {}; retrying.", playerName);
+                statQueue.enqueue(playerName);
+            } else if (attempts > 0) {
+                logger.warn("Stat scan failed for {} after {} attempts.", playerName, attempts);
+                statAttempts.remove(playerName);
+            }
+        }
     }
 
     private static String nameOf(GameProfile profile) {
