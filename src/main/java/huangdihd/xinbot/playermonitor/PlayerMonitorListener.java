@@ -34,7 +34,9 @@ final class PlayerMonitorListener implements Listener {
                 onlinePlayers::contains,
                 command -> {
                     Bot.INSTANCE.sendCommand(command);
-                    log.info("sent /" + command);
+                    String playerName = command.substring("stat ".length());
+                    log.info("sent stat for " + playerName);
+                    logger.info("Sent stat for {}.", playerName);
                 },
                 statResponses::expect);
     }
@@ -50,8 +52,8 @@ final class PlayerMonitorListener implements Listener {
         statQueue.clear();
         log.info(gameActive ? "entered Game; monitoring enabled" : "left Game; monitoring disabled");
         logger.info(gameActive
-                ? "已进入游戏世界，开始扫描在线玩家。"
-                : "已离开游戏世界，停止扫描玩家活动。");
+                ? "Entered Game; started scanning online players."
+                : "Left Game; stopped monitoring player activity.");
     }
 
     @EventHandler
@@ -111,9 +113,10 @@ final class PlayerMonitorListener implements Listener {
         statResponses.accept(event.getText()).ifPresent(captured -> {
             try {
                 service.recordStat(captured.playerName(), captured.snapshot());
-                log.info("recorded player " + captured.playerName());
+                log.info("recorded stat for " + captured.playerName());
+                logger.info("Recorded stat for {}.", captured.playerName());
             } catch (IOException error) {
-                log.info("failed to record player " + captured.playerName() + ": " + error.getMessage());
+                log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
             }
         });
     }

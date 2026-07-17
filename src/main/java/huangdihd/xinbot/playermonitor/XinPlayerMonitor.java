@@ -1,5 +1,6 @@
 package huangdihd.xinbot.playermonitor;
 
+import ch.qos.logback.classic.LoggerContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import xin.bbtt.mcbot.Bot;
@@ -14,6 +15,8 @@ public final class XinPlayerMonitor implements Plugin {
 
     private final Logger logger = LoggerFactory.getLogger(XinPlayerMonitor.class.getSimpleName());
     private PlayerMonitorListener listener;
+    private LoggerContext loggerContext;
+    private StatChatLogFilter statChatLogFilter;
 
     @Override
     public void onLoad() {
@@ -30,6 +33,7 @@ public final class XinPlayerMonitor implements Plugin {
             PlayerMonitorService service = new PlayerMonitorService(dataDirectory);
             service.initialize();
             PluginLog log = new PluginLog(dataDirectory.resolve("log"));
+            installStatChatLogFilter();
             listener = new PlayerMonitorListener(service, log, logger);
             Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
             Bot.INSTANCE.getPluginManager().registerCommand(
@@ -50,5 +54,26 @@ public final class XinPlayerMonitor implements Plugin {
             listener.close();
             listener = null;
         }
+        removeStatChatLogFilter();
+    }
+
+    private void installStatChatLogFilter() {
+        if (!(LoggerFactory.getILoggerFactory() instanceof LoggerContext context)) {
+            logger.warn("Unable to hide stat chat output: Logback is unavailable.");
+            return;
+        }
+        loggerContext = context;
+        statChatLogFilter = new StatChatLogFilter();
+        statChatLogFilter.start();
+        loggerContext.addTurboFilter(statChatLogFilter);
+    }
+
+    private void removeStatChatLogFilter() {
+        if (loggerContext != null && statChatLogFilter != null) {
+            loggerContext.getTurboFilterList().remove(statChatLogFilter);
+            statChatLogFilter.stop();
+        }
+        loggerContext = null;
+        statChatLogFilter = null;
     }
 }
