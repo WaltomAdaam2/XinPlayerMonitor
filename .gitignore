@@ -1,0 +1,8 @@
+.idea/
+.vscode/
+target/
+*.iml
+*.class
+
+# Runtime data is intentionally retained next to XinBot, never in the repository.
+playermonitor/

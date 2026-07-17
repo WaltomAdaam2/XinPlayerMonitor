@@ -1,0 +1,4 @@
+name: XinPlayerMonitor
+main: huangdihd.xinbot.playermonitor.XinPlayerMonitor
+version: 0.1.0-SNAPSHOT
+type: PLUGIN
