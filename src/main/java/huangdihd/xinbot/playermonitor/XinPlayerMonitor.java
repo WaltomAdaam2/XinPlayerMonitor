@@ -30,7 +30,7 @@ public final class XinPlayerMonitor implements Plugin {
             PlayerMonitorService service = new PlayerMonitorService(dataDirectory);
             service.initialize();
             PluginLog log = new PluginLog(dataDirectory.resolve("log"));
-            listener = new PlayerMonitorListener(service, log);
+            listener = new PlayerMonitorListener(service, log, logger);
             Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[0], "Query stored player monitoring data",

@@ -1,6 +1,7 @@
 package huangdihd.xinbot.playermonitor;
 
 import org.geysermc.mcprotocollib.auth.GameProfile;
+import org.slf4j.Logger;
 import xin.bbtt.mcbot.Bot;
 import xin.bbtt.mcbot.Server;
 import xin.bbtt.mcbot.event.EventHandler;
@@ -18,14 +19,16 @@ import java.util.concurrent.ConcurrentHashMap;
 final class PlayerMonitorListener implements Listener {
     private final PlayerMonitorService service;
     private final PluginLog log;
+    private final Logger logger;
     private final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
     private final StatQueue statQueue;
     private volatile boolean gameActive;
 
-    PlayerMonitorListener(PlayerMonitorService service, PluginLog log) {
+    PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger) {
         this.service = service;
         this.log = log;
+        this.logger = logger;
         statQueue = new StatQueue(
                 () -> gameActive,
                 onlinePlayers::contains,
@@ -46,6 +49,9 @@ final class PlayerMonitorListener implements Listener {
         onlinePlayers.clear();
         statQueue.clear();
         log.info(gameActive ? "entered Game; monitoring enabled" : "left Game; monitoring disabled");
+        logger.info(gameActive
+                ? "已进入游戏世界，开始扫描在线玩家。"
+                : "已离开游戏世界，停止扫描玩家活动。");
     }
 
     @EventHandler

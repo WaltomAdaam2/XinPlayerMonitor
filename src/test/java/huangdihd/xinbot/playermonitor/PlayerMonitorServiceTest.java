@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -32,5 +33,15 @@ class PlayerMonitorServiceTest {
         assertEquals(1, record.loginSessions.size());
         assertEquals(2, record.chatMessages.size());
         assertEquals(200L, record.loginSessions.get(0).logoutAt);
+    }
+
+    @Test
+    void listsStoredPlayerNamesForCommandCompletion() throws Exception {
+        PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
+        service.initialize();
+        service.recordLogin("WaltomAdaam", 100L);
+        service.recordLogin("_xinbot宣传", 100L);
+
+        assertEquals(List.of("_xinbot宣传", "WaltomAdaam"), service.listPlayerNames());
     }
 }

@@ -13,8 +13,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Objects;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 final class PlayerRecordStore {
     private final Path directory;
@@ -40,6 +42,17 @@ final class PlayerRecordStore {
             PlayerRecord record = loadOrCreate(playerName, now);
             mutation.accept(record);
             write(record);
+        }
+    }
+
+    List<String> listPlayerNames() throws IOException {
+        try (Stream<Path> paths = Files.list(directory)) {
+            return paths.filter(Files::isRegularFile)
+                    .map(path -> path.getFileName().toString())
+                    .filter(fileName -> fileName.endsWith(".json"))
+                    .map(fileName -> fileName.substring(0, fileName.length() - ".json".length()))
+                    .sorted(String.CASE_INSENSITIVE_ORDER)
+                    .toList();
         }
     }
 

@@ -53,13 +53,27 @@ final class PlayerMonitorCommand extends TabExecutor {
 
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
-        if (args == null || args.length != 2) {
+        if (args == null || args.length == 0) {
             return List.of();
         }
-        String prefix = args[1].toLowerCase();
-        return List.of("stat", "lastlogin", "recentlogin").stream()
-                .filter(value -> value.startsWith(prefix))
-                .toList();
+        if (args.length == 1) {
+            try {
+                String prefix = args[0].toLowerCase();
+                return service.listPlayerNames().stream()
+                        .filter(name -> name.toLowerCase().startsWith(prefix))
+                        .toList();
+            } catch (IOException error) {
+                logger.warn("Unable to complete player name", error);
+                return List.of();
+            }
+        }
+        if (args.length == 2) {
+            String prefix = args[1].toLowerCase();
+            return List.of("stat", "lastlogin", "recentlogin").stream()
+                    .filter(value -> value.startsWith(prefix))
+                    .toList();
+        }
+        return List.of();
     }
 
     private String summary(PlayerRecord record) {
