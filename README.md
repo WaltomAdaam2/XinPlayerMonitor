@@ -8,7 +8,7 @@ The plugin writes UTF-8 player files to `playermonitor/<player>.json` beside the
 
 ```text
 playermonitor setting stat
-playermonitor setting stat scan
+playermonitor stat scan
 playermonitor setting stat interval <ms>
 playermonitor setting stat autoscan <true|false>
 playermonitor setting stat enabled <true|false>
@@ -31,7 +31,7 @@ such query every 60 seconds globally; all public chat is still recorded during t
 `playermonitor/settings.json` persists the stat interval (default `500ms`), whether a Game entry
 starts a full-player stat scan, whether automatic stat scans are enabled, and whether stat output
 is hidden in the chat log (default `true`). Disabling automatic stat scans does not disable
-`playermonitor setting stat scan`.
+`playermonitor stat scan`.
 
 Each full-player scan opens a login session only for players not yet observed in the current Game;
 their later leave event closes that same session while chat and stat records continue normally.

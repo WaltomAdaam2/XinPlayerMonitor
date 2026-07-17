@@ -21,14 +21,15 @@ class StatResponseCollectorTest {
     }
 
     @Test
-    void capturesColoredStatResponse() {
+    void waitsForTheClosingSeparatorBeforeCapturingColoredStatResponse() {
         StatResponseCollector collector = new StatResponseCollector();
         collector.expect("WaltomAdaam");
 
         assertTrue(collector.accept("§b玩家名称: WaltomAdaam").isEmpty());
         assertTrue(collector.accept("§b加入游戏: 470 次\n§b死亡计数: 300 次\n§b击杀计数: 410 人").isEmpty());
-        StatResponseCollector.CapturedStat captured = collector.accept(
-                "§e游戏时长: 11天6时59分56秒\n§b优先队列: 已过期\n§b特殊权限: ✅ | ✅ | ✅").orElseThrow();
+        assertTrue(collector.accept("§e游戏时长: 11天6时59分56秒\n§b优先队列: 已过期\n§b特殊权限: ✅ | ✅ | ✅").isEmpty());
+
+        StatResponseCollector.CapturedStat captured = collector.accept("----------------------").orElseThrow();
 
         assertEquals("WaltomAdaam", captured.playerName());
         assertEquals(300, captured.snapshot().deathCount);

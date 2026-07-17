@@ -54,16 +54,23 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             setting(args);
             return;
         }
+        if ("stat".equalsIgnoreCase(args[0])) {
+            statCommand(args);
+            return;
+        }
         player(args);
     }
 
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
         if (args == null || args.length == 0) {
-            return List.of("setting", PLAYER_PLACEHOLDER);
+            return List.of("setting", "stat", PLAYER_PLACEHOLDER);
         }
         if ("setting".equalsIgnoreCase(args[0])) {
             return completeSetting(args);
+        }
+        if ("stat".equalsIgnoreCase(args[0])) {
+            return completeStatCommand(args);
         }
         if (args.length == 1) {
             return completePlayerNames(args[0]);
@@ -84,14 +91,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return;
         }
         String action = args[2].toLowerCase(Locale.ROOT);
-        if ("scan".equals(action)) {
-            if (args.length != 3) {
-                help();
-                return;
-            }
-            scan();
-            return;
-        }
         if (args.length != 4) {
             help();
             return;
@@ -127,6 +126,14 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         } catch (IOException error) {
             print("Unable to save monitor settings: " + error.getMessage());
         }
+    }
+
+    private void statCommand(String[] args) {
+        if (args.length == 2 && "scan".equalsIgnoreCase(args[1])) {
+            scan();
+            return;
+        }
+        help();
     }
 
     private void player(String[] args) {
@@ -168,7 +175,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return List.of();
         }
         if (args.length == 3) {
-            return matching(args[2], List.of("scan", "interval", "autoscan", "enabled", "outputhide"));
+            return matching(args[2], List.of("interval", "autoscan", "enabled", "outputhide"));
         }
         if (args.length == 4) {
             return switch (args[2].toLowerCase(Locale.ROOT)) {
@@ -180,9 +187,19 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return List.of();
     }
 
+    private List<String> completeStatCommand(String[] args) {
+        if (args.length == 1) {
+            return List.of("scan");
+        }
+        if (args.length == 2) {
+            return matching(args[1], List.of("scan"));
+        }
+        return List.of();
+    }
+
     private List<String> completePlayerNames(String input) {
         if (input == null || input.isEmpty()) {
-            return List.of("setting", PLAYER_PLACEHOLDER);
+            return List.of("setting", "stat", PLAYER_PLACEHOLDER);
         }
         try {
             TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -192,6 +209,9 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             List<String> matches = new ArrayList<>();
             if ("setting".startsWith(prefix)) {
                 matches.add("setting");
+            }
+            if ("stat".startsWith(prefix)) {
+                matches.add("stat");
             }
             names.stream()
                     .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
@@ -318,7 +338,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void help() {
-        print("Usage: playermonitor setting stat [scan|interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>]");
+        print("Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>]");
+        print("Usage: playermonitor stat scan");
         playerHelp();
     }
 

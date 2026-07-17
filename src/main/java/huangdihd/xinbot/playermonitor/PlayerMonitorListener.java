@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 
 final class PlayerMonitorListener implements Listener {
     private static final int MAX_STAT_ATTEMPTS = 3;
+    private static final long STAT_WRITE_DELAY_MILLIS = 25L;
 
     private final PlayerMonitorService service;
     private final PluginLog log;
@@ -151,7 +152,7 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         retryTimedOutStats();
-        statResponses.accept(event.getText()).ifPresent(captured -> {
+        statResponses.accept(event.getText()).ifPresent(captured -> retryExecutor.schedule(() -> {
             try {
                 service.recordStat(captured.playerName(), captured.snapshot());
                 statAttempts.remove(captured.playerName());
@@ -160,7 +161,7 @@ final class PlayerMonitorListener implements Listener {
             } catch (IOException error) {
                 log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
             }
-        });
+        }, STAT_WRITE_DELAY_MILLIS, TimeUnit.MILLISECONDS));
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
