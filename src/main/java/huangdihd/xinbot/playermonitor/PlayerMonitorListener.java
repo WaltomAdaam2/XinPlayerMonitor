@@ -14,6 +14,7 @@ import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -71,15 +72,11 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
-        onlinePlayers.add(playerName);
-        try {
-            service.recordLogin(playerName, System.currentTimeMillis());
-            log.info("recorded player " + playerName);
-            if (settings.statScanEnabled()) {
-                statQueue.enqueue(playerName);
-            }
-        } catch (IOException error) {
-            log.info("failed to record player " + playerName + ": " + error.getMessage());
+        if (onlinePlayers.add(playerName)) {
+            recordLogin(playerName, System.currentTimeMillis());
+        }
+        if (settings.statScanEnabled()) {
+            statQueue.enqueue(playerName);
         }
     }
 
@@ -89,7 +86,9 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
-        onlinePlayers.remove(playerName);
+        if (!onlinePlayers.remove(playerName)) {
+            return;
+        }
         try {
             service.recordLogout(playerName, System.currentTimeMillis());
             log.info("recorded player " + playerName);
@@ -141,11 +140,23 @@ final class PlayerMonitorListener implements Listener {
         return queued;
     }
 
+    List<String> onlinePlayerNames() {
+        if (!gameActive) {
+            return List.of();
+        }
+        return Bot.INSTANCE.players.values().stream()
+                .map(PlayerMonitorListener::nameOf)
+                .filter(name -> name != null && !name.isBlank())
+                .toList();
+    }
+
     private int queueStatScan(Collection<GameProfile> profiles) {
         int queued = 0;
         for (GameProfile profile : profiles) {
             String playerName = nameOf(profile);
-            onlinePlayers.add(playerName);
+            if (onlinePlayers.add(playerName)) {
+                recordLogin(playerName, System.currentTimeMillis());
+            }
             if (statQueue.enqueue(playerName)) {
                 queued++;
             }
@@ -155,5 +166,14 @@ final class PlayerMonitorListener implements Listener {
 
     private static String nameOf(GameProfile profile) {
         return profile.getName();
+    }
+
+    private void recordLogin(String playerName, long now) {
+        try {
+            service.recordLogin(playerName, now);
+            log.info("recorded player " + playerName);
+        } catch (IOException error) {
+            log.info("failed to record player " + playerName + ": " + error.getMessage());
+        }
     }
 }

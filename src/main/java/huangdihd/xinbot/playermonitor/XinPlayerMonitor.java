@@ -42,7 +42,7 @@ public final class XinPlayerMonitor implements Plugin {
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[0], "Query stored player monitoring data",
                             "player <name> [stat|lastlogin|recentlogin]"),
-                    new PlayerMonitorCommand(service, logger),
+                    new PlayerMonitorCommand(service, listener, logger),
                     this);
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(MANAGEMENT_COMMAND_NAME, new String[0], "Configure player stat scanning",

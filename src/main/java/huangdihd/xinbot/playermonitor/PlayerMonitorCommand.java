@@ -15,16 +15,20 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.TreeSet;
 
 final class PlayerMonitorCommand extends TabExecutor {
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
 
     private final PlayerMonitorService service;
+    private final PlayerMonitorListener listener;
     private final Logger logger;
 
-    PlayerMonitorCommand(PlayerMonitorService service, Logger logger) {
+    PlayerMonitorCommand(PlayerMonitorService service, PlayerMonitorListener listener, Logger logger) {
         this.service = service;
+        this.listener = listener;
         this.logger = logger;
     }
 
@@ -58,9 +62,12 @@ final class PlayerMonitorCommand extends TabExecutor {
         }
         if (args.length == 1) {
             try {
-                String prefix = args[0].toLowerCase();
-                return service.listPlayerNames().stream()
-                        .filter(name -> name.toLowerCase().startsWith(prefix))
+                String prefix = args[0].toLowerCase(Locale.ROOT);
+                TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+                names.addAll(service.listPlayerNames());
+                names.addAll(listener.onlinePlayerNames());
+                return names.stream()
+                        .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
                         .toList();
             } catch (IOException error) {
                 logger.warn("Unable to complete player name", error);
@@ -68,7 +75,7 @@ final class PlayerMonitorCommand extends TabExecutor {
             }
         }
         if (args.length == 2) {
-            String prefix = args[1].toLowerCase();
+            String prefix = args[1].toLowerCase(Locale.ROOT);
             return List.of("stat", "lastlogin", "recentlogin").stream()
                     .filter(value -> value.startsWith(prefix))
                     .toList();
