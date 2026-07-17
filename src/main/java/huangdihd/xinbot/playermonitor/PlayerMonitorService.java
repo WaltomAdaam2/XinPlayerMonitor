@@ -58,6 +58,20 @@ public final class PlayerMonitorService {
         return Optional.empty();
     }
 
+    public boolean hasStatCapturedAtOrAfter(String playerName, long cutoffAt) throws IOException {
+        Optional<PlayerRecord> record = findRecord(playerName);
+        if (record.isEmpty()) {
+            return false;
+        }
+        List<StatSnapshot> snapshots = record.get().statSnapshots;
+        for (int index = snapshots.size() - 1; index >= 0; index--) {
+            if (snapshots.get(index).capturedAt >= cutoffAt) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public List<String> listPlayerNames() throws IOException {
         return store.listPlayerNames();
     }

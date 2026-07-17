@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 final class PlayerMonitorListener implements Listener {
     private static final int MAX_STAT_ATTEMPTS = 3;
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
+    private static final long AUTOMATIC_STAT_COOLDOWN_MILLIS = TimeUnit.HOURS.toMillis(24L);
 
     private final PlayerMonitorService service;
     private final PluginLog log;
@@ -87,9 +88,10 @@ final class PlayerMonitorListener implements Listener {
                 ? "Entered Game; started scanning online players."
                 : "Left Game; stopped monitoring player activity.");
         if (gameActive && settings.autoScanOnGameEntry() && settings.statScanEnabled()) {
-            int queued = queueStatScan(Bot.INSTANCE.players.values());
-            log.info("queued automatic stat scan for " + queued + " online players");
-            logger.info("Queued automatic stat scan for {} online players.", queued);
+            StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), true);
+            log.info("queued automatic stat scan for " + result.queued() + " online players");
+            logger.info("Queued automatic stat scan for {} online players; skipped {} in cooldown.",
+                    result.queued(), result.cooldownSkipped());
         }
     }
 
@@ -103,7 +105,7 @@ final class PlayerMonitorListener implements Listener {
             recordLogin(playerName, System.currentTimeMillis());
         }
         if (settings.statScanEnabled()) {
-            statQueue.enqueueFirst(playerName);
+            enqueueAutomaticJoinStat(playerName);
         }
     }
 
@@ -191,9 +193,9 @@ final class PlayerMonitorListener implements Listener {
         if (!gameActive) {
             return -1;
         }
-        int queued = queueStatScan(Bot.INSTANCE.players.values());
-        log.info("queued manual stat scan for " + queued + " online players");
-        return queued;
+        StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), false);
+        log.info("queued manual stat scan for " + result.queued() + " online players");
+        return result.queued();
     }
 
     List<String> onlinePlayerNames() {
@@ -206,18 +208,42 @@ final class PlayerMonitorListener implements Listener {
                 .toList();
     }
 
-    private int queueStatScan(Collection<GameProfile> profiles) {
+    private StatScanResult queueStatScan(Collection<GameProfile> profiles, boolean applyCooldown) {
         int queued = 0;
+        int cooldownSkipped = 0;
         for (GameProfile profile : profiles) {
             String playerName = nameOf(profile);
             if (onlinePlayers.add(playerName)) {
                 recordLogin(playerName, System.currentTimeMillis());
             }
+            if (applyCooldown && isAutomaticStatCooldownActive(playerName)) {
+                cooldownSkipped++;
+                continue;
+            }
             if (statQueue.enqueue(playerName)) {
                 queued++;
             }
         }
-        return queued;
+        return new StatScanResult(queued, cooldownSkipped);
+    }
+
+    private void enqueueAutomaticJoinStat(String playerName) {
+        if (isAutomaticStatCooldownActive(playerName)) {
+            log.info("skipped automatic stat for " + playerName + "; cooldown active");
+            return;
+        }
+        statQueue.enqueueFirst(playerName);
+    }
+
+    private boolean isAutomaticStatCooldownActive(String playerName) {
+        try {
+            return service.hasStatCapturedAtOrAfter(
+                    playerName,
+                    System.currentTimeMillis() - AUTOMATIC_STAT_COOLDOWN_MILLIS);
+        } catch (IOException error) {
+            log.info("failed to check stat cooldown for " + playerName + ": " + error.getMessage());
+            return false;
+        }
     }
 
     private void retryTimedOutStats() {
@@ -244,5 +270,8 @@ final class PlayerMonitorListener implements Listener {
         } catch (IOException error) {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }
+    }
+
+    private record StatScanResult(int queued, int cooldownSkipped) {
     }
 }

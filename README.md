@@ -35,3 +35,5 @@ is hidden in the chat log (default `true`). Disabling automatic stat scans does 
 
 Each full-player scan opens a login session only for players not yet observed in the current Game;
 their later leave event closes that same session while chat and stat records continue normally.
+Automatic stat scans skip players whose latest successfully recorded stat is less than 24 hours old.
+Manual `playermonitor stat scan` bypasses this cooldown; login, logout, and chat recording are not affected.

@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerMonitorServiceStatTest {
@@ -31,5 +32,22 @@ class PlayerMonitorServiceStatTest {
 
         assertTrue(Files.exists(temporaryDirectory.resolve("playermonitor/WaltomAdaam.json")));
         assertEquals(2, service.findRecord("WaltomAdaam").orElseThrow().statSnapshots.get(0).deathCount);
+    }
+
+    @Test
+    void findsRecentStatsAfterReload() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor");
+        PlayerMonitorService service = new PlayerMonitorService(directory);
+        service.initialize();
+        StatSnapshot snapshot = new StatSnapshot();
+        snapshot.capturedAt = 1_000L;
+        service.recordStat("WaltomAdaam", snapshot);
+
+        PlayerMonitorService reloaded = new PlayerMonitorService(directory);
+        reloaded.initialize();
+
+        assertTrue(reloaded.hasStatCapturedAtOrAfter("WaltomAdaam", 1_000L));
+        assertFalse(reloaded.hasStatCapturedAtOrAfter("WaltomAdaam", 1_001L));
+        assertFalse(reloaded.hasStatCapturedAtOrAfter("Unknown", 0L));
     }
 }
