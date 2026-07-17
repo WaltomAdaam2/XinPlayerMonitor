@@ -7,29 +7,31 @@ The plugin writes UTF-8 player files to `playermonitor/<player>.json` beside the
 ## Console commands
 
 ```text
-player <name>
-player <name> stat
-player <name> lastlogin
-player <name> recentlogin
-playermonitor setting
-playermonitor setting interval <ms>
-playermonitor setting auto <on|off>
-playermonitor setting enabled <on|off>
-playermonitor stat scan
+playermonitor setting stat
+playermonitor setting stat scan
+playermonitor setting stat interval <ms>
+playermonitor setting stat auto <true|false>
+playermonitor setting stat enabled <true|false>
+playermonitor setting stat outputhide <true|false>
+playermonitor <name> stat
+playermonitor <name> latestlogin
+playermonitor <name> recentlogin
+playermonitor <name> chat
 ```
 
 Only activity observed after XinBot enters the `Game` server state is recorded.
-Player-name completion combines stored records with XinBot's current Game player list.
+Player-name completion starts after one typed character and uses an in-memory player-name index plus XinBot's current Game player list. It never parses player JSON files while completing.
 
 ## Game chat query
 
-In the Game server, players can send `!player <name>` in public chat. The bot replies with the
+In the Game server, players can send `!plcheck <name>` in public chat. The bot replies with the
 latest login, play duration, and (when available) logout time. XinPlayerMonitor accepts only one
 such query every 60 seconds globally; all public chat is still recorded during the cooldown.
 
 `playermonitor/settings.json` persists the stat interval (default `500ms`), whether a Game entry
-starts a full-player stat scan, and whether automatic stat scans are enabled. Disabling automatic
-stat scans does not disable `playermonitor stat scan`.
+starts a full-player stat scan, whether automatic stat scans are enabled, and whether stat output
+is hidden in the chat log (default `true`). Disabling automatic stat scans does not disable
+`playermonitor setting stat scan`.
 
 Each full-player scan opens a login session only for players not yet observed in the current Game;
 their later leave event closes that same session while chat and stat records continue normally.

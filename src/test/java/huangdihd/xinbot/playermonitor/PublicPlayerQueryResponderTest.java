@@ -29,12 +29,12 @@ class PublicPlayerQueryResponderTest {
         AtomicLong now = new AtomicLong(3_000L);
         PublicPlayerQueryResponder responder = responder(service, replies, now);
 
-        responder.handle("!PlAyEr WaltomAdaam");
+        responder.handle("!PlChEcK WaltomAdaam");
         assertEquals(List.of("玩家 WaltomAdaam：最近登录 " + format(1_000L) + "，游玩时长 0小时0分2秒"), replies);
 
         service.recordLogout("WaltomAdaam", 5_000L);
         now.addAndGet(60_001L);
-        responder.handle("!player WaltomAdaam");
+        responder.handle("!plcheck WaltomAdaam");
         assertTrue(replies.get(1).contains("登出时间 " + format(5_000L)));
     }
 
@@ -45,8 +45,8 @@ class PublicPlayerQueryResponderTest {
         AtomicLong now = new AtomicLong(1_000L);
         PublicPlayerQueryResponder responder = responder(service, replies, now);
 
-        responder.handle("!player _xinbot宣传");
-        responder.handle("!player OtherPlayer");
+        responder.handle("!plcheck _xinbot宣传");
+        responder.handle("!plcheck OtherPlayer");
 
         assertEquals(List.of("未找到玩家 _xinbot宣传 的记录。"), replies);
         assertFalse(Files.exists(temporaryDirectory.resolve("playermonitor/_xinbot宣传.json")));
@@ -63,7 +63,7 @@ class PublicPlayerQueryResponderTest {
                 .mapToObj(index -> new Thread(() -> {
                     try {
                         start.await();
-                        responder.handle("!player Player" + index);
+                        responder.handle("!plcheck Player" + index);
                     } catch (InterruptedException error) {
                         Thread.currentThread().interrupt();
                     }

@@ -33,7 +33,7 @@ final class StatResponseCollector {
 
     synchronized Optional<CapturedStat> accept(String text) {
         for (String line : text.replace("\r", "").split("\n")) {
-            String trimmed = line.trim();
+            String trimmed = StatText.normalize(line);
             Matcher header = HEADER.matcher(trimmed);
             if (header.matches()) {
                 String playerName = expectedName(header.group(1));
@@ -54,8 +54,8 @@ final class StatResponseCollector {
                 String completedPlayer = activePlayer;
                 activePlayer = null;
                 activeLines = null;
-                expectedPlayers.remove(completedPlayer);
                 if (snapshot.isPresent()) {
+                    expectedPlayers.remove(completedPlayer);
                     return Optional.of(new CapturedStat(completedPlayer, snapshot.get()));
                 }
             }

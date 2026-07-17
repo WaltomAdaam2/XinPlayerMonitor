@@ -16,6 +16,7 @@ import java.util.Objects;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -24,6 +25,7 @@ final class PlayerRecordStore {
     private final Gson gson = new GsonBuilder().create();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PlayerRecord> records = new ConcurrentHashMap<>();
+    private final ConcurrentSkipListSet<String> playerNames = new ConcurrentSkipListSet<>(String.CASE_INSENSITIVE_ORDER);
 
     PlayerRecordStore(Path directory) {
         this.directory = directory;
@@ -31,6 +33,13 @@ final class PlayerRecordStore {
 
     void initialize() throws IOException {
         Files.createDirectories(directory);
+        try (Stream<Path> paths = Files.list(directory)) {
+            paths.filter(Files::isRegularFile)
+                    .map(path -> path.getFileName().toString())
+                    .filter(PlayerRecordStore::isPlayerRecordFile)
+                    .map(PlayerRecordStore::playerNameFromFile)
+                    .forEach(playerNames::add);
+        }
     }
 
     PlayerRecord read(String playerName) throws IOException {
@@ -58,14 +67,7 @@ final class PlayerRecordStore {
     }
 
     List<String> listPlayerNames() throws IOException {
-        try (Stream<Path> paths = Files.list(directory)) {
-            return paths.filter(Files::isRegularFile)
-                    .map(path -> path.getFileName().toString())
-                    .filter(fileName -> fileName.endsWith(".json"))
-                    .map(fileName -> fileName.substring(0, fileName.length() - ".json".length()))
-                    .sorted(String.CASE_INSENSITIVE_ORDER)
-                    .toList();
-        }
+        return List.copyOf(playerNames);
     }
 
     private Object lockFor(String playerName) {
@@ -110,6 +112,15 @@ final class PlayerRecordStore {
         } catch (AtomicMoveNotSupportedException ignored) {
             Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
         }
+        playerNames.add(record.playerName);
+    }
+
+    private static boolean isPlayerRecordFile(String fileName) {
+        return fileName.endsWith(".json") && !"settings.json".equalsIgnoreCase(fileName);
+    }
+
+    private static String playerNameFromFile(String fileName) {
+        return fileName.substring(0, fileName.length() - ".json".length());
     }
 
     private Path pathFor(String playerName) throws IOException {

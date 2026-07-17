@@ -54,6 +54,10 @@ final class MonitorSettingsStore {
         return settings.statScanEnabled;
     }
 
+    synchronized boolean statOutputHidden() {
+        return settings.statOutputHidden;
+    }
+
     synchronized void setStatIntervalMillis(int value) throws IOException {
         validate(value);
         settings.statIntervalMillis = value;
@@ -67,6 +71,11 @@ final class MonitorSettingsStore {
 
     synchronized void setStatScanEnabled(boolean value) throws IOException {
         settings.statScanEnabled = value;
+        write();
+    }
+
+    synchronized void setStatOutputHidden(boolean value) throws IOException {
+        settings.statOutputHidden = value;
         write();
     }
 

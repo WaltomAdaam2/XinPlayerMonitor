@@ -20,7 +20,7 @@ final class StatParser {
     static Optional<StatSnapshot> parse(String expectedPlayerName, List<String> inputLines, long capturedAt) {
         List<String> lines = inputLines.stream()
                 .flatMap(line -> List.of(line.replace("\\r", "").split("\\n")).stream())
-                .map(StatParser::stripMinecraftFormatting)
+                .map(StatText::normalize)
                 .map(String::trim)
                 .filter(line -> !line.isEmpty())
                 .toList();
@@ -42,14 +42,14 @@ final class StatParser {
         for (String line : lines) {
             if (line.startsWith("加入游戏")) {
                 snapshot.addedGameCount = firstInteger(line);
-            } else if (line.startsWith("在线次数")) {
-                snapshot.onlineCount = firstInteger(line);
-            } else if (line.startsWith("击杀数")) {
+            } else if (line.startsWith("死亡计数")) {
+                snapshot.deathCount = firstInteger(line);
+            } else if (line.startsWith("击杀数") || line.startsWith("击杀计数")) {
                 snapshot.killCount = firstInteger(line);
             } else if (line.startsWith("游戏时长")) {
                 snapshot.playtimeSeconds = playtimeSeconds(valueAfterColon(line));
-            } else if (line.startsWith("队伍")) {
-                snapshot.team = valueAfterColon(line);
+            } else if (line.startsWith("优先队列")) {
+                snapshot.priorityQueue = valueAfterColon(line);
             } else if (line.startsWith("特殊权限")) {
                 snapshot.permissions = permissions(line);
             }
@@ -88,7 +88,4 @@ final class StatParser {
         return new PlayerPermissions(checks >= 1, checks >= 2, checks >= 3);
     }
 
-    private static String stripMinecraftFormatting(String value) {
-        return value.replaceAll("(?i)§[0-9A-FK-OR]", "");
-    }
 }

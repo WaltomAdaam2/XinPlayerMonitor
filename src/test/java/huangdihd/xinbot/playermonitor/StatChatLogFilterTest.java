@@ -7,10 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StatChatLogFilterTest {
     @Test
-    void hidesOnlyStatResponseLines() {
+    void recognizesColoredStatResponseLines() {
+        assertTrue(StatChatLogFilter.isStatOutputLine("§b玩家名称: Xero_CraftStudio"));
+        assertTrue(StatChatLogFilter.isStatOutputLine("\u001B[36m§b特殊权限: ✅ | ✅ | ✅\u001B[0m"));
         assertTrue(StatChatLogFilter.isStatOutputLine("----------------------"));
-        assertTrue(StatChatLogFilter.isStatOutputLine("玩家名称： Xero_CraftStudio"));
-        assertTrue(StatChatLogFilter.isStatOutputLine("特殊权限： ✅ | ❌ | ✅"));
         assertFalse(StatChatLogFilter.isStatOutputLine("<Dylan_Galaxy> 消音室要换位了"));
     }
 }
