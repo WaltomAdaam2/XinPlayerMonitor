@@ -11,6 +11,15 @@ player <name>
 player <name> stat
 player <name> lastlogin
 player <name> recentlogin
+playermonitor setting
+playermonitor setting interval <ms>
+playermonitor setting auto <on|off>
+playermonitor setting enabled <on|off>
+playermonitor stat scan
 ```
 
 Only activity observed after XinBot enters the `Game` server state is recorded.
+
+`playermonitor/settings.json` persists the stat interval (default `500ms`), whether a Game entry
+starts a full-player stat scan, and whether automatic stat scans are enabled. Disabling automatic
+stat scans does not disable `playermonitor stat scan`.

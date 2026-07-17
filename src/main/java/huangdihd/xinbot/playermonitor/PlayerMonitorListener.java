@@ -13,6 +13,7 @@ import xin.bbtt.mcbot.events.ServerChangeEvent;
 import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -20,18 +21,21 @@ final class PlayerMonitorListener implements Listener {
     private final PlayerMonitorService service;
     private final PluginLog log;
     private final Logger logger;
+    private final MonitorSettingsStore settings;
     private final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
     private final StatQueue statQueue;
     private volatile boolean gameActive;
 
-    PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger) {
+    PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
         this.service = service;
         this.log = log;
         this.logger = logger;
+        this.settings = settings;
         statQueue = new StatQueue(
                 () -> gameActive,
                 onlinePlayers::contains,
+                settings::statIntervalMillis,
                 command -> {
                     Bot.INSTANCE.sendCommand(command);
                     String playerName = command.substring("stat ".length());
@@ -54,6 +58,11 @@ final class PlayerMonitorListener implements Listener {
         logger.info(gameActive
                 ? "Entered Game; started scanning online players."
                 : "Left Game; stopped monitoring player activity.");
+        if (gameActive && settings.autoScanOnGameEntry() && settings.statScanEnabled()) {
+            int queued = queueStatScan(Bot.INSTANCE.players.values());
+            log.info("queued automatic stat scan for " + queued + " online players");
+            logger.info("Queued automatic stat scan for {} online players.", queued);
+        }
     }
 
     @EventHandler
@@ -66,7 +75,9 @@ final class PlayerMonitorListener implements Listener {
         try {
             service.recordLogin(playerName, System.currentTimeMillis());
             log.info("recorded player " + playerName);
-            statQueue.enqueue(playerName);
+            if (settings.statScanEnabled()) {
+                statQueue.enqueue(playerName);
+            }
         } catch (IOException error) {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }
@@ -119,6 +130,27 @@ final class PlayerMonitorListener implements Listener {
                 log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
             }
         });
+    }
+
+    int scanAllOnlinePlayers() {
+        if (!gameActive) {
+            return -1;
+        }
+        int queued = queueStatScan(Bot.INSTANCE.players.values());
+        log.info("queued manual stat scan for " + queued + " online players");
+        return queued;
+    }
+
+    private int queueStatScan(Collection<GameProfile> profiles) {
+        int queued = 0;
+        for (GameProfile profile : profiles) {
+            String playerName = nameOf(profile);
+            onlinePlayers.add(playerName);
+            if (statQueue.enqueue(playerName)) {
+                queued++;
+            }
+        }
+        return queued;
     }
 
     private static String nameOf(GameProfile profile) {

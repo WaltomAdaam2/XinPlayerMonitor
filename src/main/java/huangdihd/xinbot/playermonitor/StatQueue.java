@@ -10,11 +10,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 
 final class StatQueue {
-    private static final long COMMAND_INTERVAL_MILLIS = 500L;
-
     private final Queue<String> pending = new ConcurrentLinkedQueue<>();
     private final Set<String> pendingNames = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -25,23 +24,28 @@ final class StatQueue {
     private final AtomicBoolean draining = new AtomicBoolean();
     private final BooleanSupplier gameActive;
     private final Predicate<String> online;
+    private final LongSupplier intervalMillis;
     private final Consumer<String> sender;
     private final Consumer<String> dispatched;
 
-    StatQueue(BooleanSupplier gameActive, Predicate<String> online, Consumer<String> sender, Consumer<String> dispatched) {
+    StatQueue(BooleanSupplier gameActive, Predicate<String> online, LongSupplier intervalMillis,
+              Consumer<String> sender, Consumer<String> dispatched) {
         this.gameActive = gameActive;
         this.online = online;
+        this.intervalMillis = intervalMillis;
         this.sender = sender;
         this.dispatched = dispatched;
     }
 
-    void enqueue(String playerName) {
-        if (pendingNames.add(playerName)) {
+    boolean enqueue(String playerName) {
+        boolean added = pendingNames.add(playerName);
+        if (added) {
             pending.add(playerName);
         }
         if (draining.compareAndSet(false, true)) {
             executor.execute(this::drain);
         }
+        return added;
     }
 
     void clear() {
@@ -68,6 +72,6 @@ final class StatQueue {
             sender.accept("stat " + playerName);
             dispatched.accept(playerName);
         }
-        executor.schedule(this::drain, COMMAND_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
+        executor.schedule(this::drain, Math.max(1L, intervalMillis.getAsLong()), TimeUnit.MILLISECONDS);
     }
 }

@@ -12,6 +12,7 @@ import java.nio.file.Path;
 
 public final class XinPlayerMonitor implements Plugin {
     private static final String COMMAND_NAME = "player";
+    private static final String MANAGEMENT_COMMAND_NAME = "playermonitor";
 
     private final Logger logger = LoggerFactory.getLogger(XinPlayerMonitor.class.getSimpleName());
     private PlayerMonitorListener listener;
@@ -32,17 +33,24 @@ public final class XinPlayerMonitor implements Plugin {
             Path dataDirectory = Path.of("playermonitor");
             PlayerMonitorService service = new PlayerMonitorService(dataDirectory);
             service.initialize();
+            MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
+            settings.initialize();
             PluginLog log = new PluginLog(dataDirectory.resolve("log"));
             installStatChatLogFilter();
-            listener = new PlayerMonitorListener(service, log, logger);
+            listener = new PlayerMonitorListener(service, log, logger, settings);
             Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[0], "Query stored player monitoring data",
                             "player <name> [stat|lastlogin|recentlogin]"),
                     new PlayerMonitorCommand(service, logger),
                     this);
+            Bot.INSTANCE.getPluginManager().registerCommand(
+                    new Command(MANAGEMENT_COMMAND_NAME, new String[0], "Configure player stat scanning",
+                            "playermonitor setting|stat scan"),
+                    new PlayerMonitorManagementCommand(settings, listener, logger),
+                    this);
             log.info("plugin enabled");
-            logger.info("XinPlayerMonitor enabled; use player <name> [stat|lastlogin|recentlogin]");
+            logger.info("XinPlayerMonitor enabled; use player or playermonitor for help.");
         } catch (IOException error) {
             throw new IllegalStateException("Unable to initialize XinPlayerMonitor", error);
         }
