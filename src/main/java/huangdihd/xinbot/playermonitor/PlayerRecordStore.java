@@ -21,8 +21,9 @@ import java.util.stream.Stream;
 
 final class PlayerRecordStore {
     private final Path directory;
-    private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
+    private final Gson gson = new GsonBuilder().create();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, PlayerRecord> records = new ConcurrentHashMap<>();
 
     PlayerRecordStore(Path directory) {
         this.directory = directory;
@@ -34,7 +35,7 @@ final class PlayerRecordStore {
 
     PlayerRecord read(String playerName) throws IOException {
         synchronized (lockFor(playerName)) {
-            return loadOrCreate(playerName, System.currentTimeMillis());
+            return getOrLoad(playerName, System.currentTimeMillis());
         }
     }
 
@@ -44,13 +45,13 @@ final class PlayerRecordStore {
             if (!Files.exists(path)) {
                 return Optional.empty();
             }
-            return Optional.of(loadOrCreate(playerName, System.currentTimeMillis()));
+            return Optional.of(getOrLoad(playerName, System.currentTimeMillis()));
         }
     }
 
     void update(String playerName, long now, Consumer<PlayerRecord> mutation) throws IOException {
         synchronized (lockFor(playerName)) {
-            PlayerRecord record = loadOrCreate(playerName, now);
+            PlayerRecord record = getOrLoad(playerName, now);
             mutation.accept(record);
             write(record);
         }
@@ -69,6 +70,16 @@ final class PlayerRecordStore {
 
     private Object lockFor(String playerName) {
         return locks.computeIfAbsent(playerName, ignored -> new Object());
+    }
+
+    private PlayerRecord getOrLoad(String playerName, long now) throws IOException {
+        PlayerRecord cached = records.get(playerName);
+        if (cached != null) {
+            return cached;
+        }
+        PlayerRecord loaded = loadOrCreate(playerName, now);
+        records.put(playerName, loaded);
+        return loaded;
     }
 
     private PlayerRecord loadOrCreate(String playerName, long now) throws IOException {

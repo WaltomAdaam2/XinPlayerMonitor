@@ -36,6 +36,25 @@ class PlayerMonitorServiceTest {
     }
 
     @Test
+    void updatesLoadedRecordWithoutReadingTheFileAgain() throws Exception {
+        Path storageDirectory = temporaryDirectory.resolve("playermonitor");
+        PlayerMonitorService initialService = new PlayerMonitorService(storageDirectory);
+        initialService.initialize();
+        initialService.recordLogin("WaltomAdaam", 100L);
+
+        PlayerMonitorService service = new PlayerMonitorService(storageDirectory);
+        service.initialize();
+        service.getRecord("WaltomAdaam");
+        Path playerFile = storageDirectory.resolve("WaltomAdaam.json");
+        Files.writeString(playerFile, "{not valid json", StandardCharsets.UTF_8);
+
+        service.recordChat("WaltomAdaam", "cached message", 101L);
+
+        assertEquals(1, service.getRecord("WaltomAdaam").chatMessages.size());
+        assertTrue(Files.readString(playerFile, StandardCharsets.UTF_8).contains("cached message"));
+    }
+
+    @Test
     void listsStoredPlayerNamesForCommandCompletion() throws Exception {
         PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
         service.initialize();
