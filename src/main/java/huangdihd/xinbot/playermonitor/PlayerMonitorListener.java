@@ -5,11 +5,13 @@ import org.slf4j.Logger;
 import xin.bbtt.mcbot.Bot;
 import xin.bbtt.mcbot.Server;
 import xin.bbtt.mcbot.event.EventHandler;
+import xin.bbtt.mcbot.event.EventPriority;
 import xin.bbtt.mcbot.event.Listener;
 import xin.bbtt.mcbot.events.PlayerJoinEvent;
 import xin.bbtt.mcbot.events.PlayerLeaveEvent;
 import xin.bbtt.mcbot.events.PublicChatEvent;
 import xin.bbtt.mcbot.events.ServerChangeEvent;
+import xin.bbtt.mcbot.events.SendCommandEvent;
 import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.io.IOException;
@@ -31,6 +33,7 @@ final class PlayerMonitorListener implements Listener {
     private final MonitorSettingsStore settings;
     private final PublicPlayerQueryResponder publicQueries;
     private final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
+    private final Set<String> pendingStatDispatches = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
     private final Map<String, Integer> statAttempts = new ConcurrentHashMap<>();
     private final StatQueue statQueue;
@@ -52,13 +55,13 @@ final class PlayerMonitorListener implements Listener {
                 onlinePlayers::contains,
                 settings::statIntervalMillis,
                 command -> {
-                    Bot.INSTANCE.sendCommand(command);
                     String playerName = command.substring("stat ".length());
-                    statAttempts.merge(playerName, 1, Integer::sum);
-                    log.info("sent stat for " + playerName);
-                    logger.info("Sent stat for {}.", playerName);
+                    pendingStatDispatches.add(playerName);
+                    Bot.INSTANCE.sendCommand(command);
+                    log.info("queued stat for " + playerName);
                 },
-                statResponses::expect);
+                ignored -> {
+                });
         retryExecutor.scheduleWithFixedDelay(this::retryTimedOutStats, 100L, 100L, TimeUnit.MILLISECONDS);
     }
 
@@ -67,6 +70,7 @@ final class PlayerMonitorListener implements Listener {
         retryExecutor.shutdownNow();
         statResponses.clear();
         statAttempts.clear();
+        pendingStatDispatches.clear();
     }
 
     @EventHandler
@@ -76,6 +80,7 @@ final class PlayerMonitorListener implements Listener {
         statQueue.clear();
         statResponses.clear();
         statAttempts.clear();
+        pendingStatDispatches.clear();
         log.info(gameActive ? "entered Game; monitoring enabled" : "left Game; monitoring disabled");
         logger.info(gameActive
                 ? "Entered Game; started scanning online players."
@@ -109,6 +114,7 @@ final class PlayerMonitorListener implements Listener {
         String playerName = nameOf(event.getPlayerProfile());
         statResponses.cancel(playerName);
         statAttempts.remove(playerName);
+        pendingStatDispatches.remove(playerName);
         if (!onlinePlayers.remove(playerName)) {
             return;
         }
@@ -155,6 +161,29 @@ final class PlayerMonitorListener implements Listener {
                 log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
             }
         });
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onSendCommand(SendCommandEvent event) {
+        String command = event.getCommand();
+        if (command == null || !command.startsWith("stat ")) {
+            return;
+        }
+        String playerName = command.substring("stat ".length()).trim();
+        if (!pendingStatDispatches.contains(playerName)) {
+            return;
+        }
+        if (event.isDefaultActionCancelled()) {
+            pendingStatDispatches.remove(playerName);
+            log.info("stat command cancelled for " + playerName);
+            return;
+        }
+        if (pendingStatDispatches.remove(playerName)) {
+            statAttempts.merge(playerName, 1, Integer::sum);
+            statResponses.expect(playerName);
+            log.info("sent stat for " + playerName);
+            logger.info("Sent stat for {}.", playerName);
+        }
     }
 
     int scanAllOnlinePlayers() {
