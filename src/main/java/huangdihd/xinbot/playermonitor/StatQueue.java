@@ -1,9 +1,8 @@
 package huangdihd.xinbot.playermonitor;
 
-import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -14,7 +13,7 @@ import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 
 final class StatQueue {
-    private final Queue<String> pending = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedDeque<String> pending = new ConcurrentLinkedDeque<>();
     private final Set<String> pendingNames = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "XinPlayerMonitor-stat-queue");
@@ -40,7 +39,18 @@ final class StatQueue {
     boolean enqueue(String playerName) {
         boolean added = pendingNames.add(playerName);
         if (added) {
-            pending.add(playerName);
+            pending.addLast(playerName);
+        }
+        if (draining.compareAndSet(false, true)) {
+            executor.execute(this::drain);
+        }
+        return added;
+    }
+
+    boolean enqueueFirst(String playerName) {
+        boolean added = pendingNames.add(playerName);
+        if (added) {
+            pending.addFirst(playerName);
         }
         if (draining.compareAndSet(false, true)) {
             executor.execute(this::drain);

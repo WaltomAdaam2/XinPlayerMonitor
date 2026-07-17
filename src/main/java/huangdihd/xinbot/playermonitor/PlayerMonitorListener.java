@@ -103,7 +103,7 @@ final class PlayerMonitorListener implements Listener {
             recordLogin(playerName, System.currentTimeMillis());
         }
         if (settings.statScanEnabled()) {
-            statQueue.enqueue(playerName);
+            statQueue.enqueueFirst(playerName);
         }
     }
 
