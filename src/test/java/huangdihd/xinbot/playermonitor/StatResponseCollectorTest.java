@@ -33,6 +33,7 @@ class StatResponseCollectorTest {
         assertEquals("WaltomAdaam", captured.playerName());
         assertEquals(300, captured.snapshot().deathCount);
         assertEquals("已过期", captured.snapshot().priorityQueue);
+        assertEquals("✅ | ✅ | ✅", captured.snapshot().permissionsDisplay);
         assertFalse(captured.snapshot().permissions == null);
         assertEquals(List.of(), collector.expire());
     }

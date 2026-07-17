@@ -10,7 +10,7 @@ The plugin writes UTF-8 player files to `playermonitor/<player>.json` beside the
 playermonitor setting stat
 playermonitor setting stat scan
 playermonitor setting stat interval <ms>
-playermonitor setting stat auto <true|false>
+playermonitor setting stat autoscan <true|false>
 playermonitor setting stat enabled <true|false>
 playermonitor setting stat outputhide <true|false>
 playermonitor <name> stat

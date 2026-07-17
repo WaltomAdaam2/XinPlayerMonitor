@@ -10,6 +10,7 @@ public final class StatSnapshot {
     public String team;
     public String priorityQueue;
     public PlayerPermissions permissions = new PlayerPermissions();
+    public String permissionsDisplay;
 
     public StatSnapshot() {
     }

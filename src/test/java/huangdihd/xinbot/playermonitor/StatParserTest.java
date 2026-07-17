@@ -25,6 +25,7 @@ class StatParserTest {
         assertEquals(410, snapshot.killCount);
         assertEquals(975_596L, snapshot.playtimeSeconds);
         assertEquals("已过期", snapshot.priorityQueue);
+        assertEquals("✅ | ✅ | ✅", snapshot.permissionsDisplay);
         assertTrue(snapshot.permissions.greenText);
         assertTrue(snapshot.permissions.runMax);
         assertTrue(snapshot.permissions.dupe);

@@ -52,6 +52,7 @@ final class StatParser {
                 snapshot.priorityQueue = valueAfterColon(line);
             } else if (line.startsWith("特殊权限")) {
                 snapshot.permissions = permissions(line);
+                snapshot.permissionsDisplay = valueAfterColon(line);
             }
         }
         return Optional.of(snapshot);

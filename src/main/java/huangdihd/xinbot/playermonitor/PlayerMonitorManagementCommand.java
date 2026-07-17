@@ -23,9 +23,10 @@ import java.util.TreeSet;
 final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String DIM = "\u001B[90m";
     private static final String CYAN = "\u001B[36m";
+    private static final String YELLOW = "\u001B[33m";
+    private static final String RED = "\u001B[31m";
     private static final String RESET = "\u001B[0m";
     private static final String PLAYER_PLACEHOLDER = "<玩家名>";
-    private static final String BOOLEAN_PLACEHOLDER = "<true|false>";
     private static final String INTERVAL_PLACEHOLDER = "<ms>";
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
@@ -102,7 +103,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     settings.setStatIntervalMillis(interval);
                     print("Stat interval set to " + interval + "ms.");
                 }
-                case "auto" -> {
+                case "autoscan" -> {
                     boolean enabled = parseBoolean(args[3]);
                     settings.setAutoScanOnGameEntry(enabled);
                     print("Auto scan on Game entry set to " + enabled + ".");
@@ -167,12 +168,12 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return List.of();
         }
         if (args.length == 3) {
-            return matching(args[2], List.of("scan", "interval", "auto", "enabled", "outputhide"));
+            return matching(args[2], List.of("scan", "interval", "autoscan", "enabled", "outputhide"));
         }
         if (args.length == 4) {
             return switch (args[2].toLowerCase(Locale.ROOT)) {
                 case "interval" -> List.of(INTERVAL_PLACEHOLDER);
-                case "auto", "enabled", "outputhide" -> List.of(BOOLEAN_PLACEHOLDER);
+                case "autoscan", "enabled", "outputhide" -> matching(args[3], List.of("true", "false"));
                 default -> List.of();
             };
         }
@@ -222,24 +223,27 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void stat(PlayerRecord record) {
         if (record.statSnapshots.isEmpty()) {
-            report("Player stat", List.of("玩家: " + record.playerName, "暂无 stat 记录"));
+            print("暂无 stat 记录: " + record.playerName);
             return;
         }
         StatSnapshot snapshot = record.statSnapshots.get(record.statSnapshots.size() - 1);
         PlayerPermissions permissions = snapshot.permissions == null ? new PlayerPermissions() : snapshot.permissions;
         Integer deaths = snapshot.deathCount != null ? snapshot.deathCount : snapshot.onlineCount;
         String priority = snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
-        report("Player stat", List.of(
-                "玩家: " + record.playerName,
-                "记录时间: " + format(snapshot.capturedAt),
-                "加入游戏: " + value(snapshot.addedGameCount),
-                "死亡计数: " + value(deaths),
-                "击杀计数: " + value(snapshot.killCount),
-                "游戏时长: " + duration(snapshot.playtimeSeconds),
-                "优先队列: " + value(priority),
-                "特殊权限: 绿字 " + marker(permissions.greenText)
-                        + "  runmax " + marker(permissions.runMax)
-                        + "  dupe " + marker(permissions.dupe)));
+        print(CYAN + "----------------------" + RESET);
+        statField("玩家名称", record.playerName);
+        statField("加入游戏", value(snapshot.addedGameCount) + " 次");
+        statField("死亡计数", value(deaths) + " 次");
+        statField("击杀计数", value(snapshot.killCount) + " 人");
+        print(CYAN + "游戏时长: " + YELLOW + duration(snapshot.playtimeSeconds) + RESET);
+        String priorityColor = "已过期".equals(priority) ? RED : RESET;
+        print(CYAN + "优先队列: " + priorityColor + value(priority) + RESET);
+        statField("特殊权限", permissionsDisplay(snapshot, permissions));
+        print(CYAN + "----------------------" + RESET);
+    }
+
+    private void statField(String label, String value) {
+        print(CYAN + label + ": " + RESET + value);
     }
 
     private void latestLogin(PlayerRecord record) {
@@ -262,11 +266,12 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         int start = Math.max(0, record.loginSessions.size() - 15);
         for (int index = record.loginSessions.size() - 1; index >= start; index--) {
             LoginSession session = record.loginSessions.get(index);
-            lines.add("#" + (record.loginSessions.size() - index) + "  登录: " + format(session.loginAt)
-                    + "  时长: " + sessionDuration(session));
+            String line = "#" + (record.loginSessions.size() - index) + "  登录: " + format(session.loginAt)
+                    + "  时长: " + sessionDuration(session);
             if (session.logoutAt != null) {
-                lines.add("   登出: " + format(session.logoutAt));
+                line += "  登出: " + format(session.logoutAt);
             }
+            lines.add(line);
         }
         report("Recent logins", lines);
     }
@@ -290,17 +295,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private List<String> loginLines(String playerName, LoginSession session) {
         List<String> lines = new ArrayList<>();
         lines.add("玩家: " + playerName);
-        lines.add("最近登录: " + format(session.loginAt));
-        lines.add("游玩时长: " + sessionDuration(session));
+        String line = "最近登录: " + format(session.loginAt) + "  游玩时长: " + sessionDuration(session);
         if (session.logoutAt != null) {
-            lines.add("登出时间: " + format(session.logoutAt));
+            line += "  登出时间: " + format(session.logoutAt);
         }
+        lines.add(line);
         return lines;
     }
 
     private void report(String title, List<String> lines) {
-        print(DIM + "================================" + RESET);
-        print(CYAN + "  XinPlayerMonitor · " + title + RESET);
+        print(DIM + "===== " + CYAN + title + DIM + " =====" + RESET);
         print("");
         for (String line : lines) {
             int separator = Math.max(line.indexOf(':'), line.indexOf('：'));
@@ -314,7 +318,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void help() {
-        print("Usage: playermonitor setting stat [scan|interval <ms>|auto <true|false>|enabled <true|false>|outputhide <true|false>]");
+        print("Usage: playermonitor setting stat [scan|interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>]");
         playerHelp();
     }
 
@@ -352,6 +356,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private static String state(boolean value) {
         return value ? "true" : "false";
+    }
+
+    private static String permissionsDisplay(StatSnapshot snapshot, PlayerPermissions permissions) {
+        if (snapshot.permissionsDisplay != null && !snapshot.permissionsDisplay.isBlank()) {
+            return snapshot.permissionsDisplay;
+        }
+        return marker(permissions.greenText) + " | " + marker(permissions.runMax) + " | " + marker(permissions.dupe);
     }
 
     private static String marker(boolean value) {
