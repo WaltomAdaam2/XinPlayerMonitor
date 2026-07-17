@@ -21,6 +21,12 @@ playermonitor stat scan
 Only activity observed after XinBot enters the `Game` server state is recorded.
 Player-name completion combines stored records with XinBot's current Game player list.
 
+## Game chat query
+
+In the Game server, players can send `!player <name>` in public chat. The bot replies with the
+latest login, play duration, and (when available) logout time. XinPlayerMonitor accepts only one
+such query every 60 seconds globally; all public chat is still recorded during the cooldown.
+
 `playermonitor/settings.json` persists the stat interval (default `500ms`), whether a Game entry
 starts a full-player stat scan, and whether automatic stat scans are enabled. Disabling automatic
 stat scans does not disable `playermonitor stat scan`.

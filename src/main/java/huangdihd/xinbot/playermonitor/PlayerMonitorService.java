@@ -8,6 +8,7 @@ import huangdihd.xinbot.playermonitor.model.StatSnapshot;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 
 public final class PlayerMonitorService {
     private final PlayerRecordStore store;
@@ -46,6 +47,15 @@ public final class PlayerMonitorService {
 
     public PlayerRecord getRecord(String playerName) throws IOException {
         return store.read(playerName);
+    }
+
+    public Optional<PlayerRecord> findRecord(String playerName) throws IOException {
+        for (String storedName : store.listPlayerNames()) {
+            if (storedName.equalsIgnoreCase(playerName)) {
+                return store.find(storedName);
+            }
+        }
+        return Optional.empty();
     }
 
     public List<String> listPlayerNames() throws IOException {

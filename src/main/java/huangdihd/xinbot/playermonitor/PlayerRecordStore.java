@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Objects;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -34,6 +35,16 @@ final class PlayerRecordStore {
     PlayerRecord read(String playerName) throws IOException {
         synchronized (lockFor(playerName)) {
             return loadOrCreate(playerName, System.currentTimeMillis());
+        }
+    }
+
+    Optional<PlayerRecord> find(String playerName) throws IOException {
+        synchronized (lockFor(playerName)) {
+            Path path = pathFor(playerName);
+            if (!Files.exists(path)) {
+                return Optional.empty();
+            }
+            return Optional.of(loadOrCreate(playerName, System.currentTimeMillis()));
         }
     }
 

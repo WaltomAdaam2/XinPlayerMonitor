@@ -29,6 +29,7 @@ final class PlayerMonitorListener implements Listener {
     private final PluginLog log;
     private final Logger logger;
     private final MonitorSettingsStore settings;
+    private final PublicPlayerQueryResponder publicQueries;
     private final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
     private final Map<String, Integer> statAttempts = new ConcurrentHashMap<>();
@@ -45,6 +46,7 @@ final class PlayerMonitorListener implements Listener {
         this.log = log;
         this.logger = logger;
         this.settings = settings;
+        publicQueries = new PublicPlayerQueryResponder(service, Bot.INSTANCE::sendChatMessage, log);
         statQueue = new StatQueue(
                 () -> gameActive,
                 onlinePlayers::contains,
@@ -134,6 +136,7 @@ final class PlayerMonitorListener implements Listener {
         } catch (IOException error) {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }
+        publicQueries.handle(message);
     }
 
     @EventHandler
