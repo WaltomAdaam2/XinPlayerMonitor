@@ -24,7 +24,7 @@ Player-name completion starts after one typed character and uses an in-memory pl
 
 ## Game chat query
 
-In the Game server, players can send `!plcheck <name>` in public chat. The bot replies with the
+In the Game server, players can send `!player <name>` in public chat. Extra text after the player name is ignored, and every bot reply receives a random alphabetic suffix to avoid duplicate-message filtering. The bot replies with the
 latest login, play duration, and (when available) logout time. XinPlayerMonitor accepts only one
 such query every 60 seconds globally; all public chat is still recorded during the cooldown.
 

@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
@@ -17,7 +18,9 @@ import java.util.regex.Pattern;
 
 final class PublicPlayerQueryResponder {
     private static final long COOLDOWN_MILLIS = 60_000L;
-    private static final Pattern QUERY = Pattern.compile("^!plcheck\\s+(\\S+)\\s*$", Pattern.CASE_INSENSITIVE);
+    private static final int BYPASS_SUFFIX_LENGTH = 16;
+    private static final String BYPASS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    private static final Pattern QUERY = Pattern.compile("^!player\\s+(\\S+)(?:\\s+.*)?$", Pattern.CASE_INSENSITIVE);
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
 
@@ -46,14 +49,22 @@ final class PublicPlayerQueryResponder {
         String playerName = matcher.group(1);
         try {
             Optional<PlayerRecord> record = service.findRecord(playerName);
-            sender.accept(record.map(this::reply).orElseGet(() -> "未找到玩家 " + playerName + " 的记录。"));
+            sender.accept(withBypassSuffix(record.map(this::reply).orElseGet(() -> "未找到玩家 " + playerName + " 的记录。")));
             log.info("queued public player query reply for " + playerName);
         } catch (IOException error) {
-            sender.accept("查询玩家 " + playerName + " 的记录失败。" );
+            sender.accept(withBypassSuffix("查询玩家 " + playerName + " 的记录失败。" ));
             log.info("failed public player query for " + playerName + ": " + error.getMessage());
         }
     }
 
+    private static String withBypassSuffix(String reply) {
+        StringBuilder suffix = new StringBuilder(BYPASS_SUFFIX_LENGTH);
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        for (int index = 0; index < BYPASS_SUFFIX_LENGTH; index++) {
+            suffix.append(BYPASS_ALPHABET.charAt(random.nextInt(BYPASS_ALPHABET.length())));
+        }
+        return reply + " " + suffix;
+    }
     private boolean claimCooldown() {
         long now = clock.getAsLong();
         while (true) {

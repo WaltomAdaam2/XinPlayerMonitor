@@ -24,17 +24,21 @@ class PublicPlayerQueryResponderTest {
     @Test
     void repliesInChineseForOnlineAndOfflinePlayer() throws Exception {
         PlayerMonitorService service = service();
-        service.recordLogin("WaltomAdaam", 1_000L);
+        service.recordLogin("WaltomAdaam_", 1_000L);
         List<String> replies = new CopyOnWriteArrayList<>();
         AtomicLong now = new AtomicLong(3_000L);
         PublicPlayerQueryResponder responder = responder(service, replies, now);
 
-        responder.handle("!PlChEcK WaltomAdaam");
-        assertEquals(List.of("玩家 WaltomAdaam：最近登录 " + format(1_000L) + "，游玩时长 0小时0分2秒"), replies);
+        responder.handle("x!player WaltomAdaam_");
+        assertTrue(replies.isEmpty());
 
-        service.recordLogout("WaltomAdaam", 5_000L);
+        responder.handle("!PlAyEr WaltomAdaam_ 190u");
+        assertTrue(replies.get(0).contains(format(1_000L)));
+        assertTrue(replies.get(0).matches(".* [A-Za-z]{16}"));
+
+        service.recordLogout("WaltomAdaam_", 5_000L);
         now.addAndGet(60_001L);
-        responder.handle("!plcheck WaltomAdaam");
+        responder.handle("!player WaltomAdaam_");
         assertTrue(replies.get(1).contains("登出时间 " + format(5_000L)));
     }
 
@@ -45,10 +49,10 @@ class PublicPlayerQueryResponderTest {
         AtomicLong now = new AtomicLong(1_000L);
         PublicPlayerQueryResponder responder = responder(service, replies, now);
 
-        responder.handle("!plcheck _xinbot宣传");
-        responder.handle("!plcheck OtherPlayer");
-
-        assertEquals(List.of("未找到玩家 _xinbot宣传 的记录。"), replies);
+        responder.handle("!player _xinbot宣传");
+        responder.handle("!player OtherPlayer");
+        assertTrue(replies.get(0).contains("_xinbot宣传"));
+        assertTrue(replies.get(0).matches(".* [A-Za-z]{16}"));
         assertFalse(Files.exists(temporaryDirectory.resolve("playermonitor/_xinbot宣传.json")));
     }
 
@@ -63,7 +67,7 @@ class PublicPlayerQueryResponderTest {
                 .mapToObj(index -> new Thread(() -> {
                     try {
                         start.await();
-                        responder.handle("!plcheck Player" + index);
+                        responder.handle("!player Player" + index);
                     } catch (InterruptedException error) {
                         Thread.currentThread().interrupt();
                     }
