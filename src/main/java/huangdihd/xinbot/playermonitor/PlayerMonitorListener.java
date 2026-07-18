@@ -15,9 +15,11 @@ import xin.bbtt.mcbot.events.SendCommandEvent;
 import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -51,7 +53,7 @@ final class PlayerMonitorListener implements Listener {
         this.log = log;
         this.logger = logger;
         this.settings = settings;
-        publicQueries = new PublicPlayerQueryResponder(service, Bot.INSTANCE::sendChatMessage, log);
+        publicQueries = new PublicPlayerQueryResponder(service, this::queuePriorityPublicReply, log);
         statQueue = new StatQueue(
                 () -> gameActive,
                 onlinePlayers::contains,
@@ -159,7 +161,7 @@ final class PlayerMonitorListener implements Listener {
                 service.recordStat(captured.playerName(), captured.snapshot());
                 statAttempts.remove(captured.playerName());
                 log.info("recorded stat for " + captured.playerName());
-                logger.info("\u001B[32mRecorded stat for {}.\u001B[0m", captured.playerName());
+                logger.info("\u001B[94mRecorded stat for {}.\u001B[0m", captured.playerName());
             } catch (IOException error) {
                 log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
             }
@@ -244,6 +246,19 @@ final class PlayerMonitorListener implements Listener {
             log.info("failed to check stat cooldown for " + playerName + ": " + error.getMessage());
             return false;
         }
+    }
+
+    private void queuePriorityPublicReply(String message) {
+        Queue<String> outbound = Bot.INSTANCE.getToBeSentMessages();
+        List<String> pending = new ArrayList<>();
+        String queued;
+        while ((queued = outbound.poll()) != null) {
+            pending.add(queued);
+        }
+        outbound.add(message);
+        pending.forEach(outbound::add);
+        log.info("queued priority public player query reply");
+        logger.info("Queued priority public player query reply.");
     }
 
     private void retryTimedOutStats() {

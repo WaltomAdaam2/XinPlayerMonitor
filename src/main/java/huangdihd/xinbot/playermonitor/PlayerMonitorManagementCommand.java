@@ -327,6 +327,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(DIM + "===== " + CYAN + title + DIM + " =====" + RESET);
         print("");
         for (String line : lines) {
+            if (line.startsWith(YELLOW)) {
+                print("  " + line);
+                continue;
+            }
             int separator = Math.max(line.indexOf(':'), line.indexOf('：'));
             if (separator < 0) {
                 print("  " + line);
