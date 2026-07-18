@@ -42,7 +42,8 @@ final class PublicPlayerQueryResponder {
     }
 
     void handle(String message) {
-        Matcher matcher = QUERY.matcher(message);
+        String normalized = message == null ? "" : message.trim();
+        Matcher matcher = QUERY.matcher(normalized);
         if (!matcher.matches() || !claimCooldown()) {
             return;
         }

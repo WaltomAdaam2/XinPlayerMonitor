@@ -20,6 +20,9 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.TreeSet;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String DIM = "\u001B[90m";
     private static final String CYAN = "\u001B[36m";
@@ -28,6 +31,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String RESET = "\u001B[0m";
     private static final String PLAYER_PLACEHOLDER = "<玩家名>";
     private static final String INTERVAL_PLACEHOLDER = "<ms>";
+    private static final Pattern TIMESTAMP = Pattern.compile("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
 
@@ -327,16 +331,14 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(DIM + "===== " + CYAN + title + DIM + " =====" + RESET);
         print("");
         for (String line : lines) {
-            if (line.startsWith(YELLOW)) {
-                print("  " + line);
-                continue;
-            }
+            String rendered;
             int separator = Math.max(line.indexOf(':'), line.indexOf('：'));
             if (separator < 0) {
-                print("  " + line);
+                rendered = line;
             } else {
-                print("  " + CYAN + line.substring(0, separator + 1) + RESET + line.substring(separator + 1));
+                rendered = CYAN + line.substring(0, separator + 1) + RESET + line.substring(separator + 1);
             }
+            print("  " + highlightTimestamps(rendered));
         }
         print(DIM + "================================" + RESET);
     }
@@ -395,9 +397,18 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private static String format(long timestamp) {
-        return YELLOW + TIME.format(Instant.ofEpochMilli(timestamp)) + RESET;
+        return TIME.format(Instant.ofEpochMilli(timestamp));
     }
 
+    private static String highlightTimestamps(String line) {
+        Matcher matcher = TIMESTAMP.matcher(line);
+        StringBuffer output = new StringBuffer();
+        while (matcher.find()) {
+            matcher.appendReplacement(output, Matcher.quoteReplacement(YELLOW + matcher.group() + RESET));
+        }
+        matcher.appendTail(output);
+        return output.toString();
+    }
     private static String value(Object value) {
         return value == null ? "未知" : value.toString();
     }
