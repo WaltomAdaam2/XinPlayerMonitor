@@ -9,6 +9,7 @@ import xin.bbtt.mcbot.event.EventPriority;
 import xin.bbtt.mcbot.event.Listener;
 import xin.bbtt.mcbot.events.PlayerJoinEvent;
 import xin.bbtt.mcbot.events.PlayerLeaveEvent;
+import xin.bbtt.mcbot.events.DisconnectEvent;
 import xin.bbtt.mcbot.events.PublicChatEvent;
 import xin.bbtt.mcbot.events.ServerChangeEvent;
 import xin.bbtt.mcbot.events.SendCommandEvent;
@@ -22,12 +23,14 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 final class PlayerMonitorListener implements Listener {
     private static final int MAX_STAT_ATTEMPTS = 3;
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
     private static final long AUTOMATIC_STAT_COOLDOWN_MILLIS = TimeUnit.HOURS.toMillis(24L);
+    private static final long DISCONNECT_RECONCILIATION_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(10L);
 
     private final PlayerMonitorService service;
     private final PluginLog log;
@@ -45,6 +48,14 @@ final class PlayerMonitorListener implements Listener {
         return thread;
     });
     private volatile boolean gameActive;
+    private volatile boolean closed;
+    private volatile boolean reconnectPending;
+    private volatile boolean rosterReconciling;
+    private volatile boolean forceFreshRoster;
+    private volatile long disconnectAt;
+    private final Object connectionStateLock = new Object();
+    private final Set<String> disconnectedPlayers = ConcurrentHashMap.newKeySet();
+    private ScheduledFuture<?> disconnectFinalizer;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
         this.service = service;
@@ -68,6 +79,17 @@ final class PlayerMonitorListener implements Listener {
     }
 
     void close() {
+        synchronized (connectionStateLock) {
+            closed = true;
+            reconnectPending = false;
+            rosterReconciling = false;
+            forceFreshRoster = false;
+            disconnectedPlayers.clear();
+            if (disconnectFinalizer != null) {
+                disconnectFinalizer.cancel(false);
+                disconnectFinalizer = null;
+            }
+        }
         statQueue.close();
         retryExecutor.shutdownNow();
         statResponses.clear();
@@ -76,18 +98,49 @@ final class PlayerMonitorListener implements Listener {
     }
 
     @EventHandler
+    public void onDisconnect(DisconnectEvent event) {
+        if (closed || !beginReconnectWindow(System.currentTimeMillis())) {
+            return;
+        }
+        log.info("connection lost; waiting for Game roster reconciliation");
+        logger.info("Connection lost; waiting for Game roster reconciliation.");
+    }
+
+    @EventHandler
     public void onServerChange(ServerChangeEvent event) {
-        gameActive = event.getServer() == Server.Game;
-        onlinePlayers.clear();
-        statQueue.clear();
-        statResponses.clear();
-        statAttempts.clear();
-        pendingStatDispatches.clear();
-        log.info(gameActive ? "entered Game; monitoring enabled" : "left Game; monitoring disabled");
-        logger.info(gameActive
-                ? "Entered Game; started scanning online players."
-                : "Left Game; stopped monitoring player activity.");
-        if (gameActive && settings.autoScanOnGameEntry() && settings.statScanEnabled()) {
+        boolean enteringGame = event.getServer() == Server.Game;
+        if (!enteringGame) {
+            if (event.getCurrentServer() == Server.Game) {
+                beginReconnectWindow(System.currentTimeMillis());
+            } else {
+                gameActive = false;
+                onlinePlayers.clear();
+                clearStatTracking();
+            }
+            log.info("left Game; monitoring disabled");
+            logger.info("Left Game; stopped monitoring player activity.");
+            return;
+        }
+
+        long gameEntryAt = System.currentTimeMillis();
+        gameActive = true;
+        boolean resumed = reconcileAfterReconnect(gameEntryAt);
+        if (!resumed) {
+            onlinePlayers.clear();
+            clearStatTracking();
+            if (forceFreshRoster) {
+                recordFreshRoster(gameEntryAt);
+                forceFreshRoster = false;
+            }
+        }
+        log.info(resumed
+                ? "reconnected to Game; reconciled player roster"
+                : "entered Game; monitoring enabled");
+        logger.info(resumed
+                ? "Reconnected to Game; reconciled player roster."
+                : "Entered Game; started scanning online players.");
+
+        if (settings.autoScanOnGameEntry() && settings.statScanEnabled()) {
             StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), true);
             log.info("queued automatic stat scan for " + result.queued() + " online players");
             logger.info("Queued automatic stat scan for {} online players; skipped {} in cooldown.",
@@ -97,7 +150,7 @@ final class PlayerMonitorListener implements Listener {
 
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
-        if (!gameActive) {
+        if (!gameActive || reconnectPending || rosterReconciling) {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
@@ -111,7 +164,7 @@ final class PlayerMonitorListener implements Listener {
 
     @EventHandler
     public void onPlayerLeave(PlayerLeaveEvent event) {
-        if (!gameActive) {
+        if (!gameActive || reconnectPending || rosterReconciling) {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
@@ -208,6 +261,128 @@ final class PlayerMonitorListener implements Listener {
                 .toList();
     }
 
+    private boolean beginReconnectWindow(long now) {
+        synchronized (connectionStateLock) {
+            if (reconnectPending) {
+                return false;
+            }
+            disconnectAt = now;
+            disconnectedPlayers.clear();
+            disconnectedPlayers.addAll(onlinePlayers);
+            reconnectPending = true;
+            rosterReconciling = false;
+            if (disconnectFinalizer != null) {
+                disconnectFinalizer.cancel(false);
+            }
+            disconnectFinalizer = retryExecutor.schedule(
+                    () -> finalizeDisconnectedSessions(now),
+                    DISCONNECT_RECONCILIATION_TIMEOUT_MILLIS,
+                    TimeUnit.MILLISECONDS);
+        }
+        gameActive = false;
+        onlinePlayers.clear();
+        clearStatTracking();
+        return true;
+    }
+
+    private void recordFreshRoster(long gameEntryAt) {
+        Set<String> currentPlayers = Bot.INSTANCE.players.values().stream()
+                .map(PlayerMonitorListener::nameOf)
+                .filter(name -> name != null && !name.isBlank())
+                .collect(java.util.stream.Collectors.toSet());
+        onlinePlayers.addAll(currentPlayers);
+        for (String playerName : currentPlayers) {
+            recordLogin(playerName, gameEntryAt);
+        }
+    }
+
+    private void clearStatTracking() {
+        statQueue.clear();
+        statResponses.clear();
+        statAttempts.clear();
+        pendingStatDispatches.clear();
+    }
+
+    private boolean reconcileAfterReconnect(long gameEntryAt) {
+        Set<String> previousPlayers;
+        long lostAt;
+        synchronized (connectionStateLock) {
+            if (!reconnectPending) {
+                return false;
+            }
+            rosterReconciling = true;
+            previousPlayers = Set.copyOf(disconnectedPlayers);
+            lostAt = disconnectAt;
+        }
+
+        Set<String> currentPlayers = Bot.INSTANCE.players.values().stream()
+                .map(PlayerMonitorListener::nameOf)
+                .filter(name -> name != null && !name.isBlank())
+                .collect(java.util.stream.Collectors.toSet());
+
+        int continued = 0;
+        int loggedOut = 0;
+        int loggedIn = 0;
+        for (String playerName : previousPlayers) {
+            if (!currentPlayers.contains(playerName)) {
+                recordLogoutAt(playerName, lostAt);
+                loggedOut++;
+            } else {
+                continued++;
+            }
+        }
+        onlinePlayers.clear();
+        onlinePlayers.addAll(currentPlayers);
+        for (String playerName : currentPlayers) {
+            if (!previousPlayers.contains(playerName)) {
+                recordLogin(playerName, gameEntryAt);
+                loggedIn++;
+            }
+        }
+
+        synchronized (connectionStateLock) {
+            reconnectPending = false;
+            rosterReconciling = false;
+            disconnectedPlayers.clear();
+            if (disconnectFinalizer != null) {
+                disconnectFinalizer.cancel(false);
+                disconnectFinalizer = null;
+            }
+        }
+        log.info("reconciled Game roster: continued=" + continued
+                + ", loggedOut=" + loggedOut + ", loggedIn=" + loggedIn);
+        return true;
+    }
+
+    private void finalizeDisconnectedSessions(long expectedDisconnectAt) {
+        Set<String> playersToClose;
+        synchronized (connectionStateLock) {
+            if (!reconnectPending || disconnectAt != expectedDisconnectAt) {
+                return;
+            }
+            reconnectPending = false;
+            rosterReconciling = false;
+            forceFreshRoster = true;
+            playersToClose = Set.copyOf(disconnectedPlayers);
+            disconnectedPlayers.clear();
+            disconnectFinalizer = null;
+        }
+        onlinePlayers.clear();
+        for (String playerName : playersToClose) {
+            recordLogoutAt(playerName, expectedDisconnectAt);
+        }
+        log.info("finalized disconnected sessions after timeout");
+        logger.info("Finalized disconnected sessions after timeout.");
+    }
+
+    private void recordLogoutAt(String playerName, long timestamp) {
+        try {
+            service.recordLogout(playerName, timestamp);
+            log.info("recorded player " + playerName);
+        } catch (IOException error) {
+            log.info("failed to record player " + playerName + ": " + error.getMessage());
+        }
+    }
     private StatScanResult queueStatScan(Collection<GameProfile> profiles, boolean applyCooldown) {
         int queued = 0;
         int cooldownSkipped = 0;

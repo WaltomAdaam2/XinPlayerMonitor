@@ -65,6 +65,17 @@ class PlayerMonitorServiceTest {
 
         assertEquals(List.of("_xinbot宣传", "WaltomAdaam"), service.listPlayerNames());
     }
+
+    @Test
+    void doesNotWriteLogoutBeforeLoginTime() throws Exception {
+        PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
+        service.initialize();
+        service.recordLogin("WaltomAdaam", 500L);
+        service.recordLogout("WaltomAdaam", 100L);
+
+        assertEquals(500L, service.getRecord("WaltomAdaam").loginSessions.get(0).logoutAt);
+    }
+
     @Test
     void keepsOneOpenSessionAndSortsRecentLoginsByLoginTime() throws Exception {
         PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
