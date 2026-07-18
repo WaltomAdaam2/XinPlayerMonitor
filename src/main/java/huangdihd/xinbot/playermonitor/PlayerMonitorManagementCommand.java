@@ -31,6 +31,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String RESET = "\u001B[0m";
     private static final String PLAYER_PLACEHOLDER = "<玩家名>";
     private static final String INTERVAL_PLACEHOLDER = "<ms>";
+    private static final String MINUTES_PLACEHOLDER = "<min>";
     private static final Pattern TIMESTAMP = Pattern.compile("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
@@ -121,10 +122,15 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     settings.setStatOutputHidden(enabled);
                     print("Stat output hiding set to " + enabled + ".");
                 }
+                case "disconnecttimeout" -> {
+                    int minutes = parseMinutes(args[3]);
+                    settings.setDisconnectFinalizationMinutes(minutes);
+                    print("Disconnect finalization timeout set to " + minutes + "min.");
+                }
                 default -> help();
             }
         } catch (NumberFormatException error) {
-            print("请输入准确的正整数毫秒值。");
+            print("disconnecttimeout".equals(action) ? "请输入准确的正整数分钟值。" : "请输入准确的正整数毫秒值。");
         } catch (IllegalArgumentException error) {
             print(error.getMessage());
         } catch (IOException error) {
@@ -179,12 +185,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return List.of();
         }
         if (args.length == 3) {
-            return matching(args[2], List.of("interval", "autoscan", "enabled", "outputhide"));
+            return matching(args[2], List.of("interval", "autoscan", "enabled", "outputhide", "disconnecttimeout"));
         }
         if (args.length == 4) {
             return switch (args[2].toLowerCase(Locale.ROOT)) {
                 case "interval" -> List.of(INTERVAL_PLACEHOLDER);
                 case "autoscan", "enabled", "outputhide" -> matching(args[3], List.of("true", "false"));
+                case "disconnecttimeout" -> List.of(MINUTES_PLACEHOLDER);
                 default -> List.of();
             };
         }
@@ -233,7 +240,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 "扫描间隔: " + current.statIntervalMillis + " ms",
                 "进入 Game 自动扫描: " + state(current.autoScanOnGameEntry),
                 "自动 stat 扫描: " + state(current.statScanEnabled),
-                "隐藏服务器 stat 输出: " + state(current.statOutputHidden)));
+                "隐藏服务器 stat 输出: " + state(current.statOutputHidden),
+                "断线会话收尾: " + current.disconnectFinalizationMinutes + " min"));
     }
 
     private void scan() {
@@ -254,7 +262,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         PlayerPermissions permissions = snapshot.permissions == null ? new PlayerPermissions() : snapshot.permissions;
         Integer deaths = snapshot.deathCount != null ? snapshot.deathCount : snapshot.onlineCount;
         String priority = snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
-        print(CYAN + "----------------------" + RESET);
+        print(DIM + "===== " + CYAN + "Player stat" + DIM + " =====" + RESET);
         statField("玩家名称", record.playerName);
         statField("加入游戏", value(snapshot.addedGameCount) + " 次");
         statField("死亡计数", value(deaths) + " 次");
@@ -263,7 +271,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         String priorityColor = "已过期".equals(priority) ? RED : RESET;
         print(CYAN + "优先队列: " + priorityColor + value(priority) + RESET);
         statField("特殊权限", permissionsDisplay(snapshot, permissions));
-        print(CYAN + "----------------------" + RESET);
+        print(DIM + "================================" + RESET);
     }
 
     private void statField(String label, String value) {
@@ -332,11 +340,15 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print("");
         for (String line : lines) {
             String rendered;
-            int separator = Math.max(line.indexOf(':'), line.indexOf('：'));
-            if (separator < 0) {
+            if (TIMESTAMP.matcher(line).lookingAt()) {
                 rendered = line;
             } else {
-                rendered = CYAN + line.substring(0, separator + 1) + RESET + line.substring(separator + 1);
+                int separator = Math.max(line.indexOf(':'), line.indexOf('：'));
+                if (separator < 0) {
+                    rendered = line;
+                } else {
+                    rendered = CYAN + line.substring(0, separator + 1) + RESET + line.substring(separator + 1);
+                }
             }
             print("  " + highlightTimestamps(rendered));
         }
@@ -344,7 +356,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void help() {
-        print("Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>]");
+        print("Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>|disconnecttimeout <min>]");
         print("Usage: playermonitor stat scan");
         playerHelp();
     }
@@ -370,6 +382,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         };
     }
 
+    private static int parseMinutes(String value) {
+        if (MINUTES_PLACEHOLDER.equals(value)) {
+            throw new NumberFormatException(value);
+        }
+        int minutes = Integer.parseInt(value);
+        if (minutes <= 0) {
+            throw new NumberFormatException(value);
+        }
+        return minutes;
+    }
     private static int parseInterval(String value) {
         if (INTERVAL_PLACEHOLDER.equals(value)) {
             throw new NumberFormatException(value);

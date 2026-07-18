@@ -35,6 +35,7 @@ final class MonitorSettingsStore {
             }
         }
         validate(settings.statIntervalMillis);
+        validateMinutes(settings.disconnectFinalizationMinutes);
         write();
     }
 
@@ -58,6 +59,10 @@ final class MonitorSettingsStore {
         return settings.statOutputHidden;
     }
 
+    synchronized int disconnectFinalizationMinutes() {
+        return settings.disconnectFinalizationMinutes;
+    }
+
     synchronized void setStatIntervalMillis(int value) throws IOException {
         validate(value);
         settings.statIntervalMillis = value;
@@ -79,6 +84,12 @@ final class MonitorSettingsStore {
         write();
     }
 
+    synchronized void setDisconnectFinalizationMinutes(int value) throws IOException {
+        validateMinutes(value);
+        settings.disconnectFinalizationMinutes = value;
+        write();
+    }
+
     private void write() throws IOException {
         Path temporary = Files.createTempFile(directory, "settings.", ".tmp");
         try (Writer writer = Files.newBufferedWriter(temporary, StandardCharsets.UTF_8)) {
@@ -94,6 +105,12 @@ final class MonitorSettingsStore {
     private static void validate(int intervalMillis) {
         if (intervalMillis <= 0) {
             throw new IllegalArgumentException("Stat interval must be greater than 0 ms");
+        }
+    }
+
+    private static void validateMinutes(int minutes) {
+        if (minutes <= 0) {
+            throw new IllegalArgumentException("Disconnect finalization time must be greater than 0 minutes");
         }
     }
 }

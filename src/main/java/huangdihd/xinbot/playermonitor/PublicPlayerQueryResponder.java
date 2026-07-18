@@ -44,7 +44,11 @@ final class PublicPlayerQueryResponder {
     void handle(String message) {
         String normalized = message == null ? "" : message.trim();
         Matcher matcher = QUERY.matcher(normalized);
-        if (!matcher.matches() || !claimCooldown()) {
+        if (!matcher.matches()) {
+            return;
+        }
+        if (!claimCooldown()) {
+            log.info("ignored public player query during cooldown");
             return;
         }
         String playerName = matcher.group(1);

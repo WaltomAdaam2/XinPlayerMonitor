@@ -30,7 +30,6 @@ final class PlayerMonitorListener implements Listener {
     private static final int MAX_STAT_ATTEMPTS = 3;
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
     private static final long AUTOMATIC_STAT_COOLDOWN_MILLIS = TimeUnit.HOURS.toMillis(24L);
-    private static final long DISCONNECT_RECONCILIATION_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(10L);
 
     private final PlayerMonitorService service;
     private final PluginLog log;
@@ -55,6 +54,7 @@ final class PlayerMonitorListener implements Listener {
     private volatile long disconnectAt;
     private final Object connectionStateLock = new Object();
     private final Set<String> disconnectedPlayers = ConcurrentHashMap.newKeySet();
+    private final Set<String> reconnectedNewPlayers = ConcurrentHashMap.newKeySet();
     private ScheduledFuture<?> disconnectFinalizer;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
@@ -85,6 +85,7 @@ final class PlayerMonitorListener implements Listener {
             rosterReconciling = false;
             forceFreshRoster = false;
             disconnectedPlayers.clear();
+            reconnectedNewPlayers.clear();
             if (disconnectFinalizer != null) {
                 disconnectFinalizer.cancel(false);
                 disconnectFinalizer = null;
@@ -139,6 +140,13 @@ final class PlayerMonitorListener implements Listener {
         logger.info(resumed
                 ? "Reconnected to Game; reconciled player roster."
                 : "Entered Game; started scanning online players.");
+
+        if (resumed && settings.statScanEnabled()) {
+            for (String playerName : reconnectedNewPlayers) {
+                enqueueAutomaticJoinStat(playerName);
+            }
+            reconnectedNewPlayers.clear();
+        }
 
         if (settings.autoScanOnGameEntry() && settings.statScanEnabled()) {
             StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), true);
@@ -276,7 +284,7 @@ final class PlayerMonitorListener implements Listener {
             }
             disconnectFinalizer = retryExecutor.schedule(
                     () -> finalizeDisconnectedSessions(now),
-                    DISCONNECT_RECONCILIATION_TIMEOUT_MILLIS,
+                    TimeUnit.MINUTES.toMillis(settings.disconnectFinalizationMinutes()),
                     TimeUnit.MILLISECONDS);
         }
         gameActive = false;
@@ -323,6 +331,7 @@ final class PlayerMonitorListener implements Listener {
         int continued = 0;
         int loggedOut = 0;
         int loggedIn = 0;
+        reconnectedNewPlayers.clear();
         for (String playerName : previousPlayers) {
             if (!currentPlayers.contains(playerName)) {
                 recordLogoutAt(playerName, lostAt);
@@ -336,6 +345,7 @@ final class PlayerMonitorListener implements Listener {
         for (String playerName : currentPlayers) {
             if (!previousPlayers.contains(playerName)) {
                 recordLogin(playerName, gameEntryAt);
+                reconnectedNewPlayers.add(playerName);
                 loggedIn++;
             }
         }

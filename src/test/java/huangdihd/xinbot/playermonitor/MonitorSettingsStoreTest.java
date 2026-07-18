@@ -21,6 +21,7 @@ class MonitorSettingsStoreTest {
         settings.setAutoScanOnGameEntry(false);
         settings.setStatScanEnabled(false);
         settings.setStatOutputHidden(false);
+        settings.setDisconnectFinalizationMinutes(7);
 
         MonitorSettingsStore loaded = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         loaded.initialize();
@@ -30,6 +31,7 @@ class MonitorSettingsStoreTest {
         assertFalse(current.autoScanOnGameEntry);
         assertFalse(current.statScanEnabled);
         assertFalse(current.statOutputHidden);
+        assertEquals(7, current.disconnectFinalizationMinutes);
         assertTrue(java.nio.file.Files.exists(temporaryDirectory.resolve("playermonitor/settings.json")));
     }
 }
