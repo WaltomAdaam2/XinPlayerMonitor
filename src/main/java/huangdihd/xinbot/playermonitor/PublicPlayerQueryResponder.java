@@ -71,7 +71,7 @@ final class PublicPlayerQueryResponder {
         if (record.loginSessions.isEmpty()) {
             return "玩家 " + record.playerName + " 暂无登录记录。";
         }
-        LoginSession session = record.loginSessions.get(record.loginSessions.size() - 1);
+        LoginSession session = service.latestLogin(record).orElseThrow();
         long end = session.logoutAt == null ? clock.getAsLong() : session.logoutAt;
         String result = "玩家 " + record.playerName + "：最近登录 " + TIME.format(Instant.ofEpochMilli(session.loginAt))
                 + "，游玩时长 " + duration(Duration.ofMillis(Math.max(0L, end - session.loginAt)).getSeconds());

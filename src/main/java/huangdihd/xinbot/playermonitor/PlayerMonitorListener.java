@@ -159,7 +159,7 @@ final class PlayerMonitorListener implements Listener {
                 service.recordStat(captured.playerName(), captured.snapshot());
                 statAttempts.remove(captured.playerName());
                 log.info("recorded stat for " + captured.playerName());
-                logger.info("Recorded stat for {}.", captured.playerName());
+                logger.info("\u001B[32mRecorded stat for {}.\u001B[0m", captured.playerName());
             } catch (IOException error) {
                 log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
             }

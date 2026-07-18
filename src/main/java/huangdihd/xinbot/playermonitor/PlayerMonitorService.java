@@ -7,6 +7,7 @@ import huangdihd.xinbot.playermonitor.model.StatSnapshot;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -22,17 +23,24 @@ public final class PlayerMonitorService {
     }
 
     public void recordLogin(String playerName, long now) throws IOException {
-        store.update(playerName, now, record -> record.loginSessions.add(new LoginSession(now)));
+        store.update(playerName, now, record -> {
+            for (LoginSession session : record.loginSessions) {
+                if (session.logoutAt == null) {
+                    session.logoutAt = Math.max(session.loginAt, now);
+                }
+            }
+            record.loginSessions.add(new LoginSession(now));
+        });
     }
 
     public void recordLogout(String playerName, long now) throws IOException {
         store.update(playerName, now, record -> {
-            for (int index = record.loginSessions.size() - 1; index >= 0; index--) {
-                LoginSession session = record.loginSessions.get(index);
-                if (session.logoutAt == null) {
-                    session.logoutAt = now;
-                    return;
-                }
+            LoginSession latestOpen = record.loginSessions.stream()
+                    .filter(session -> session.logoutAt == null)
+                    .max(Comparator.comparingLong(session -> session.loginAt))
+                    .orElse(null);
+            if (latestOpen != null) {
+                latestOpen.logoutAt = Math.max(latestOpen.loginAt, now);
             }
         });
     }
@@ -70,6 +78,21 @@ public final class PlayerMonitorService {
             }
         }
         return false;
+    }
+
+    public Optional<LoginSession> latestLogin(PlayerRecord record) {
+        return record.loginSessions.stream()
+                .max(Comparator.comparingLong(session -> session.loginAt));
+    }
+
+    public List<LoginSession> recentLogins(PlayerRecord record, int maximum) {
+        if (maximum <= 0) {
+            return List.of();
+        }
+        return record.loginSessions.stream()
+                .sorted(Comparator.comparingLong((LoginSession session) -> session.loginAt).reversed())
+                .limit(maximum)
+                .toList();
     }
 
     public List<String> listPlayerNames() throws IOException {

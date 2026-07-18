@@ -7,9 +7,11 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerMonitorServiceTest {
@@ -62,5 +64,23 @@ class PlayerMonitorServiceTest {
         service.recordLogin("_xinbot宣传", 100L);
 
         assertEquals(List.of("_xinbot宣传", "WaltomAdaam"), service.listPlayerNames());
+    }
+    @Test
+    void keepsOneOpenSessionAndSortsRecentLoginsByLoginTime() throws Exception {
+        PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
+        service.initialize();
+        service.recordLogin("WaltomAdaam", 100L);
+        service.recordLogin("WaltomAdaam", 200L);
+        service.recordLogin("WaltomAdaam", 300L);
+
+        PlayerRecord record = service.getRecord("WaltomAdaam");
+        assertEquals(200L, record.loginSessions.get(0).logoutAt);
+        assertEquals(300L, record.loginSessions.get(1).logoutAt);
+        assertNull(record.loginSessions.get(2).logoutAt);
+
+        Collections.swap(record.loginSessions, 0, 2);
+        assertEquals(List.of(300L, 200L, 100L), service.recentLogins(record, 15).stream()
+                .map(session -> session.loginAt)
+                .toList());
     }
 }

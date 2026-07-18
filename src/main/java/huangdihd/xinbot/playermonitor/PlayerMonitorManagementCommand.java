@@ -271,7 +271,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             report("Latest login", List.of("玩家: " + record.playerName, "暂无登录记录"));
             return;
         }
-        LoginSession session = record.loginSessions.get(record.loginSessions.size() - 1);
+        LoginSession session = service.latestLogin(record).orElseThrow();
         report("Latest login", loginLines(record.playerName, session));
     }
 
@@ -283,10 +283,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         List<String> lines = new ArrayList<>();
         lines.add("玩家: " + record.playerName);
         lines.add("显示最近 " + Math.min(15, record.loginSessions.size()) + " / " + record.loginSessions.size() + " 次登录");
-        int start = Math.max(0, record.loginSessions.size() - 15);
-        for (int index = record.loginSessions.size() - 1; index >= start; index--) {
-            LoginSession session = record.loginSessions.get(index);
-            String line = "#" + (record.loginSessions.size() - index) + "  登录: " + format(session.loginAt)
+        List<LoginSession> sessions = service.recentLogins(record, 15);
+        for (int index = 0; index < sessions.size(); index++) {
+            LoginSession session = sessions.get(index);
+            String line = "#" + (index + 1) + "  登录: " + format(session.loginAt)
                     + "  时长: " + sessionDuration(session);
             if (session.logoutAt != null) {
                 line += "  登出: " + format(session.logoutAt);
@@ -391,7 +391,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private static String format(long timestamp) {
-        return TIME.format(Instant.ofEpochMilli(timestamp));
+        return YELLOW + TIME.format(Instant.ofEpochMilli(timestamp)) + RESET;
     }
 
     private static String value(Object value) {
