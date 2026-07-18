@@ -34,7 +34,7 @@ class PublicPlayerQueryResponderTest {
 
         responder.handle("!PlAyEr WaltomAdaam_ 190u");
         assertTrue(replies.get(0).contains(format(1_000L)));
-        assertTrue(replies.get(0).matches(".* [A-Za-z]{16}"));
+        assertTrue(replies.get(0).matches(".* [A-Za-z]{3}"));
 
         service.recordLogout("WaltomAdaam_", 5_000L);
         now.addAndGet(60_001L);
@@ -52,7 +52,7 @@ class PublicPlayerQueryResponderTest {
         responder.handle("!player _xinbot宣传");
         responder.handle("!player OtherPlayer");
         assertTrue(replies.get(0).contains("_xinbot宣传"));
-        assertTrue(replies.get(0).matches(".* [A-Za-z]{16}"));
+        assertTrue(replies.get(0).matches(".* [A-Za-z]{3}"));
         assertFalse(Files.exists(temporaryDirectory.resolve("playermonitor/_xinbot宣传.json")));
     }
 

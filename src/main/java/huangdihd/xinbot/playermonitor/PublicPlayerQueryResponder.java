@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
 
 final class PublicPlayerQueryResponder {
     private static final long COOLDOWN_MILLIS = 60_000L;
-    private static final int BYPASS_SUFFIX_LENGTH = 16;
+    private static final int BYPASS_SUFFIX_LENGTH = 3;
     private static final String BYPASS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     private static final Pattern QUERY = Pattern.compile("^!player\\s+(\\S+)(?:\\s+.*)?$", Pattern.CASE_INSENSITIVE);
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
