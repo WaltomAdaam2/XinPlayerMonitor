@@ -5,6 +5,7 @@ import waltomadaam2.xinbot.playermonitor.model.LoginSession;
 import waltomadaam2.xinbot.playermonitor.model.PlayerPermissions;
 import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
 import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
+import org.jline.utils.AttributedStyle;
 import org.slf4j.Logger;
 import xin.bbtt.mcbot.command.Command;
 import xin.bbtt.mcbot.command.TabExecutor;
@@ -29,9 +30,18 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String YELLOW = "\u001B[33m";
     private static final String RED = "\u001B[31m";
     private static final String RESET = "\u001B[0m";
-    private static final String PLAYER_PLACEHOLDER = "<玩家名>";
+    private static final String COMMAND_COLOR = "\u001B[38;2;255;192;103m";
+    private static final String SETTING_ITEM_COLOR = "\u001B[38;2;247;220;239m";
+    private static final String PLAYER_COLOR = "\u001B[38;2;46;111;64m";
+    private static final String SUBCOMMAND_COLOR = "\u001B[38;2;250;235;215m";
+    private static final AttributedStyle SETTING_ITEM_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xF7DCEF);
+    private static final AttributedStyle PLAYER_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x2E6F40);
+    private static final AttributedStyle SUBCOMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFAEBD7);
+    static final String PLAYER_PLACEHOLDER = "<玩家名>";
     private static final String INTERVAL_PLACEHOLDER = "<ms>";
     private static final String MINUTES_PLACEHOLDER = "<min>";
+    private static final List<String> PLAYER_ACTIONS = List.of("stat", "latestlogin", "recentlogin", "chat");
+    private static final List<String> SETTING_ITEMS = List.of("interval", "autoscan", "enabled", "outputhide", "disconnecttimeout");
     private static final Pattern TIMESTAMP = Pattern.compile("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
@@ -81,9 +91,19 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return completePlayerNames(args[0]);
         }
         if (args.length == 2) {
-            return matching(args[1], List.of("stat", "latestlogin", "recentlogin", "chat"));
+            return matching(args[1], PLAYER_ACTIONS);
         }
         return List.of();
+    }
+
+    @Override
+    public AttributedStyle[] onHighlight(Command command, String label, String[] args) {
+        String[] effectiveArgs = args == null ? new String[0] : args;
+        AttributedStyle[] styles = new AttributedStyle[effectiveArgs.length];
+        for (int index = 0; index < effectiveArgs.length; index++) {
+            styles[index] = styleForArgument(effectiveArgs, index);
+        }
+        return styles;
     }
 
     private void setting(String[] args) {
@@ -185,7 +205,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return List.of();
         }
         if (args.length == 3) {
-            return matching(args[2], List.of("interval", "autoscan", "enabled", "outputhide", "disconnecttimeout"));
+            return matching(args[2], SETTING_ITEMS);
         }
         if (args.length == 4) {
             return switch (args[2].toLowerCase(Locale.ROOT)) {
@@ -356,13 +376,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void help() {
-        print("Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>|disconnecttimeout <min>]");
-        print("Usage: playermonitor stat scan");
+        print(colorUsage("Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>|disconnecttimeout <min>]"));
+        print(colorUsage("Usage: playermonitor stat scan"));
         playerHelp();
     }
 
     private void playerHelp() {
-        print("Usage: playermonitor <玩家名> [stat|latestlogin|recentlogin|chat]");
+        print(colorUsage("Usage: playermonitor " + PLAYER_PLACEHOLDER + " [stat|latestlogin|recentlogin|chat]"));
     }
 
     private void print(String message) {
@@ -372,6 +392,50 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static List<String> matching(String input, List<String> values) {
         String prefix = input == null ? "" : input.toLowerCase(Locale.ROOT);
         return values.stream().filter(value -> value.startsWith(prefix)).toList();
+    }
+
+    static AttributedStyle styleForArgument(String[] args, int index) {
+        if (args == null || index < 0 || index >= args.length) {
+            return AttributedStyle.DEFAULT;
+        }
+        String value = args[index] == null ? "" : args[index].toLowerCase(Locale.ROOT);
+        if (index == 0) {
+            if ("setting".equals(value) || "stat".equals(value)) {
+                return SUBCOMMAND_STYLE;
+            }
+            return PLAYER_STYLE;
+        }
+        String root = args[0] == null ? "" : args[0].toLowerCase(Locale.ROOT);
+        if ("setting".equals(root)) {
+            if (index == 1 && "stat".equals(value)) {
+                return SUBCOMMAND_STYLE;
+            }
+            if (index == 2 && SETTING_ITEMS.contains(value)) {
+                return SETTING_ITEM_STYLE;
+            }
+            return AttributedStyle.DEFAULT;
+        }
+        if ("stat".equals(root)) {
+            return "scan".equals(value) ? SUBCOMMAND_STYLE : AttributedStyle.DEFAULT;
+        }
+        return index == 1 && PLAYER_ACTIONS.contains(value) ? SUBCOMMAND_STYLE : AttributedStyle.DEFAULT;
+    }
+
+    private static String colorUsage(String usage) {
+        return usage
+                .replace("playermonitor", COMMAND_COLOR + "playermonitor" + RESET)
+                .replace(PLAYER_PLACEHOLDER, PLAYER_COLOR + PLAYER_PLACEHOLDER + RESET)
+                .replace("setting", SUBCOMMAND_COLOR + "setting" + RESET)
+                .replace("interval", SETTING_ITEM_COLOR + "interval" + RESET)
+                .replace("autoscan", SETTING_ITEM_COLOR + "autoscan" + RESET)
+                .replace("enabled", SETTING_ITEM_COLOR + "enabled" + RESET)
+                .replace("outputhide", SETTING_ITEM_COLOR + "outputhide" + RESET)
+                .replace("disconnecttimeout", SETTING_ITEM_COLOR + "disconnecttimeout" + RESET)
+                .replace("latestlogin", SUBCOMMAND_COLOR + "latestlogin" + RESET)
+                .replace("recentlogin", SUBCOMMAND_COLOR + "recentlogin" + RESET)
+                .replace("chat", SUBCOMMAND_COLOR + "chat" + RESET)
+                .replace("stat", SUBCOMMAND_COLOR + "stat" + RESET)
+                .replace("scan", SUBCOMMAND_COLOR + "scan" + RESET);
     }
 
     private static boolean parseBoolean(String value) {
