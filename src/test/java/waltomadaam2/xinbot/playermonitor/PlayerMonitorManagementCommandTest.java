@@ -32,7 +32,21 @@ class PlayerMonitorManagementCommandTest {
         assertStyle(0xFAEBD7, PlayerMonitorManagementCommand.styleForArgument(args, 1));
     }
 
+
+    @Test
+    void colorsUsageWithoutRecoloringNestedScanText() {
+        String colored = PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor setting stat autoscan scan");
+
+        assertEquals(1, count(colored, "38;2;247;220;239mautoscan"));
+        assertEquals(1, count(colored, "38;2;250;235;215mscan"));
+        assertEquals(0, count(colored, "autos\u001B"));
+    }
+
     private static void assertStyle(int rgb, AttributedStyle actual) {
         assertEquals(AttributedStyle.DEFAULT.foregroundRgb(rgb).getStyle(), actual.getStyle());
+    }
+
+    private static int count(String text, String needle) {
+        return text.split(java.util.regex.Pattern.quote(needle), -1).length - 1;
     }
 }

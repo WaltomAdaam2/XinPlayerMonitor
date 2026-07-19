@@ -43,6 +43,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final List<String> PLAYER_ACTIONS = List.of("stat", "latestlogin", "recentlogin", "chat");
     private static final List<String> SETTING_ITEMS = List.of("interval", "autoscan", "enabled", "outputhide", "disconnecttimeout");
     private static final Pattern TIMESTAMP = Pattern.compile("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
+    private static final Pattern USAGE_TOKEN = Pattern.compile("playermonitor|disconnecttimeout|latestlogin|recentlogin|outputhide|autoscan|interval|enabled|setting|stat|scan|chat|" + Pattern.quote(PLAYER_PLACEHOLDER));
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
 
@@ -421,21 +422,28 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return index == 1 && PLAYER_ACTIONS.contains(value) ? SUBCOMMAND_STYLE : AttributedStyle.DEFAULT;
     }
 
-    private static String colorUsage(String usage) {
-        return usage
-                .replace("playermonitor", COMMAND_COLOR + "playermonitor" + RESET)
-                .replace(PLAYER_PLACEHOLDER, PLAYER_COLOR + PLAYER_PLACEHOLDER + RESET)
-                .replace("setting", SUBCOMMAND_COLOR + "setting" + RESET)
-                .replace("interval", SETTING_ITEM_COLOR + "interval" + RESET)
-                .replace("autoscan", SETTING_ITEM_COLOR + "autoscan" + RESET)
-                .replace("enabled", SETTING_ITEM_COLOR + "enabled" + RESET)
-                .replace("outputhide", SETTING_ITEM_COLOR + "outputhide" + RESET)
-                .replace("disconnecttimeout", SETTING_ITEM_COLOR + "disconnecttimeout" + RESET)
-                .replace("latestlogin", SUBCOMMAND_COLOR + "latestlogin" + RESET)
-                .replace("recentlogin", SUBCOMMAND_COLOR + "recentlogin" + RESET)
-                .replace("chat", SUBCOMMAND_COLOR + "chat" + RESET)
-                .replace("stat", SUBCOMMAND_COLOR + "stat" + RESET)
-                .replace("scan", SUBCOMMAND_COLOR + "scan" + RESET);
+    static String colorUsage(String usage) {
+        Matcher matcher = USAGE_TOKEN.matcher(usage);
+        StringBuffer output = new StringBuffer();
+        while (matcher.find()) {
+            String token = matcher.group();
+            matcher.appendReplacement(output, Matcher.quoteReplacement(colorToken(token)));
+        }
+        matcher.appendTail(output);
+        return output.toString();
+    }
+
+    private static String colorToken(String token) {
+        if ("playermonitor".equals(token)) {
+            return COMMAND_COLOR + token + RESET;
+        }
+        if (PLAYER_PLACEHOLDER.equals(token)) {
+            return PLAYER_COLOR + token + RESET;
+        }
+        if (SETTING_ITEMS.contains(token)) {
+            return SETTING_ITEM_COLOR + token + RESET;
+        }
+        return SUBCOMMAND_COLOR + token + RESET;
     }
 
     private static boolean parseBoolean(String value) {
