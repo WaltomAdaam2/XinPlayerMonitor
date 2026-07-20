@@ -5,6 +5,7 @@ import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -15,8 +16,9 @@ final class StatResponseCollector {
     private static final Pattern HEADER = Pattern.compile("^玩家名称\\s*[:：]\\s*(.+?)\\s*$");
     private static final Pattern SEPARATOR = Pattern.compile("-{10,}");
 
-    private final Map<String, Long> expectedPlayers = new LinkedHashMap<>();
+    private final Map<String, Expectation> expectedPlayers = new LinkedHashMap<>();
     private final long requestTimeoutMillis;
+    private String activeKey;
     private String activePlayer;
     private List<String> activeLines;
     private boolean activeHasPermissions;
@@ -30,7 +32,8 @@ final class StatResponseCollector {
     }
 
     synchronized void expect(String playerName) {
-        expectedPlayers.put(playerName, System.currentTimeMillis() + requestTimeoutMillis);
+        expectedPlayers.put(normalize(playerName),
+                new Expectation(playerName, System.currentTimeMillis() + requestTimeoutMillis));
     }
 
     synchronized Optional<CapturedStat> accept(String text) {
@@ -40,11 +43,10 @@ final class StatResponseCollector {
             if (header.matches()) {
                 String playerName = expectedName(header.group(1));
                 if (playerName == null) {
-                    activePlayer = null;
-                    activeLines = null;
-                    activeHasPermissions = false;
+                    resetActiveResponse();
                     continue;
                 }
+                activeKey = normalize(playerName);
                 activePlayer = playerName;
                 activeLines = new ArrayList<>();
                 activeHasPermissions = false;
@@ -59,12 +61,11 @@ final class StatResponseCollector {
             }
             if (activeHasPermissions && SEPARATOR.matcher(trimmed).matches()) {
                 Optional<StatSnapshot> snapshot = StatParser.parse(activePlayer, activeLines, System.currentTimeMillis());
+                String completedKey = activeKey;
                 String completedPlayer = activePlayer;
-                activePlayer = null;
-                activeLines = null;
-                activeHasPermissions = false;
+                resetActiveResponse();
                 if (snapshot.isPresent()) {
-                    expectedPlayers.remove(completedPlayer);
+                    expectedPlayers.remove(completedKey);
                     return Optional.of(new CapturedStat(completedPlayer, snapshot.get()));
                 }
             }
@@ -76,38 +77,61 @@ final class StatResponseCollector {
         long now = System.currentTimeMillis();
         List<String> expired = new ArrayList<>();
         expectedPlayers.entrySet().removeIf(entry -> {
-            if (entry.getValue() > now) {
+            if (entry.getValue().expiresAt > now) {
                 return false;
             }
-            expired.add(entry.getKey());
+            String displayName = entry.getValue().displayName;
+            expired.add(displayName);
+            if (normalize(displayName).equals(activeKey)) {
+                resetActiveResponse();
+            }
             return true;
         });
         return expired;
     }
 
+    synchronized boolean isExpecting(String playerName) {
+        String normalized = normalize(playerName);
+        return normalized.equals(activeKey) || expectedPlayers.containsKey(normalized);
+    }
+
     synchronized void cancel(String playerName) {
-        expectedPlayers.remove(playerName);
-        if (playerName.equals(activePlayer)) {
-            activePlayer = null;
-            activeLines = null;
-            activeHasPermissions = false;
+        String normalized = normalize(playerName);
+        expectedPlayers.remove(normalized);
+        if (normalized.equals(activeKey)) {
+            resetActiveResponse();
         }
     }
 
     synchronized void clear() {
         expectedPlayers.clear();
+        resetActiveResponse();
+    }
+
+    private void resetActiveResponse() {
+        activeKey = null;
         activePlayer = null;
         activeLines = null;
         activeHasPermissions = false;
     }
 
     private String expectedName(String actualName) {
-        for (String expectedName : expectedPlayers.keySet()) {
-            if (expectedName.equalsIgnoreCase(actualName)) {
-                return expectedName;
-            }
+        Expectation expectation = expectedPlayers.get(normalize(actualName));
+        return expectation == null ? null : expectation.displayName;
+    }
+
+    private static String normalize(String playerName) {
+        return playerName.toLowerCase(Locale.ROOT);
+    }
+
+    private static final class Expectation {
+        final String displayName;
+        final long expiresAt;
+
+        Expectation(String displayName, long expiresAt) {
+            this.displayName = displayName;
+            this.expiresAt = expiresAt;
         }
-        return null;
     }
 
     record CapturedStat(String playerName, StatSnapshot snapshot) {

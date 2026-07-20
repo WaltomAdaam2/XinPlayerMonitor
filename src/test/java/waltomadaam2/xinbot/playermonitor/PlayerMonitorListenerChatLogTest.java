@@ -1,0 +1,89 @@
+package waltomadaam2.xinbot.playermonitor;
+
+import net.kyori.adventure.text.Component;
+import org.geysermc.mcprotocollib.auth.GameProfile;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.helpers.NOPLogger;
+import xin.bbtt.mcbot.Bot;
+import xin.bbtt.mcbot.Server;
+import xin.bbtt.mcbot.events.DisconnectEvent;
+import xin.bbtt.mcbot.events.PublicChatEvent;
+import xin.bbtt.mcbot.events.PlayerJoinEvent;
+import xin.bbtt.mcbot.events.ServerChangeEvent;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class PlayerMonitorListenerChatLogTest {
+    @TempDir
+    Path temporaryDirectory;
+
+    private PlayerMonitorService service;
+    private PlayerMonitorListener listener;
+    private Path logFile;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
+        service.initialize();
+        MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
+        settings.initialize();
+        settings.setAutoScanOnGameEntry(false);
+        settings.setStatScanEnabled(false);
+        Path logDirectory = temporaryDirectory.resolve("playermonitor/log");
+        logFile = logDirectory.resolve("playermonitor-" + LocalDate.now() + ".log");
+        listener = new PlayerMonitorListener(
+                service,
+                new PluginLog(logDirectory),
+                NOPLogger.NOP_LOGGER,
+                settings);
+        Bot.INSTANCE.players.clear();
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (listener != null) {
+            listener.close();
+        }
+        Bot.INSTANCE.players.clear();
+    }
+
+    @Test
+    void successfulChatRecordingProducesNoRecordedChatSuccessLog() throws Exception {
+        GameProfile profile = profile("ChatterBox");
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        listener.onPublicChat(new PublicChatEvent(profile, "hello world"));
+
+        assertTrue(Files.exists(logFile), "login must still be logged");
+        List<String> lines = Files.readAllLines(logFile, StandardCharsets.UTF_8);
+        assertFalse(lines.stream().anyMatch(line -> line.contains("recorded chat")),
+                "successful chat recording must not produce a success log line");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("recorded login")),
+                "login events must still be logged");
+    }
+
+    @Test
+    void loginLogoutAndDisconnectStillProduceLogEntries() throws Exception {
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+
+        List<String> lines = Files.readAllLines(logFile, StandardCharsets.UTF_8);
+        assertTrue(lines.stream().anyMatch(line -> line.contains("connection lost")),
+                "disconnect must still be logged");
+    }
+
+    private static GameProfile profile(String name) {
+        return new GameProfile(UUID.nameUUIDFromBytes(name.getBytes()), name);
+    }
+}

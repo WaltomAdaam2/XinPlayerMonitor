@@ -11,4 +11,8 @@ public final class ChatEntry {
         this.timestamp = timestamp;
         this.message = message;
     }
+
+    public ChatEntry copy() {
+        return new ChatEntry(timestamp, message);
+    }
 }

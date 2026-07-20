@@ -18,4 +18,19 @@ public final class PlayerRecord {
         this.playerName = playerName;
         this.firstSeenAt = firstSeenAt;
     }
+
+    public PlayerRecord copy() {
+        PlayerRecord copy = new PlayerRecord(playerName, firstSeenAt);
+        copy.schemaVersion = schemaVersion;
+        for (LoginSession session : loginSessions) {
+            copy.loginSessions.add(session.copy());
+        }
+        for (ChatEntry entry : chatMessages) {
+            copy.chatMessages.add(entry.copy());
+        }
+        for (StatSnapshot snapshot : statSnapshots) {
+            copy.statSnapshots.add(snapshot.copy());
+        }
+        return copy;
+    }
 }

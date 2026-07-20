@@ -10,4 +10,10 @@ public final class LoginSession {
     public LoginSession(long loginAt) {
         this.loginAt = loginAt;
     }
+
+    public LoginSession copy() {
+        LoginSession copy = new LoginSession(loginAt);
+        copy.logoutAt = logoutAt;
+        return copy;
+    }
 }

@@ -1,6 +1,5 @@
 package waltomadaam2.xinbot.playermonitor;
 
-import waltomadaam2.xinbot.playermonitor.model.ChatEntry;
 import waltomadaam2.xinbot.playermonitor.model.LoginSession;
 import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
 import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
@@ -10,6 +9,8 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 public final class PlayerMonitorService {
     private final PlayerRecordStore store;
@@ -18,39 +19,40 @@ public final class PlayerMonitorService {
         this.store = new PlayerRecordStore(directory);
     }
 
+    public void setWarningSink(Consumer<String> warningSink) {
+        store.setWarningSink(warningSink);
+    }
+
+    public void setEvictionGuard(Predicate<String> evictionGuard) {
+        store.setEvictionGuard(evictionGuard);
+    }
+
+    void setStatWriteFailureForTesting(Predicate<String> statWriteFailure) {
+        store.setStatWriteFailureForTesting(statWriteFailure);
+    }
+
     public void initialize() throws IOException {
         store.initialize();
     }
 
+    public void close() {
+        store.close();
+    }
+
     public void recordLogin(String playerName, long now) throws IOException {
-        store.update(playerName, now, record -> {
-            for (LoginSession session : record.loginSessions) {
-                if (session.logoutAt == null) {
-                    session.logoutAt = Math.max(session.loginAt, now);
-                }
-            }
-            record.loginSessions.add(new LoginSession(now));
-        });
+        store.recordLogin(playerName, now);
     }
 
     public void recordLogout(String playerName, long now) throws IOException {
-        store.update(playerName, now, record -> {
-            LoginSession latestOpen = record.loginSessions.stream()
-                    .filter(session -> session.logoutAt == null)
-                    .max(Comparator.comparingLong(session -> session.loginAt))
-                    .orElse(null);
-            if (latestOpen != null) {
-                latestOpen.logoutAt = Math.max(latestOpen.loginAt, now);
-            }
-        });
+        store.recordLogout(playerName, now);
     }
 
     public void recordChat(String playerName, String message, long now) throws IOException {
-        store.update(playerName, now, record -> record.chatMessages.add(new ChatEntry(now, message)));
+        store.recordChat(playerName, message, now);
     }
 
     public void recordStat(String playerName, StatSnapshot snapshot) throws IOException {
-        store.update(playerName, snapshot.capturedAt, record -> record.statSnapshots.add(snapshot));
+        store.recordStat(playerName, snapshot);
     }
 
     public PlayerRecord getRecord(String playerName) throws IOException {
@@ -58,12 +60,7 @@ public final class PlayerMonitorService {
     }
 
     public Optional<PlayerRecord> findRecord(String playerName) throws IOException {
-        for (String storedName : store.listPlayerNames()) {
-            if (storedName.equalsIgnoreCase(playerName)) {
-                return store.find(storedName);
-            }
-        }
-        return Optional.empty();
+        return store.find(playerName);
     }
 
     public boolean hasStatCapturedAtOrAfter(String playerName, long cutoffAt) throws IOException {

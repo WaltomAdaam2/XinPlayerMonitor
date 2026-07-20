@@ -25,25 +25,38 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class PlayerMonitorManagementCommand extends TabExecutor {
-    private static final String DIM = "\u001B[90m";
-    private static final String CYAN = "\u001B[36m";
-    private static final String YELLOW = "\u001B[33m";
-    private static final String RED = "\u001B[31m";
-    private static final String RESET = "\u001B[0m";
-    private static final String COMMAND_COLOR = "\u001B[38;2;255;192;103m";
-    private static final String SETTING_ITEM_COLOR = "\u001B[38;2;247;220;239m";
-    private static final String PLAYER_COLOR = "\u001B[38;2;46;111;64m";
-    private static final String SUBCOMMAND_COLOR = "\u001B[38;2;250;235;215m";
-    private static final AttributedStyle SETTING_ITEM_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xF7DCEF);
+    private static final String DIM = "[90m";
+    private static final String CYAN = "[36m";
+    private static final String YELLOW = "[33m";
+    private static final String RED = "[31m";
+    private static final String RESET = "[0m";
+
+    // Context-aware command colors (RGB 24-bit)
+    private static final String ROOT_SUBCOMMAND = "[38;2;224;176;255m"; // #E0B0FF setting, stat as root
+    private static final String PLAYER_COLOR = "[38;2;46;111;64m";       // #2E6F40
+    private static final String NESTED_STAT = "[38;2;255;192;103m";       // #FFC067 stat after setting
+    private static final String SETTING_NAME = "[38;2;0;123;167m";        // #007BA7 autoscan, enabled, ...
+    private static final String SETTING_VALUE = "[38;2;222;161;147m";     // #DEA193 true, false, <ms>, <min>
+    private static final String SCAN_ACTION = "[38;2;255;179;67m";        // #FFB343 scan after stat
+    private static final String PLAYER_ACTION = "[38;2;224;176;255m";     // #E0B0FF stat|latestlogin|... after player
+    private static final String COMMAND_NAME = "[38;2;166;173;180m";      // #A6ADB4 playermonitor
+
+    // Interactive AttributedStyle counterparts
+    private static final AttributedStyle ROOT_SUBCOMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
     private static final AttributedStyle PLAYER_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x2E6F40);
-    private static final AttributedStyle SUBCOMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFAEBD7);
-    static final String PLAYER_PLACEHOLDER = "<玩家名>";
+    private static final AttributedStyle NESTED_STAT_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFC067);
+    private static final AttributedStyle SETTING_NAME_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x007BA7);
+    private static final AttributedStyle SETTING_VALUE_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xDEA193);
+    private static final AttributedStyle SCAN_ACTION_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFB343);
+    private static final AttributedStyle PLAYER_ACTION_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
+
+    static final String PLAYER_PLACEHOLDER = "<玩家名>"; // <玩家名>
     private static final String INTERVAL_PLACEHOLDER = "<ms>";
     private static final String MINUTES_PLACEHOLDER = "<min>";
     private static final List<String> PLAYER_ACTIONS = List.of("stat", "latestlogin", "recentlogin", "chat");
     private static final List<String> SETTING_ITEMS = List.of("interval", "autoscan", "enabled", "outputhide", "disconnecttimeout");
+    private static final List<String> BOOLEAN_VALUES = List.of("true", "false");
     private static final Pattern TIMESTAMP = Pattern.compile("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
-    private static final Pattern USAGE_TOKEN = Pattern.compile("playermonitor|disconnecttimeout|latestlogin|recentlogin|outputhide|autoscan|interval|enabled|setting|stat|scan|chat|" + Pattern.quote(PLAYER_PLACEHOLDER));
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
 
@@ -106,6 +119,119 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         return styles;
     }
+
+    // ----------------------------------------------------------------
+    // Context-aware argument styling
+    // ----------------------------------------------------------------
+
+    static AttributedStyle styleForArgument(String[] args, int index) {
+        if (args == null || index < 0 || index >= args.length) {
+            return AttributedStyle.DEFAULT;
+        }
+        String value = args[index] == null ? "" : args[index].toLowerCase(Locale.ROOT);
+        if (index == 0) {
+            if ("setting".equals(value) || "stat".equals(value)) {
+                return ROOT_SUBCOMMAND_STYLE;
+            }
+            return PLAYER_STYLE;
+        }
+        String root = args[0] == null ? "" : args[0].toLowerCase(Locale.ROOT);
+        if ("setting".equals(root)) {
+            if (index == 1 && "stat".equals(value)) {
+                return NESTED_STAT_STYLE;
+            }
+            if (index == 2 && SETTING_ITEMS.contains(value)) {
+                return SETTING_NAME_STYLE;
+            }
+            if (index == 3) {
+                return valueStyle(args[2], value);
+            }
+            return AttributedStyle.DEFAULT;
+        }
+        if ("stat".equals(root)) {
+            if (index == 1 && "scan".equals(value)) {
+                return SCAN_ACTION_STYLE;
+            }
+            return AttributedStyle.DEFAULT;
+        }
+        if (index == 1 && PLAYER_ACTIONS.contains(value)) {
+            return PLAYER_ACTION_STYLE;
+        }
+        return AttributedStyle.DEFAULT;
+    }
+
+    private static AttributedStyle valueStyle(String settingName, String value) {
+        if (settingName == null) return AttributedStyle.DEFAULT;
+        settingName = settingName.toLowerCase(Locale.ROOT);
+        if ("interval".equals(settingName) || "disconnecttimeout".equals(settingName)) {
+            return SETTING_VALUE_STYLE;
+        }
+        if (BOOLEAN_VALUES.contains(value)) {
+            return SETTING_VALUE_STYLE;
+        }
+        if (INTERVAL_PLACEHOLDER.equals(value) || MINUTES_PLACEHOLDER.equals(value)) {
+            return SETTING_VALUE_STYLE;
+        }
+        return AttributedStyle.DEFAULT;
+    }
+
+    // ----------------------------------------------------------------
+    // Context-aware usage coloring
+    // ----------------------------------------------------------------
+
+    static String colorUsage(String usage) {
+        if (usage.startsWith("Usage: playermonitor setting stat")) {
+            return colorSettingUsage(usage);
+        }
+        if (usage.startsWith("Usage: playermonitor stat scan")) {
+            return colorScanUsage(usage);
+        }
+        if (usage.startsWith("Usage: playermonitor " + PLAYER_PLACEHOLDER)) {
+            return colorPlayerUsage(usage);
+        }
+        return usage;
+    }
+
+    private static String colorSettingUsage(String usage) {
+        // "Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|...]"
+        StringBuilder sb = new StringBuilder();
+        sb.append("Usage: ");
+        sb.append(COMMAND_NAME).append("playermonitor").append(RESET).append(" ");
+        sb.append(ROOT_SUBCOMMAND).append("setting").append(RESET).append(" ");
+        sb.append(NESTED_STAT).append("stat").append(RESET).append(" [");
+        sb.append(SETTING_NAME).append("interval").append(RESET).append(" ");
+        sb.append(SETTING_VALUE).append("<ms>").append(RESET).append("|");
+        sb.append(SETTING_NAME).append("autoscan").append(RESET).append(" ");
+        sb.append(SETTING_VALUE).append("<true|false>").append(RESET).append("|");
+        sb.append(SETTING_NAME).append("enabled").append(RESET).append(" ");
+        sb.append(SETTING_VALUE).append("<true|false>").append(RESET).append("|");
+        sb.append(SETTING_NAME).append("outputhide").append(RESET).append(" ");
+        sb.append(SETTING_VALUE).append("<true|false>").append(RESET).append("|");
+        sb.append(SETTING_NAME).append("disconnecttimeout").append(RESET).append(" ");
+        sb.append(SETTING_VALUE).append("<min>").append(RESET).append("]");
+        return sb.toString();
+    }
+
+    private static String colorScanUsage(String usage) {
+        // "Usage: playermonitor stat scan"
+        return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                + ROOT_SUBCOMMAND + "stat" + RESET + " "
+                + SCAN_ACTION + "scan" + RESET;
+    }
+
+    private static String colorPlayerUsage(String usage) {
+        // "Usage: playermonitor <玩家名> [stat|latestlogin|recentlogin|chat]"
+        return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                + PLAYER_COLOR + PLAYER_PLACEHOLDER + RESET + " ["
+                + PLAYER_ACTION + "stat" + RESET + "|"
+                + PLAYER_ACTION + "latestlogin" + RESET + "|"
+                + PLAYER_ACTION + "recentlogin" + RESET + "|"
+                + PLAYER_ACTION + "chat" + RESET + "]";
+    }
+
+    // ----------------------------------------------------------------
+    // Command handlers
+    // ----------------------------------------------------------------
 
     private void setting(String[] args) {
         if (args.length < 2 || !"stat".equalsIgnoreCase(args[1])) {
@@ -393,57 +519,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static List<String> matching(String input, List<String> values) {
         String prefix = input == null ? "" : input.toLowerCase(Locale.ROOT);
         return values.stream().filter(value -> value.startsWith(prefix)).toList();
-    }
-
-    static AttributedStyle styleForArgument(String[] args, int index) {
-        if (args == null || index < 0 || index >= args.length) {
-            return AttributedStyle.DEFAULT;
-        }
-        String value = args[index] == null ? "" : args[index].toLowerCase(Locale.ROOT);
-        if (index == 0) {
-            if ("setting".equals(value) || "stat".equals(value)) {
-                return SUBCOMMAND_STYLE;
-            }
-            return PLAYER_STYLE;
-        }
-        String root = args[0] == null ? "" : args[0].toLowerCase(Locale.ROOT);
-        if ("setting".equals(root)) {
-            if (index == 1 && "stat".equals(value)) {
-                return SUBCOMMAND_STYLE;
-            }
-            if (index == 2 && SETTING_ITEMS.contains(value)) {
-                return SETTING_ITEM_STYLE;
-            }
-            return AttributedStyle.DEFAULT;
-        }
-        if ("stat".equals(root)) {
-            return "scan".equals(value) ? SUBCOMMAND_STYLE : AttributedStyle.DEFAULT;
-        }
-        return index == 1 && PLAYER_ACTIONS.contains(value) ? SUBCOMMAND_STYLE : AttributedStyle.DEFAULT;
-    }
-
-    static String colorUsage(String usage) {
-        Matcher matcher = USAGE_TOKEN.matcher(usage);
-        StringBuffer output = new StringBuffer();
-        while (matcher.find()) {
-            String token = matcher.group();
-            matcher.appendReplacement(output, Matcher.quoteReplacement(colorToken(token)));
-        }
-        matcher.appendTail(output);
-        return output.toString();
-    }
-
-    private static String colorToken(String token) {
-        if ("playermonitor".equals(token)) {
-            return COMMAND_COLOR + token + RESET;
-        }
-        if (PLAYER_PLACEHOLDER.equals(token)) {
-            return PLAYER_COLOR + token + RESET;
-        }
-        if (SETTING_ITEMS.contains(token)) {
-            return SETTING_ITEM_COLOR + token + RESET;
-        }
-        return SUBCOMMAND_COLOR + token + RESET;
     }
 
     private static boolean parseBoolean(String value) {

@@ -13,4 +13,8 @@ public final class PlayerPermissions {
         this.runMax = runMax;
         this.dupe = dupe;
     }
+
+    public PlayerPermissions copy() {
+        return new PlayerPermissions(greenText, runMax, dupe);
+    }
 }

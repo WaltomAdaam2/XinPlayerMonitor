@@ -38,4 +38,49 @@ class StatResponseCollectorTest {
         assertFalse(captured.snapshot().permissions == null);
         assertEquals(List.of(), collector.expire());
     }
+
+    @Test
+    void timeoutClearsActivePartialResponseState() throws Exception {
+        StatResponseCollector collector = new StatResponseCollector(1L);
+        collector.expect("Alice");
+
+        // Feed partial response to set active state
+        collector.accept("§b玩家名称: Alice");
+        collector.accept("§b加入游戏: 1 次\n§b死亡计数: 2 次");
+        // No closing separator — active state is set but incomplete
+
+        Thread.sleep(10L);
+        List<String> expired = collector.expire();
+        assertEquals(List.of("Alice"), expired);
+
+        // After expiration, the player must no longer be expecting
+        assertFalse(collector.isExpecting("Alice"),
+                "isExpecting must return false after expiration + active-state clear");
+    }
+
+    @Test
+    void expiredQueryLinesDoNotLeakIntoNextQuery() throws Exception {
+        StatResponseCollector collector = new StatResponseCollector(1L);
+        collector.expect("Alice");
+
+        // Start collecting Alice's response but don't finish
+        collector.accept("§b玩家名称: Alice");
+        collector.accept("§b死亡计数: 5 次");
+
+        // Let Alice expire
+        Thread.sleep(10L);
+        collector.expire();
+
+        // Now start a fresh query for Bob
+        collector.expect("Bob");
+        collector.accept("§b玩家名称: Bob");
+        collector.accept("§b死亡计数: 10 次");
+        collector.accept("§b特殊权限: ✅");
+        StatResponseCollector.CapturedStat captured = collector.accept("----------------------").orElseThrow();
+
+        assertEquals("Bob", captured.playerName(),
+                "Bob's query must not receive Alice's expired partial lines");
+        assertEquals(10, captured.snapshot().deathCount,
+                "Bob's stat must reflect his own data, not Alice's");
+    }
 }

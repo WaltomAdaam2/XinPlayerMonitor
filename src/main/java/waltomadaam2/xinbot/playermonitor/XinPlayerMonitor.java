@@ -9,11 +9,13 @@ import xin.bbtt.mcbot.plugin.Plugin;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.function.Consumer;
 
 public final class XinPlayerMonitor implements Plugin {
     private static final String COMMAND_NAME = "playermonitor";
 
     private final Logger logger = LoggerFactory.getLogger(XinPlayerMonitor.class.getSimpleName());
+    private PlayerMonitorService service;
     private PlayerMonitorListener listener;
     private LoggerContext loggerContext;
     private StatChatLogFilter statChatLogFilter;
@@ -30,13 +32,21 @@ public final class XinPlayerMonitor implements Plugin {
     public void onEnable() {
         try {
             Path dataDirectory = Path.of("playermonitor");
+            PluginLog log = new PluginLog(dataDirectory.resolve("log"));
+            Consumer<String> warningSink = message -> {
+                logger.warn(message);
+                log.info("WARN: " + message);
+            };
             PlayerMonitorService service = new PlayerMonitorService(dataDirectory);
+            service.setWarningSink(warningSink);
             service.initialize();
             MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
+            settings.setWarningSink(warningSink);
             settings.initialize();
-            PluginLog log = new PluginLog(dataDirectory.resolve("log"));
             installStatChatLogFilter(settings);
             listener = new PlayerMonitorListener(service, log, logger, settings);
+            service.setEvictionGuard(listener::isProtectedFromEviction);
+            this.service = service;
             Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
@@ -55,6 +65,10 @@ public final class XinPlayerMonitor implements Plugin {
         if (listener != null) {
             listener.close();
             listener = null;
+        }
+        if (service != null) {
+            service.close();
+            service = null;
         }
         removeStatChatLogFilter();
     }

@@ -18,6 +18,7 @@ import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,7 +28,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 final class PlayerMonitorListener implements Listener {
-    private static final int MAX_STAT_ATTEMPTS = 3;
+    private static final int MAX_STAT_SENDS = 4;
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
     private static final long AUTOMATIC_STAT_COOLDOWN_MILLIS = TimeUnit.HOURS.toMillis(24L);
 
@@ -35,7 +36,7 @@ final class PlayerMonitorListener implements Listener {
     private final PluginLog log;
     private final Logger logger;
     private final MonitorSettingsStore settings;
-    private final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
+    private final Map<String, String> onlinePlayers = new ConcurrentHashMap<>();
     private final Set<String> pendingStatDispatches = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
     private final Map<String, Integer> statAttempts = new ConcurrentHashMap<>();
@@ -63,16 +64,16 @@ final class PlayerMonitorListener implements Listener {
         this.settings = settings;
         statQueue = new StatQueue(
                 () -> gameActive,
-                onlinePlayers::contains,
+                name -> onlinePlayers.containsKey(normalize(name)),
                 settings::statIntervalMillis,
                 command -> {
                     String playerName = command.substring("stat ".length());
-                    pendingStatDispatches.add(playerName);
+                    pendingStatDispatches.add(normalize(playerName));
                     Bot.INSTANCE.sendCommand(command);
-                    log.info("queued stat for " + playerName);
                 },
                 ignored -> {
-                });
+                },
+                this::handleStatSendFailure);
         retryExecutor.scheduleWithFixedDelay(this::retryTimedOutStats, 100L, 100L, TimeUnit.MILLISECONDS);
     }
 
@@ -113,7 +114,7 @@ final class PlayerMonitorListener implements Listener {
                 beginReconnectWindow(System.currentTimeMillis());
             } else {
                 gameActive = false;
-                onlinePlayers.clear();
+                clearOnlinePlayers();
                 clearStatTracking();
             }
             log.info("left Game; monitoring disabled");
@@ -125,7 +126,7 @@ final class PlayerMonitorListener implements Listener {
         gameActive = true;
         boolean resumed = reconcileAfterReconnect(gameEntryAt);
         if (!resumed) {
-            onlinePlayers.clear();
+            clearOnlinePlayers();
             clearStatTracking();
             if (forceFreshRoster) {
                 recordFreshRoster(gameEntryAt);
@@ -160,7 +161,7 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
-        if (onlinePlayers.add(playerName)) {
+        if (onlinePlayers.put(normalize(playerName), playerName) == null) {
             recordLogin(playerName, System.currentTimeMillis());
         }
         if (settings.statScanEnabled()) {
@@ -175,14 +176,14 @@ final class PlayerMonitorListener implements Listener {
         }
         String playerName = nameOf(event.getPlayerProfile());
         statResponses.cancel(playerName);
-        statAttempts.remove(playerName);
-        pendingStatDispatches.remove(playerName);
-        if (!onlinePlayers.remove(playerName)) {
+        statAttempts.remove(normalize(playerName));
+        pendingStatDispatches.remove(normalize(playerName));
+        if (onlinePlayers.remove(normalize(playerName)) == null) {
             return;
         }
         try {
             service.recordLogout(playerName, System.currentTimeMillis());
-            log.info("recorded player " + playerName);
+            log.info("recorded logout for " + playerName);
         } catch (IOException error) {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }
@@ -200,7 +201,6 @@ final class PlayerMonitorListener implements Listener {
         String playerName = nameOf(event.getSender());
         try {
             service.recordChat(playerName, message, System.currentTimeMillis());
-            log.info("recorded player " + playerName);
         } catch (IOException error) {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }
@@ -212,16 +212,20 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         retryTimedOutStats();
-        statResponses.accept(event.getText()).ifPresent(captured -> retryExecutor.schedule(() -> {
-            try {
-                service.recordStat(captured.playerName(), captured.snapshot());
-                statAttempts.remove(captured.playerName());
-                log.info("recorded stat for " + captured.playerName());
-                logger.info("\u001B[94mRecorded stat for {}.\u001B[0m", captured.playerName());
-            } catch (IOException error) {
-                log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
-            }
-        }, STAT_WRITE_DELAY_MILLIS, TimeUnit.MILLISECONDS));
+        statResponses.accept(event.getText()).ifPresent(captured -> {
+            String normalizedName = normalize(captured.playerName());
+            statAttempts.remove(normalizedName);
+            pendingStatDispatches.remove(normalizedName);
+            retryExecutor.schedule(() -> {
+                try {
+                    service.recordStat(captured.playerName(), captured.snapshot());
+                    log.info("recorded stat for " + captured.playerName());
+                    logger.info("\u001B[94mRecorded stat for {}.\u001B[0m", captured.playerName());
+                } catch (IOException error) {
+                    log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
+                }
+            }, STAT_WRITE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
+        });
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -231,18 +235,18 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = command.substring("stat ".length()).trim();
-        if (!pendingStatDispatches.contains(playerName)) {
+        String normalizedName = normalize(playerName);
+        if (!pendingStatDispatches.contains(normalizedName)) {
             return;
         }
         if (event.isDefaultActionCancelled()) {
-            pendingStatDispatches.remove(playerName);
+            pendingStatDispatches.remove(normalizedName);
             log.info("stat command cancelled for " + playerName);
             return;
         }
-        if (pendingStatDispatches.remove(playerName)) {
-            statAttempts.merge(playerName, 1, Integer::sum);
+        if (pendingStatDispatches.remove(normalizedName)) {
+            statAttempts.merge(normalizedName, 1, Integer::sum);
             statResponses.expect(playerName);
-            log.info("sent stat for " + playerName);
             logger.info("Sent stat for {}.", playerName);
         }
     }
@@ -273,7 +277,7 @@ final class PlayerMonitorListener implements Listener {
             }
             disconnectAt = now;
             disconnectedPlayers.clear();
-            disconnectedPlayers.addAll(onlinePlayers);
+            disconnectedPlayers.addAll(onlinePlayers.values());
             reconnectPending = true;
             rosterReconciling = false;
             if (disconnectFinalizer != null) {
@@ -285,7 +289,7 @@ final class PlayerMonitorListener implements Listener {
                     TimeUnit.MILLISECONDS);
         }
         gameActive = false;
-        onlinePlayers.clear();
+        clearOnlinePlayers();
         clearStatTracking();
         return true;
     }
@@ -295,8 +299,8 @@ final class PlayerMonitorListener implements Listener {
                 .map(PlayerMonitorListener::nameOf)
                 .filter(name -> name != null && !name.isBlank())
                 .collect(java.util.stream.Collectors.toSet());
-        onlinePlayers.addAll(currentPlayers);
         for (String playerName : currentPlayers) {
+            onlinePlayers.put(normalize(playerName), playerName);
             recordLogin(playerName, gameEntryAt);
         }
     }
@@ -338,7 +342,9 @@ final class PlayerMonitorListener implements Listener {
             }
         }
         onlinePlayers.clear();
-        onlinePlayers.addAll(currentPlayers);
+        for (String playerName : currentPlayers) {
+            onlinePlayers.put(normalize(playerName), playerName);
+        }
         for (String playerName : currentPlayers) {
             if (!previousPlayers.contains(playerName)) {
                 recordLogin(playerName, gameEntryAt);
@@ -385,7 +391,7 @@ final class PlayerMonitorListener implements Listener {
     private void recordLogoutAt(String playerName, long timestamp) {
         try {
             service.recordLogout(playerName, timestamp);
-            log.info("recorded player " + playerName);
+            log.info("recorded logout for " + playerName);
         } catch (IOException error) {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }
@@ -395,7 +401,7 @@ final class PlayerMonitorListener implements Listener {
         int cooldownSkipped = 0;
         for (GameProfile profile : profiles) {
             String playerName = nameOf(profile);
-            if (onlinePlayers.add(playerName)) {
+            if (onlinePlayers.put(normalize(playerName), playerName) == null) {
                 recordLogin(playerName, System.currentTimeMillis());
             }
             if (applyCooldown && isAutomaticStatCooldownActive(playerName)) {
@@ -411,7 +417,6 @@ final class PlayerMonitorListener implements Listener {
 
     private void enqueueAutomaticJoinStat(String playerName) {
         if (isAutomaticStatCooldownActive(playerName)) {
-            log.info("skipped automatic stat for " + playerName + "; cooldown active");
             return;
         }
         statQueue.enqueueFirst(playerName);
@@ -430,25 +435,89 @@ final class PlayerMonitorListener implements Listener {
 
     private void retryTimedOutStats() {
         for (String playerName : statResponses.expire()) {
-            int attempts = statAttempts.getOrDefault(playerName, 0);
-            if (gameActive && onlinePlayers.contains(playerName) && attempts < MAX_STAT_ATTEMPTS) {
-                logger.warn("Stat response timed out for {}; retrying.", playerName);
-                statQueue.enqueue(playerName);
-            } else if (attempts > 0) {
-                logger.warn("Stat scan failed for {} after {} attempts.", playerName, attempts);
-                statAttempts.remove(playerName);
-            }
+            String normalizedName = normalize(playerName);
+            int attempts = statAttempts.getOrDefault(normalizedName, 0);
+            evaluateStatAttempt(playerName, attempts, "timed out");
         }
+    }
+
+    private void handleStatSendFailure(String playerName) {
+        String normalizedName = normalize(playerName);
+        pendingStatDispatches.remove(normalizedName);
+        statResponses.cancel(playerName);
+        int attempts = statAttempts.merge(normalizedName, 1, Integer::sum);
+        evaluateStatAttempt(playerName, attempts, "failed to send");
+    }
+
+    private void evaluateStatAttempt(String playerName, int attempts, String reason) {
+        String normalizedName = normalize(playerName);
+        if (gameActive && onlinePlayers.containsKey(normalizedName) && attempts < MAX_STAT_SENDS) {
+            logger.warn("Stat request {} for {}; retrying ({}/{}).", reason, playerName, attempts, MAX_STAT_SENDS);
+            statQueue.enqueue(playerName);
+        } else if (attempts > 0) {
+            logger.warn("Stat scan failed for {} after {} attempt(s).", playerName, attempts);
+            statAttempts.remove(normalizedName);
+            pendingStatDispatches.remove(normalizedName);
+        }
+    }
+
+    boolean isProtectedFromEviction(String normalizedPlayerName) {
+        if (onlinePlayers.containsKey(normalizedPlayerName)
+                || pendingStatDispatches.contains(normalizedPlayerName)
+                || statAttempts.containsKey(normalizedPlayerName)) {
+            return true;
+        }
+        return statResponses.isExpecting(normalizedPlayerName);
+    }
+
+    // ------------------------------------------------------------------
+    // Test-only hooks
+    // ------------------------------------------------------------------
+
+    void setGameActiveForTesting(boolean active) {
+        gameActive = active;
+    }
+
+    void markOnlineForTesting(String playerName) {
+        onlinePlayers.put(normalize(playerName), playerName);
+    }
+
+    int statAttemptsForTesting(String playerName) {
+        return statAttempts.getOrDefault(normalize(playerName), 0);
+    }
+
+    boolean isPendingStatDispatchForTesting(String playerName) {
+        return pendingStatDispatches.contains(normalize(playerName));
+    }
+
+    void markPendingStatDispatchForTesting(String playerName) {
+        pendingStatDispatches.add(normalize(playerName));
+    }
+
+    void handleStatSendFailureForTesting(String playerName) {
+        handleStatSendFailure(playerName);
+    }
+
+    void evaluateStatAttemptForTesting(String playerName, int attempts) {
+        evaluateStatAttempt(playerName, attempts, "test");
     }
 
     private static String nameOf(GameProfile profile) {
         return profile.getName();
     }
 
+    private static String normalize(String playerName) {
+        return playerName.toLowerCase(Locale.ROOT);
+    }
+
+    private void clearOnlinePlayers() {
+        onlinePlayers.clear();
+    }
+
     private void recordLogin(String playerName, long now) {
         try {
             service.recordLogin(playerName, now);
-            log.info("recorded player " + playerName);
+            log.info("recorded login for " + playerName);
         } catch (IOException error) {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }

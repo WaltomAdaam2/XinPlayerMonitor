@@ -30,7 +30,9 @@ class PlayerMonitorServiceStatTest {
 
         service.recordStat("WaltomAdaam", snapshot);
 
-        assertTrue(Files.exists(temporaryDirectory.resolve("playermonitor/WaltomAdaam.json")));
+        Path playerDir = temporaryDirectory.resolve("playermonitor/players/WaltomAdaam");
+        assertTrue(Files.exists(playerDir.resolve("profile.json")));
+        assertTrue(Files.exists(playerDir.resolve("stats.jsonl")));
         assertEquals(2, service.findRecord("WaltomAdaam").orElseThrow().statSnapshots.get(0).deathCount);
     }
 

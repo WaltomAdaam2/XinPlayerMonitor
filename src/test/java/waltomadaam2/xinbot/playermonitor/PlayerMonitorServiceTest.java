@@ -19,7 +19,7 @@ class PlayerMonitorServiceTest {
     Path temporaryDirectory;
 
     @Test
-    void preservesChinesePlayerFileAndAllChatMessages() throws Exception {
+    void preservesChinesePlayerDirectoryAndAllChatMessages() throws Exception {
         PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
         service.initialize();
         service.recordLogin("_xinbot宣传", 100L);
@@ -28,10 +28,11 @@ class PlayerMonitorServiceTest {
         service.recordLogout("_xinbot宣传", 200L);
 
         PlayerRecord record = service.getRecord("_xinbot宣传");
-        Path playerFile = temporaryDirectory.resolve("playermonitor").resolve("_xinbot宣传.json");
+        Path playerDir = temporaryDirectory.resolve("playermonitor").resolve("players").resolve("_xinbot宣传");
 
-        assertTrue(Files.exists(playerFile));
-        assertTrue(Files.readString(playerFile, StandardCharsets.UTF_8).contains("第一句"));
+        assertTrue(Files.exists(playerDir.resolve("profile.json")));
+        assertTrue(Files.exists(playerDir.resolve("chat.jsonl")));
+        assertTrue(Files.readString(playerDir.resolve("chat.jsonl"), StandardCharsets.UTF_8).contains("第一句"));
         assertEquals(1, record.loginSessions.size());
         assertEquals(2, record.chatMessages.size());
         assertEquals(200L, record.loginSessions.get(0).logoutAt);
@@ -47,13 +48,12 @@ class PlayerMonitorServiceTest {
         PlayerMonitorService service = new PlayerMonitorService(storageDirectory);
         service.initialize();
         service.getRecord("WaltomAdaam");
-        Path playerFile = storageDirectory.resolve("WaltomAdaam.json");
-        Files.writeString(playerFile, "{not valid json", StandardCharsets.UTF_8);
+        Path chatFile = storageDirectory.resolve("players").resolve("WaltomAdaam").resolve("chat.jsonl");
 
         service.recordChat("WaltomAdaam", "cached message", 101L);
 
         assertEquals(1, service.getRecord("WaltomAdaam").chatMessages.size());
-        assertTrue(Files.readString(playerFile, StandardCharsets.UTF_8).contains("cached message"));
+        assertTrue(Files.readString(chatFile, StandardCharsets.UTF_8).contains("cached message"));
     }
 
     @Test
@@ -93,5 +93,17 @@ class PlayerMonitorServiceTest {
         assertEquals(List.of(300L, 200L, 100L), service.recentLogins(record, 15).stream()
                 .map(session -> session.loginAt)
                 .toList());
+    }
+
+    @Test
+    void caseInsensitiveNamesResolveToSamePlayerAcrossServiceCalls() throws Exception {
+        PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
+        service.initialize();
+        service.recordLogin("Steve", 100L);
+        service.recordChat("steve", "hello", 200L);
+
+        assertEquals(1, service.getRecord("STEVE").loginSessions.size());
+        assertEquals(1, service.getRecord("STEVE").chatMessages.size());
+        assertEquals(1, service.listPlayerNames().size());
     }
 }

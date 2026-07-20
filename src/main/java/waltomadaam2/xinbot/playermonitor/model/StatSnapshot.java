@@ -14,4 +14,19 @@ public final class StatSnapshot {
 
     public StatSnapshot() {
     }
+
+    public StatSnapshot copy() {
+        StatSnapshot copy = new StatSnapshot();
+        copy.capturedAt = capturedAt;
+        copy.addedGameCount = addedGameCount;
+        copy.onlineCount = onlineCount;
+        copy.deathCount = deathCount;
+        copy.killCount = killCount;
+        copy.playtimeSeconds = playtimeSeconds;
+        copy.team = team;
+        copy.priorityQueue = priorityQueue;
+        copy.permissions = permissions == null ? null : permissions.copy();
+        copy.permissionsDisplay = permissionsDisplay;
+        return copy;
+    }
 }
