@@ -19,6 +19,11 @@ public final class PlayerMonitorService {
         this.store = new PlayerRecordStore(directory);
     }
 
+    PlayerMonitorService(Path directory, MonitorSettingsStore settings) {
+        this.store = new PlayerRecordStore(directory, settings::maxCachedHistory,
+                () -> java.util.concurrent.TimeUnit.MINUTES.toMillis(settings.cacheIdleMinutes()));
+    }
+
     public void setWarningSink(Consumer<String> warningSink) {
         store.setWarningSink(warningSink);
     }
@@ -37,6 +42,11 @@ public final class PlayerMonitorService {
 
     public void close() {
         store.close();
+    }
+
+    public void applyCacheSettingsNow() {
+        store.trimCachedHistoryToConfiguredLimit();
+        store.evictIdleRecords();
     }
 
     public void recordLogin(String playerName, long now) throws IOException {

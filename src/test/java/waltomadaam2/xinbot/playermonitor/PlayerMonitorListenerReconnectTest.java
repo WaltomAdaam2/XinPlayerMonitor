@@ -17,6 +17,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.UUID;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -29,15 +31,16 @@ class PlayerMonitorListenerReconnectTest {
 
     private PlayerMonitorService service;
     private PlayerMonitorListener listener;
+    private MonitorSettingsStore settings;
 
     @BeforeEach
     void setUp() throws Exception {
         service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
         service.initialize();
-        MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
+        settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         settings.initialize();
-        settings.setAutoScanOnGameEntry(false);
-        settings.setStatScanEnabled(false);
+        settings.setScanOnEntry(false);
+        settings.setStatEnabled(false);
         listener = new PlayerMonitorListener(
                 service,
                 new PluginLog(temporaryDirectory.resolve("playermonitor/log")),
@@ -50,6 +53,9 @@ class PlayerMonitorListenerReconnectTest {
     void tearDown() {
         if (listener != null) {
             listener.close();
+        }
+        if (service != null) {
+            service.close();
         }
         Bot.INSTANCE.players.clear();
     }
@@ -102,6 +108,30 @@ class PlayerMonitorListenerReconnectTest {
         assertNull(service.getRecord("Player").loginSessions.get(1).logoutAt);
         assertTrue(service.getRecord("Player").loginSessions.get(1).loginAt
                 >= service.getRecord("Player").loginSessions.get(0).logoutAt);
+    }
+
+
+    @Test
+    void changingDisconnectTimeoutReschedulesAnActiveDisconnectWindow() throws Exception {
+        settings.setDisconnectTimeoutMinutes(60);
+        GameProfile player = profile("TimeoutPlayer");
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onPlayerJoin(new PlayerJoinEvent(player));
+        listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+
+        Field finalizerField = PlayerMonitorListener.class.getDeclaredField("disconnectFinalizer");
+        finalizerField.setAccessible(true);
+        ScheduledFuture<?> original = (ScheduledFuture<?>) finalizerField.get(listener);
+        assertNotNull(original);
+
+        settings.setDisconnectTimeoutMinutes(1);
+        listener.applyDisconnectTimeoutNow();
+
+        ScheduledFuture<?> replacement = (ScheduledFuture<?>) finalizerField.get(listener);
+        assertNotNull(replacement);
+        assertTrue(original.isCancelled());
+        long remaining = replacement.getDelay(TimeUnit.MILLISECONDS);
+        assertTrue(remaining >= 0L && remaining <= TimeUnit.MINUTES.toMillis(1));
     }
 
     private static GameProfile profile(String name) {

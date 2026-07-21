@@ -28,15 +28,16 @@ class PlayerMonitorListenerStatTest {
 
     private PlayerMonitorService service;
     private PlayerMonitorListener listener;
+    private MonitorSettingsStore settings;
 
     @BeforeEach
     void setUp() throws Exception {
         service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
         service.initialize();
-        MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
+        settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         settings.initialize();
-        settings.setAutoScanOnGameEntry(false);
-        settings.setStatScanEnabled(false);
+        settings.setScanOnEntry(false);
+        settings.setStatEnabled(false);
         listener = new PlayerMonitorListener(
                 service,
                 new PluginLog(temporaryDirectory.resolve("playermonitor/log")),
@@ -213,6 +214,21 @@ class PlayerMonitorListenerStatTest {
         assertEquals(0, listener.statAttemptsForTesting("Alice"),
                 "no retry must be triggered after a persistence failure");
         assertFalse(listener.isPendingStatDispatchForTesting("Alice"));
+    }
+
+
+    @Test
+    void configuredAttemptLimitAppliesWithoutRestart() throws Exception {
+        settings.setStatAttempts(2);
+        listener.setGameActiveForTesting(true);
+        listener.markOnlineForTesting("LimitTest");
+
+        listener.handleStatSendFailureForTesting("LimitTest");
+        assertEquals(1, listener.statAttemptsForTesting("LimitTest"));
+        listener.handleStatSendFailureForTesting("LimitTest");
+
+        assertEquals(0, listener.statAttemptsForTesting("LimitTest"));
+        assertFalse(listener.hasActiveStatCycleForTesting("LimitTest"));
     }
 
     private static GameProfile profile(String name) {

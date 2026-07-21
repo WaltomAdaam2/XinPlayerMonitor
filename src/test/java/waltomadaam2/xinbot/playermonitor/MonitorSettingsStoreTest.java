@@ -24,21 +24,41 @@ class MonitorSettingsStoreTest {
     void persistsStatScanSettings() throws Exception {
         MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         settings.initialize();
-        settings.setStatIntervalMillis(125);
-        settings.setAutoScanOnGameEntry(false);
-        settings.setStatScanEnabled(false);
-        settings.setStatOutputHidden(false);
-        settings.setDisconnectFinalizationMinutes(7);
+        settings.setStatSendIntervalMillis(125);
+        settings.setScanOnEntry(false);
+        settings.setStatEnabled(false);
+        settings.setStatOutputHide(false);
+        settings.setDisconnectTimeoutMinutes(7);
+        settings.setStatCooldownHours(12);
+        settings.setStatTimeoutMillis(4500);
+        settings.setStatAttempts(6);
+        settings.setScanOnJoin(false);
+        settings.setPrioritizeJoinStat(false);
+        settings.setDisplayTimezone("UTC+08:00");
+        settings.setRecentLoginCount(20);
+        settings.setChatCount(12);
+        settings.setCacheIdleMinutes(45);
+        settings.setMaxCachedHistory(350);
 
         MonitorSettingsStore loaded = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         loaded.initialize();
         MonitorSettings current = loaded.get();
 
-        assertEquals(125, current.statIntervalMillis);
-        assertFalse(current.autoScanOnGameEntry);
-        assertFalse(current.statScanEnabled);
-        assertFalse(current.statOutputHidden);
-        assertEquals(7, current.disconnectFinalizationMinutes);
+        assertEquals(125, current.statSendIntervalMillis);
+        assertFalse(current.scanOnEntry);
+        assertFalse(current.statEnabled);
+        assertFalse(current.statOutputHide);
+        assertEquals(7, current.disconnectTimeoutMinutes);
+        assertEquals(12, current.statCooldownHours);
+        assertEquals(4500, current.statTimeoutMillis);
+        assertEquals(6, current.statAttempts);
+        assertFalse(current.scanOnJoin);
+        assertFalse(current.prioritizeJoinStat);
+        assertEquals("UTC+08:00", current.displayTimezone);
+        assertEquals(20, current.recentLoginCount);
+        assertEquals(12, current.chatCount);
+        assertEquals(45, current.cacheIdleMinutes);
+        assertEquals(350, current.maxCachedHistory);
         assertTrue(Files.exists(temporaryDirectory.resolve("playermonitor/settings.json")));
     }
 
@@ -53,7 +73,7 @@ class MonitorSettingsStoreTest {
         settings.setWarningSink(warnings::add);
         settings.initialize();
 
-        assertEquals(new MonitorSettings().statIntervalMillis, settings.statIntervalMillis());
+        assertEquals(new MonitorSettings().statSendIntervalMillis, settings.statSendIntervalMillis());
         assertFalse(warnings.isEmpty());
         assertTrue(Files.exists(directory.resolve("settings.json")),
                 "a fresh default settings.json must be written after quarantine succeeds");
@@ -120,7 +140,7 @@ class MonitorSettingsStoreTest {
         });
         watcher.start();
         for (int i = 0; i < 300; i++) {
-            settings.setStatIntervalMillis(500 + i);
+            settings.setStatSendIntervalMillis(500 + i);
         }
         watcher.join(2000);
 
@@ -148,7 +168,76 @@ class MonitorSettingsStoreTest {
         assertEquals(corruptedContent, Files.readString(directory.resolve("settings.json"), StandardCharsets.UTF_8),
                 "corrupted settings must never be overwritten with defaults when quarantine failed");
         assertFalse(warnings.isEmpty());
-        assertThrows(IOException.class, () -> settings.setStatIntervalMillis(1000),
+        assertThrows(IOException.class, () -> settings.setStatSendIntervalMillis(1000),
                 "further writes must be blocked after a failed quarantine attempt");
+    }
+
+    @Test
+    void defersStatRuntimeChangesUntilActiveOperationFinishes() throws Exception {
+        MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
+        settings.initialize();
+        assertEquals(4, settings.statAttempts());
+
+        settings.beginStatOperation();
+        settings.setStatAttempts(7);
+
+        assertEquals(7, settings.get().statAttempts, "new value must be persisted and shown immediately");
+        assertEquals(4, settings.statAttempts(), "active Stat request must keep its original runtime value");
+        assertTrue(settings.hasDeferredStatSettings());
+
+        settings.endStatOperation();
+        assertEquals(7, settings.statAttempts());
+        assertFalse(settings.hasDeferredStatSettings());
+    }
+
+    @Test
+    void acceptsCanonicalUtcOffsetsAndRejectsOutsideSupportedRange() throws Exception {
+        MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
+        settings.initialize();
+
+        settings.setDisplayTimezone("UTC+0");
+        assertEquals("UTC", settings.displayTimezone());
+        settings.setDisplayTimezone("utc+8");
+        assertEquals("UTC+08:00", settings.displayTimezone());
+        settings.setDisplayTimezone("UTC-03:30");
+        assertEquals("UTC-03:30", settings.displayTimezone());
+
+        settings.setDisplayTimezone("UTC+14:00");
+        assertEquals("UTC+14:00", settings.displayTimezone());
+        assertThrows(IllegalArgumentException.class, () -> settings.setDisplayTimezone("UTC+14:30"));
+        assertThrows(IllegalArgumentException.class, () -> settings.setDisplayTimezone("UTC+05:15"));
+        assertThrows(IllegalArgumentException.class, () -> settings.setDisplayTimezone("America/Vancouver"));
+    }
+
+    @Test
+    void loadsLegacySettingFieldNamesAndRewritesNewSchema() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor");
+        Files.createDirectories(directory);
+        Files.writeString(directory.resolve("settings.json"), """
+                {
+                  "statIntervalMillis": 750,
+                  "disconnectFinalizationMinutes": 9,
+                  "autoScanOnGameEntry": false,
+                  "statScanEnabled": false,
+                  "statOutputHidden": false
+                }
+                """, StandardCharsets.UTF_8);
+
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        MonitorSettings loaded = settings.get();
+
+        assertEquals(750, loaded.statSendIntervalMillis);
+        assertEquals(9, loaded.disconnectTimeoutMinutes);
+        assertFalse(loaded.scanOnEntry);
+        assertFalse(loaded.statEnabled);
+        assertFalse(loaded.statOutputHide);
+        assertEquals(24, loaded.statCooldownHours);
+        assertEquals(3000, loaded.statTimeoutMillis);
+        assertEquals(4, loaded.statAttempts);
+
+        String rewritten = Files.readString(directory.resolve("settings.json"), StandardCharsets.UTF_8);
+        assertTrue(rewritten.contains("\"statSendIntervalMillis\""));
+        assertFalse(rewritten.contains("\"statIntervalMillis\""));
     }
 }

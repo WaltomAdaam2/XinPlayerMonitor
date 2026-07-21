@@ -339,7 +339,7 @@ class PlayerRecordStoreTest {
     }
 
     // ------------------------------------------------------------------
-    // Regression tests for v1.4.0
+    // Storage and concurrency regression tests
     // ------------------------------------------------------------------
 
     @Test
@@ -399,7 +399,7 @@ class PlayerRecordStoreTest {
     }
 
     // ------------------------------------------------------------------
-    // v1.4.0 remaining fixes — regression tests
+    // Remaining storage-safety regression tests
     // ------------------------------------------------------------------
 
     @Test
@@ -674,6 +674,73 @@ class PlayerRecordStoreTest {
         assertTrue(store.find("xpm-migration-stale").isEmpty());
         assertFalse(Files.exists(players.resolve("xpm-migration-stale")),
                 "abandoned migration staging directories should still be cleaned up");
+    }
+
+
+    @Test
+    void recordStatKeepsOnlyLatestSnapshot() throws Exception {
+        PlayerRecordStore store = new PlayerRecordStore(temporaryDirectory);
+        store.initialize();
+
+        store.recordStat("LatestOnly", statAt(100L));
+        store.recordStat("LatestOnly", statAt(300L));
+        store.recordStat("LatestOnly", statAt(200L));
+
+        Path statsFile = temporaryDirectory.resolve("players/LatestOnly/stats.jsonl");
+        List<String> lines = nonBlankLines(statsFile);
+        assertEquals(1, lines.size(), "stats.jsonl must contain exactly one latest snapshot");
+        StatSnapshot stored = new Gson().fromJson(lines.get(0), StatSnapshot.class);
+        assertEquals(200L, stored.capturedAt,
+                "the newest successful write replaces the previous Stat, regardless of timestamp ordering");
+
+        PlayerRecord record = store.read("LatestOnly");
+        assertEquals(1, record.statSnapshots.size());
+        assertEquals(200L, record.statSnapshots.get(0).capturedAt);
+    }
+
+    @Test
+    void loadingExistingMultiLineStatsCompactsToLatestCapturedSnapshot() throws Exception {
+        Path playerDir = temporaryDirectory.resolve("players/ExistingStats");
+        Files.createDirectories(playerDir);
+        Files.writeString(playerDir.resolve("profile.json"),
+                PRETTY_GSON.toJson(new PlayerProfile("ExistingStats", 1L)), StandardCharsets.UTF_8);
+        Gson gson = new Gson();
+        Files.writeString(playerDir.resolve("stats.jsonl"),
+                gson.toJson(statAt(100L)) + System.lineSeparator()
+                        + gson.toJson(statAt(500L)) + System.lineSeparator()
+                        + gson.toJson(statAt(300L)) + System.lineSeparator(),
+                StandardCharsets.UTF_8);
+
+        PlayerRecordStore store = new PlayerRecordStore(temporaryDirectory);
+        store.initialize();
+        PlayerRecord record = store.read("ExistingStats");
+
+        assertEquals(1, record.statSnapshots.size());
+        assertEquals(500L, record.statSnapshots.get(0).capturedAt,
+                "existing history must compact to the snapshot with the greatest capturedAt");
+        List<String> lines = nonBlankLines(playerDir.resolve("stats.jsonl"));
+        assertEquals(1, lines.size());
+        assertEquals(500L, gson.fromJson(lines.get(0), StatSnapshot.class).capturedAt);
+    }
+
+    @Test
+    void migrationKeepsOnlyLatestLegacyStatSnapshot() throws Exception {
+        PlayerRecord legacy = new PlayerRecord("LegacyStats", 1L);
+        legacy.statSnapshots.add(statAt(100L));
+        legacy.statSnapshots.add(statAt(600L));
+        legacy.statSnapshots.add(statAt(400L));
+        Files.writeString(temporaryDirectory.resolve("LegacyStats.json"),
+                PRETTY_GSON.toJson(legacy), StandardCharsets.UTF_8);
+
+        PlayerRecordStore store = new PlayerRecordStore(temporaryDirectory);
+        store.initialize();
+
+        Path statsFile = temporaryDirectory.resolve("players/LegacyStats/stats.jsonl");
+        List<String> lines = nonBlankLines(statsFile);
+        assertEquals(1, lines.size());
+        assertEquals(600L, new Gson().fromJson(lines.get(0), StatSnapshot.class).capturedAt);
+        assertFalse(Files.exists(temporaryDirectory.resolve("LegacyStats.json")));
+        assertEquals(600L, store.read("LegacyStats").statSnapshots.get(0).capturedAt);
     }
 
 }

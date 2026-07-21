@@ -32,8 +32,13 @@ final class StatResponseCollector {
     }
 
     synchronized void expect(String playerName) {
+        expect(playerName, requestTimeoutMillis);
+    }
+
+    synchronized void expect(String playerName, long timeoutMillis) {
+        long safeTimeout = Math.max(1L, timeoutMillis);
         expectedPlayers.put(normalize(playerName),
-                new Expectation(playerName, System.currentTimeMillis() + requestTimeoutMillis));
+                new Expectation(playerName, System.currentTimeMillis() + safeTimeout));
     }
 
     synchronized Optional<CapturedStat> accept(String text) {

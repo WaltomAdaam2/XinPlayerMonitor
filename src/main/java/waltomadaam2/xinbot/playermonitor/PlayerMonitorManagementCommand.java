@@ -1,64 +1,78 @@
 package waltomadaam2.xinbot.playermonitor;
 
+import org.jline.utils.AttributedStyle;
+import org.slf4j.Logger;
 import waltomadaam2.xinbot.playermonitor.model.ChatEntry;
 import waltomadaam2.xinbot.playermonitor.model.LoginSession;
 import waltomadaam2.xinbot.playermonitor.model.PlayerPermissions;
 import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
 import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
-import org.jline.utils.AttributedStyle;
-import org.slf4j.Logger;
 import xin.bbtt.mcbot.command.Command;
 import xin.bbtt.mcbot.command.TabExecutor;
 
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.TreeSet;
-
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class PlayerMonitorManagementCommand extends TabExecutor {
-    private static final String DIM = "[90m";
-    private static final String CYAN = "[36m";
-    private static final String YELLOW = "[33m";
-    private static final String RED = "[31m";
-    private static final String RESET = "[0m";
+    private static final String DIM = "\u001B[90m";
+    private static final String CYAN = "\u001B[36m";
+    private static final String YELLOW = "\u001B[33m";
+    private static final String RED = "\u001B[31m";
+    private static final String RESET = "\u001B[0m";
 
-    // Context-aware command colors (RGB 24-bit)
-    private static final String ROOT_SUBCOMMAND = "[38;2;224;176;255m"; // #E0B0FF setting, stat as root
-    private static final String PLAYER_COLOR = "[38;2;46;111;64m";       // #2E6F40
-    private static final String NESTED_STAT = "[38;2;255;192;103m";       // #FFC067 stat after setting
-    private static final String SETTING_NAME = "[38;2;0;123;167m";        // #007BA7 autoscan, enabled, ...
-    private static final String SETTING_VALUE = "[38;2;222;161;147m";     // #DEA193 true, false, <ms>, <min>
-    private static final String SCAN_ACTION = "[38;2;255;179;67m";        // #FFB343 scan after stat
-    private static final String PLAYER_ACTION = "[38;2;224;176;255m";     // #E0B0FF stat|latestlogin|... after player
-    private static final String COMMAND_NAME = "[38;2;166;173;180m";      // #A6ADB4 playermonitor
+    private static final String ROOT_COMMAND = "\u001B[38;2;224;176;255m";  // #E0B0FF setting / scan-stat
+    private static final String PLAYER_COLOR = "\u001B[38;2;46;111;64m";     // #2E6F40
+    private static final String SETTING_NAME = "\u001B[38;2;173;235;179m";    // #ADEBB3
+    private static final String SETTING_VALUE = "\u001B[38;2;255;192;103m";   // #FFC067
+    private static final String PLAYER_ACTION = "\u001B[38;2;224;176;255m";   // #E0B0FF
+    private static final String COMMAND_NAME = "\u001B[38;2;166;173;180m";    // #A6ADB4
 
-    // Interactive AttributedStyle counterparts
-    private static final AttributedStyle ROOT_SUBCOMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
+    private static final AttributedStyle ROOT_COMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
     private static final AttributedStyle PLAYER_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x2E6F40);
-    private static final AttributedStyle NESTED_STAT_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFC067);
-    private static final AttributedStyle SETTING_NAME_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x007BA7);
-    private static final AttributedStyle SETTING_VALUE_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xDEA193);
-    private static final AttributedStyle SCAN_ACTION_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFB343);
+    private static final AttributedStyle SETTING_NAME_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xADEBB3);
+    private static final AttributedStyle SETTING_VALUE_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFC067);
     private static final AttributedStyle PLAYER_ACTION_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
 
-    static final String PLAYER_PLACEHOLDER = "<玩家名>"; // <玩家名>
-    private static final String INTERVAL_PLACEHOLDER = "<ms>";
-    private static final String MINUTES_PLACEHOLDER = "<min>";
+    static final String PLAYER_PLACEHOLDER = "<玩家名>";
+    private static final String TRUE_FALSE_PLACEHOLDER = "<true|false>";
+    private static final String MS_PLACEHOLDER = "<ms>";
+    private static final String MINUTE_PLACEHOLDER = "<minute>";
+    private static final String HOUR_PLACEHOLDER = "<hour>";
+    private static final String COUNT_PLACEHOLDER = "<count>";
+    private static final String TIMEZONE_PLACEHOLDER = "<timezone>";
+
     private static final List<String> PLAYER_ACTIONS = List.of("stat", "latestlogin", "recentlogin", "chat");
-    private static final List<String> SETTING_ITEMS = List.of("interval", "autoscan", "enabled", "outputhide", "disconnecttimeout");
     private static final List<String> BOOLEAN_VALUES = List.of("true", "false");
+    private static final List<String> SETTING_ITEMS = List.of(
+            "scan-on-entry",
+            "disconnect-timeout",
+            "stat-enabled",
+            "stat-send-interval",
+            "stat-output-hide",
+            "stat-cooldown",
+            "stat-timeout",
+            "stat-attempts",
+            "scan-on-join",
+            "prioritize-join-stat",
+            "display-timezone",
+            "recentlogin-count",
+            "chat-count",
+            "cache-idle",
+            "max-cached-history");
+
+    private static final List<String> TIMEZONE_VALUES = MonitorSettingsStore.SUPPORTED_TIMEZONES;
+
     private static final Pattern TIMESTAMP = Pattern.compile("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
-    private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-            .withZone(ZoneId.systemDefault());
+    private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final PlayerMonitorService service;
     private final MonitorSettingsStore settings;
@@ -83,8 +97,12 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             setting(args);
             return;
         }
-        if ("stat".equalsIgnoreCase(args[0])) {
-            statCommand(args);
+        if ("scan-stat".equalsIgnoreCase(args[0])) {
+            if (args.length == 1) {
+                scan();
+            } else {
+                help();
+            }
             return;
         }
         player(args);
@@ -93,19 +111,28 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
         if (args == null || args.length == 0) {
-            return List.of("setting", "stat", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", PLAYER_PLACEHOLDER);
         }
         if ("setting".equalsIgnoreCase(args[0])) {
             return completeSetting(args);
         }
-        if ("stat".equalsIgnoreCase(args[0])) {
-            return completeStatCommand(args);
+        if ("scan-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
+            return List.of();
         }
         if (args.length == 1) {
             return completePlayerNames(args[0]);
         }
         if (args.length == 2) {
             return matching(args[1], PLAYER_ACTIONS);
+        }
+        if (args.length == 3) {
+            String action = args[1].toLowerCase(Locale.ROOT);
+            if ("chat".equals(action)) {
+                return matching(args[2], List.of(Integer.toString(settings.chatCount())));
+            }
+            if ("recentlogin".equals(action)) {
+                return matching(args[2], List.of(Integer.toString(settings.recentLoginCount())));
+            }
         }
         return List.of();
     }
@@ -120,37 +147,27 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return styles;
     }
 
-    // ----------------------------------------------------------------
-    // Context-aware argument styling
-    // ----------------------------------------------------------------
-
     static AttributedStyle styleForArgument(String[] args, int index) {
         if (args == null || index < 0 || index >= args.length) {
             return AttributedStyle.DEFAULT;
         }
-        String value = args[index] == null ? "" : args[index].toLowerCase(Locale.ROOT);
+        String value = lower(args[index]);
         if (index == 0) {
-            if ("setting".equals(value) || "stat".equals(value)) {
-                return ROOT_SUBCOMMAND_STYLE;
+            if ("setting".equals(value) || "scan-stat".equals(value)) {
+                return ROOT_COMMAND_STYLE;
             }
             return PLAYER_STYLE;
         }
-        String root = args[0] == null ? "" : args[0].toLowerCase(Locale.ROOT);
-        if ("setting".equals(root)) {
-            if (index == 1 && "stat".equals(value)) {
-                return NESTED_STAT_STYLE;
-            }
-            if (index == 2 && SETTING_ITEMS.contains(value)) {
-                return SETTING_NAME_STYLE;
-            }
-            if (index == 3) {
-                return valueStyle(args[2], value);
-            }
+        String root = lower(args[0]);
+        if ("scan-stat".equals(root)) {
             return AttributedStyle.DEFAULT;
         }
-        if ("stat".equals(root)) {
-            if (index == 1 && "scan".equals(value)) {
-                return SCAN_ACTION_STYLE;
+        if ("setting".equals(root)) {
+            if (index == 1 && SETTING_ITEMS.contains(value)) {
+                return SETTING_NAME_STYLE;
+            }
+            if (index == 2 && SETTING_ITEMS.contains(lower(args[1]))) {
+                return SETTING_VALUE_STYLE;
             }
             return AttributedStyle.DEFAULT;
         }
@@ -160,31 +177,20 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return AttributedStyle.DEFAULT;
     }
 
-    private static AttributedStyle valueStyle(String settingName, String value) {
-        if (settingName == null) return AttributedStyle.DEFAULT;
-        settingName = settingName.toLowerCase(Locale.ROOT);
-        if ("interval".equals(settingName) || "disconnecttimeout".equals(settingName)) {
-            return SETTING_VALUE_STYLE;
-        }
-        if (BOOLEAN_VALUES.contains(value)) {
-            return SETTING_VALUE_STYLE;
-        }
-        if (INTERVAL_PLACEHOLDER.equals(value) || MINUTES_PLACEHOLDER.equals(value)) {
-            return SETTING_VALUE_STYLE;
-        }
-        return AttributedStyle.DEFAULT;
-    }
-
-    // ----------------------------------------------------------------
-    // Context-aware usage coloring
-    // ----------------------------------------------------------------
-
     static String colorUsage(String usage) {
-        if (usage.startsWith("Usage: playermonitor setting stat")) {
-            return colorSettingUsage(usage);
+        if (usage.startsWith("Usage: playermonitor setting ")) {
+            String commandPart = usage.substring("Usage: playermonitor setting ".length());
+            int separator = commandPart.indexOf(' ');
+            String settingName = separator < 0 ? commandPart : commandPart.substring(0, separator);
+            String remainder = separator < 0 ? "" : commandPart.substring(separator + 1);
+            return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                    + ROOT_COMMAND + "setting" + RESET + " "
+                    + SETTING_NAME + settingName + RESET
+                    + (remainder.isEmpty() ? "" : " " + SETTING_VALUE + remainder + RESET);
         }
-        if (usage.startsWith("Usage: playermonitor stat scan")) {
-            return colorScanUsage(usage);
+        if (usage.equals("Usage: playermonitor scan-stat")) {
+            return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                    + ROOT_COMMAND + "scan-stat" + RESET;
         }
         if (usage.startsWith("Usage: playermonitor " + PLAYER_PLACEHOLDER)) {
             return colorPlayerUsage(usage);
@@ -192,105 +198,119 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return usage;
     }
 
-    private static String colorSettingUsage(String usage) {
-        // "Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|...]"
-        StringBuilder sb = new StringBuilder();
-        sb.append("Usage: ");
-        sb.append(COMMAND_NAME).append("playermonitor").append(RESET).append(" ");
-        sb.append(ROOT_SUBCOMMAND).append("setting").append(RESET).append(" ");
-        sb.append(NESTED_STAT).append("stat").append(RESET).append(" [");
-        sb.append(SETTING_NAME).append("interval").append(RESET).append(" ");
-        sb.append(SETTING_VALUE).append("<ms>").append(RESET).append("|");
-        sb.append(SETTING_NAME).append("autoscan").append(RESET).append(" ");
-        sb.append(SETTING_VALUE).append("<true|false>").append(RESET).append("|");
-        sb.append(SETTING_NAME).append("enabled").append(RESET).append(" ");
-        sb.append(SETTING_VALUE).append("<true|false>").append(RESET).append("|");
-        sb.append(SETTING_NAME).append("outputhide").append(RESET).append(" ");
-        sb.append(SETTING_VALUE).append("<true|false>").append(RESET).append("|");
-        sb.append(SETTING_NAME).append("disconnecttimeout").append(RESET).append(" ");
-        sb.append(SETTING_VALUE).append("<min>").append(RESET).append("]");
-        return sb.toString();
-    }
-
-    private static String colorScanUsage(String usage) {
-        // "Usage: playermonitor stat scan"
-        return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
-                + ROOT_SUBCOMMAND + "stat" + RESET + " "
-                + SCAN_ACTION + "scan" + RESET;
-    }
-
     private static String colorPlayerUsage(String usage) {
-        // "Usage: playermonitor <玩家名> [stat|latestlogin|recentlogin|chat]"
-        return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
-                + PLAYER_COLOR + PLAYER_PLACEHOLDER + RESET + " ["
-                + PLAYER_ACTION + "stat" + RESET + "|"
-                + PLAYER_ACTION + "latestlogin" + RESET + "|"
-                + PLAYER_ACTION + "recentlogin" + RESET + "|"
-                + PLAYER_ACTION + "chat" + RESET + "]";
+        String prefix = "Usage: playermonitor " + PLAYER_PLACEHOLDER;
+        String remainder = usage.length() <= prefix.length() ? "" : usage.substring(prefix.length());
+        String colored = "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                + PLAYER_COLOR + PLAYER_PLACEHOLDER + RESET;
+        for (String action : PLAYER_ACTIONS) {
+            remainder = remainder.replace(action, PLAYER_ACTION + action + RESET);
+        }
+        return colored + remainder;
     }
-
-    // ----------------------------------------------------------------
-    // Command handlers
-    // ----------------------------------------------------------------
 
     private void setting(String[] args) {
-        if (args.length < 2 || !"stat".equalsIgnoreCase(args[1])) {
-            help();
+        if (args.length == 1) {
+            showSettings();
             return;
         }
-        if (args.length == 2) {
-            statSettings();
+        if (args.length != 3) {
+            settingHelp();
             return;
         }
-        String action = args[2].toLowerCase(Locale.ROOT);
-        if (args.length != 4) {
-            help();
-            return;
-        }
+        String action = lower(args[1]);
+        String value = args[2];
         try {
             switch (action) {
-                case "interval" -> {
-                    int interval = parseInterval(args[3]);
-                    settings.setStatIntervalMillis(interval);
-                    print("Stat interval set to " + interval + "ms.");
+                case "scan-on-entry" -> {
+                    settings.setScanOnEntry(parseBoolean(value));
+                    statSettingSaved("进入 Game 自动扫描已设置为 " + value.toLowerCase(Locale.ROOT));
                 }
-                case "autoscan" -> {
-                    boolean enabled = parseBoolean(args[3]);
-                    settings.setAutoScanOnGameEntry(enabled);
-                    print("Auto scan on Game entry set to " + enabled + ".");
+                case "disconnect-timeout" -> {
+                    int parsed = parsePositiveInt(value, MINUTE_PLACEHOLDER);
+                    settings.setDisconnectTimeoutMinutes(parsed);
+                    listener.applyDisconnectTimeoutNow();
+                    print("断线确认时间已设置为 " + parsed + " 分钟，已立即生效。");
                 }
-                case "enabled" -> {
-                    boolean enabled = parseBoolean(args[3]);
-                    settings.setStatScanEnabled(enabled);
-                    print("Automatic stat scan set to " + enabled + ".");
+                case "stat-enabled" -> {
+                    settings.setStatEnabled(parseBoolean(value));
+                    statSettingSaved("Stat 自动扫描总开关已设置为 " + value.toLowerCase(Locale.ROOT));
                 }
-                case "outputhide" -> {
-                    boolean enabled = parseBoolean(args[3]);
-                    settings.setStatOutputHidden(enabled);
-                    print("Stat output hiding set to " + enabled + ".");
+                case "stat-send-interval" -> {
+                    int parsed = parsePositiveInt(value, MS_PLACEHOLDER);
+                    settings.setStatSendIntervalMillis(parsed);
+                    statSettingSaved("Stat 发送间隔已设置为 " + parsed + " ms");
                 }
-                case "disconnecttimeout" -> {
-                    int minutes = parseMinutes(args[3]);
-                    settings.setDisconnectFinalizationMinutes(minutes);
-                    print("Disconnect finalization timeout set to " + minutes + "min.");
+                case "stat-output-hide" -> {
+                    settings.setStatOutputHide(parseBoolean(value));
+                    statSettingSaved("Stat 输出隐藏已设置为 " + value.toLowerCase(Locale.ROOT));
                 }
-                default -> help();
+                case "stat-cooldown" -> {
+                    int parsed = parseInt(value, HOUR_PLACEHOLDER);
+                    settings.setStatCooldownHours(parsed);
+                    statSettingSaved("自动 Stat 冷却时间已设置为 " + parsed + " 小时");
+                }
+                case "stat-timeout" -> {
+                    int parsed = parseInt(value, MS_PLACEHOLDER);
+                    settings.setStatTimeoutMillis(parsed);
+                    statSettingSaved("Stat 响应超时已设置为 " + parsed + " ms");
+                }
+                case "stat-attempts" -> {
+                    int parsed = parseInt(value, COUNT_PLACEHOLDER);
+                    settings.setStatAttempts(parsed);
+                    statSettingSaved("Stat 最大总尝试次数已设置为 " + parsed);
+                }
+                case "scan-on-join" -> {
+                    settings.setScanOnJoin(parseBoolean(value));
+                    statSettingSaved("玩家加入自动扫描已设置为 " + value.toLowerCase(Locale.ROOT));
+                }
+                case "prioritize-join-stat" -> {
+                    settings.setPrioritizeJoinStat(parseBoolean(value));
+                    statSettingSaved("新加入玩家优先扫描已设置为 " + value.toLowerCase(Locale.ROOT));
+                }
+                case "display-timezone" -> {
+                    settings.setDisplayTimezone(value);
+                    print("命令输出时区已设置为 " + settings.displayTimezone() + "，已立即生效。");
+                }
+                case "recentlogin-count" -> {
+                    int parsed = parseInt(value, COUNT_PLACEHOLDER);
+                    settings.setRecentLoginCount(parsed);
+                    print("近期登录默认显示数量已设置为 " + parsed + "，已立即生效。");
+                }
+                case "chat-count" -> {
+                    int parsed = parseInt(value, COUNT_PLACEHOLDER);
+                    settings.setChatCount(parsed);
+                    print("聊天记录默认显示数量已设置为 " + parsed + "，已立即生效。");
+                }
+                case "cache-idle" -> {
+                    int parsed = parseInt(value, MINUTE_PLACEHOLDER);
+                    settings.setCacheIdleMinutes(parsed);
+                    service.applyCacheSettingsNow();
+                    print("缓存空闲释放时间已设置为 " + parsed + " 分钟，已立即生效。");
+                }
+                case "max-cached-history" -> {
+                    int parsed = parseInt(value, COUNT_PLACEHOLDER);
+                    settings.setMaxCachedHistory(parsed);
+                    service.applyCacheSettingsNow();
+                    print("每类最大内存历史缓存已设置为 " + parsed + " 条，已立即生效。");
+                }
+                default -> settingHelp();
             }
         } catch (NumberFormatException error) {
-            print("disconnecttimeout".equals(action) ? "请输入准确的正整数分钟值。" : "请输入准确的正整数毫秒值。");
+            print("请输入有效的整数值。");
         } catch (IllegalArgumentException error) {
             print(error.getMessage());
         } catch (IOException error) {
-            print("Unable to save monitor settings: " + error.getMessage());
+            print("无法保存设置: " + error.getMessage());
         }
     }
 
-    private void statCommand(String[] args) {
-        if (args.length == 2 && "scan".equalsIgnoreCase(args[1])) {
-            scan();
-            return;
+    private void statSettingSaved(String message) {
+        if (settings.hasDeferredStatSettings()) {
+            print(message + "；设置已保存，将在当前 Stat 请求结束后生效。");
+        } else {
+            print(message + "，已立即生效。");
         }
-        help();
     }
 
     private void player(String[] args) {
@@ -299,7 +319,12 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             print("请输入准确的玩家名。");
             return;
         }
-        if (args.length != 2) {
+        if (args.length < 2 || args.length > 3) {
+            playerHelp();
+            return;
+        }
+        String action = lower(args[1]);
+        if (args.length == 3 && !"recentlogin".equals(action) && !"chat".equals(action)) {
             playerHelp();
             return;
         }
@@ -309,55 +334,48 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 print("未找到玩家档案: " + playerName);
                 return;
             }
-            switch (args[1].toLowerCase(Locale.ROOT)) {
+            switch (action) {
                 case "stat" -> stat(record.get());
                 case "latestlogin" -> latestLogin(record.get());
-                case "recentlogin" -> recentLogins(record.get());
-                case "chat" -> chats(record.get());
+                case "recentlogin" -> recentLogins(record.get(), queryCount(args, settings.recentLoginCount()));
+                case "chat" -> chats(record.get(), queryCount(args, settings.chatCount()));
                 default -> playerHelp();
             }
+        } catch (NumberFormatException error) {
+            print("显示数量必须是 5–50 之间的整数。");
         } catch (IOException error) {
-            print("Unable to read player record: " + error.getMessage());
+            print("无法读取玩家记录: " + error.getMessage());
         }
     }
 
     private List<String> completeSetting(String[] args) {
         if (args.length == 1) {
-            return List.of("stat");
+            return SETTING_ITEMS;
         }
         if (args.length == 2) {
-            return matching(args[1], List.of("stat"));
-        }
-        if (!"stat".equalsIgnoreCase(args[1])) {
-            return List.of();
+            return matching(args[1], SETTING_ITEMS);
         }
         if (args.length == 3) {
-            return matching(args[2], SETTING_ITEMS);
-        }
-        if (args.length == 4) {
-            return switch (args[2].toLowerCase(Locale.ROOT)) {
-                case "interval" -> List.of(INTERVAL_PLACEHOLDER);
-                case "autoscan", "enabled", "outputhide" -> matching(args[3], List.of("true", "false"));
-                case "disconnecttimeout" -> List.of(MINUTES_PLACEHOLDER);
+            List<String> candidates = switch (lower(args[1])) {
+                case "scan-on-entry", "stat-enabled", "stat-output-hide", "scan-on-join",
+                        "prioritize-join-stat" -> BOOLEAN_VALUES;
+                case "disconnect-timeout", "cache-idle" -> List.of(MINUTE_PLACEHOLDER);
+                case "stat-send-interval", "stat-timeout" -> List.of(MS_PLACEHOLDER);
+                case "stat-cooldown" -> List.of(HOUR_PLACEHOLDER);
+                case "stat-attempts", "max-cached-history" -> List.of(COUNT_PLACEHOLDER);
+                case "display-timezone" -> TIMEZONE_VALUES;
+                case "recentlogin-count" -> List.of(Integer.toString(settings.recentLoginCount()));
+                case "chat-count" -> List.of(Integer.toString(settings.chatCount()));
                 default -> List.of();
             };
-        }
-        return List.of();
-    }
-
-    private List<String> completeStatCommand(String[] args) {
-        if (args.length == 1) {
-            return List.of("scan");
-        }
-        if (args.length == 2) {
-            return matching(args[1], List.of("scan"));
+            return matching(args[2], candidates);
         }
         return List.of();
     }
 
     private List<String> completePlayerNames(String input) {
         if (input == null || input.isEmpty()) {
-            return List.of("setting", "stat", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", PLAYER_PLACEHOLDER);
         }
         try {
             TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -368,8 +386,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             if ("setting".startsWith(prefix)) {
                 matches.add("setting");
             }
-            if ("stat".startsWith(prefix)) {
-                matches.add("stat");
+            if ("scan-stat".startsWith(prefix)) {
+                matches.add("scan-stat");
             }
             names.stream()
                     .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
@@ -381,23 +399,37 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
     }
 
-    private void statSettings() {
+    private void showSettings() {
         MonitorSettings current = settings.get();
-        report("Stat settings", List.of(
-                "扫描间隔: " + current.statIntervalMillis + " ms",
-                "进入 Game 自动扫描: " + state(current.autoScanOnGameEntry),
-                "自动 stat 扫描: " + state(current.statScanEnabled),
-                "隐藏服务器 stat 输出: " + state(current.statOutputHidden),
-                "断线会话收尾: " + current.disconnectFinalizationMinutes + " min"));
+        List<String> lines = new ArrayList<>();
+        lines.add("进入 Game 自动扫描: " + state(current.scanOnEntry));
+        lines.add("断线确认时间: " + current.disconnectTimeoutMinutes + " min");
+        lines.add("Stat 自动扫描总开关: " + state(current.statEnabled));
+        lines.add("Stat 发送间隔: " + current.statSendIntervalMillis + " ms");
+        lines.add("Stat 输出隐藏: " + state(current.statOutputHide));
+        lines.add("自动 Stat 冷却: " + current.statCooldownHours + " h");
+        lines.add("Stat 响应超时: " + current.statTimeoutMillis + " ms");
+        lines.add("Stat 最大尝试次数: " + current.statAttempts);
+        lines.add("玩家加入自动扫描: " + state(current.scanOnJoin));
+        lines.add("新加入玩家优先扫描: " + state(current.prioritizeJoinStat));
+        lines.add("显示时区: " + current.displayTimezone);
+        lines.add("近期登录默认数量: " + current.recentLoginCount);
+        lines.add("聊天默认数量: " + current.chatCount);
+        lines.add("缓存空闲释放: " + current.cacheIdleMinutes + " min");
+        lines.add("每类最大内存历史: " + current.maxCachedHistory);
+        if (settings.hasDeferredStatSettings()) {
+            lines.add("状态: Stat 设置已保存，等待当前请求完成后生效");
+        }
+        report("PlayerMonitor 设置", lines);
     }
 
     private void scan() {
         int queued = listener.scanAllOnlinePlayers();
         if (queued < 0) {
-            print("Stat scan is only available in Game.");
+            print("只有处于 Game 状态时才能手动扫描 Stat。");
             return;
         }
-        print("Queued stat scan for " + queued + " online players.");
+        print("已将 " + queued + " 名在线玩家加入 Stat 扫描队列。");
     }
 
     private void stat(PlayerRecord record) {
@@ -434,15 +466,15 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         report("Latest login", loginLines(record.playerName, session));
     }
 
-    private void recentLogins(PlayerRecord record) {
+    private void recentLogins(PlayerRecord record, int count) {
         if (record.loginSessions.isEmpty()) {
             report("Recent logins", List.of("玩家: " + record.playerName, "暂无登录记录"));
             return;
         }
         List<String> lines = new ArrayList<>();
+        List<LoginSession> sessions = service.recentLogins(record, count);
         lines.add("玩家: " + record.playerName);
-        lines.add("显示最近 " + Math.min(15, record.loginSessions.size()) + " / " + record.loginSessions.size() + " 次登录");
-        List<LoginSession> sessions = service.recentLogins(record, 15);
+        lines.add("显示最近 " + sessions.size() + " / " + record.loginSessions.size() + " 次登录");
         for (int index = 0; index < sessions.size(); index++) {
             LoginSession session = sessions.get(index);
             String line = "#" + (index + 1) + "  登录: " + format(session.loginAt)
@@ -455,15 +487,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         report("Recent logins", lines);
     }
 
-    private void chats(PlayerRecord record) {
+    private void chats(PlayerRecord record, int count) {
         if (record.chatMessages.isEmpty()) {
             report("Recent chat", List.of("玩家: " + record.playerName, "暂无聊天记录"));
             return;
         }
         List<String> lines = new ArrayList<>();
         lines.add("玩家: " + record.playerName);
-        lines.add("显示最近 " + Math.min(30, record.chatMessages.size()) + " / " + record.chatMessages.size() + " 条消息");
-        int start = Math.max(0, record.chatMessages.size() - 30);
+        int shown = Math.min(count, record.chatMessages.size());
+        lines.add("显示最近 " + shown + " / " + record.chatMessages.size() + " 条消息");
+        int start = Math.max(0, record.chatMessages.size() - count);
         for (int index = record.chatMessages.size() - 1; index >= start; index--) {
             ChatEntry entry = record.chatMessages.get(index);
             lines.add(format(entry.timestamp) + "  " + entry.message);
@@ -503,22 +536,41 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void help() {
-        print(colorUsage("Usage: playermonitor setting stat [interval <ms>|autoscan <true|false>|enabled <true|false>|outputhide <true|false>|disconnecttimeout <min>]"));
-        print(colorUsage("Usage: playermonitor stat scan"));
+        print(colorUsage("Usage: playermonitor setting <option> <value>"));
+        print(colorUsage("Usage: playermonitor scan-stat"));
         playerHelp();
     }
 
+    private void settingHelp() {
+        for (String item : SETTING_ITEMS) {
+            print(colorUsage("Usage: playermonitor setting " + item + " " + placeholderFor(item)));
+        }
+    }
+
     private void playerHelp() {
-        print(colorUsage("Usage: playermonitor " + PLAYER_PLACEHOLDER + " [stat|latestlogin|recentlogin|chat]"));
+        print(colorUsage("Usage: playermonitor " + PLAYER_PLACEHOLDER
+                + " [stat|latestlogin|recentlogin [count]|chat [count]]"));
     }
 
     private void print(String message) {
         logger.info(message);
     }
 
+    private static String placeholderFor(String setting) {
+        return switch (setting) {
+            case "scan-on-entry", "stat-enabled", "stat-output-hide", "scan-on-join",
+                    "prioritize-join-stat" -> TRUE_FALSE_PLACEHOLDER;
+            case "disconnect-timeout", "cache-idle" -> MINUTE_PLACEHOLDER;
+            case "stat-send-interval", "stat-timeout" -> MS_PLACEHOLDER;
+            case "stat-cooldown" -> HOUR_PLACEHOLDER;
+            case "display-timezone" -> TIMEZONE_PLACEHOLDER;
+            default -> COUNT_PLACEHOLDER;
+        };
+    }
+
     private static List<String> matching(String input, List<String> values) {
         String prefix = input == null ? "" : input.toLowerCase(Locale.ROOT);
-        return values.stream().filter(value -> value.startsWith(prefix)).toList();
+        return values.stream().filter(value -> value.toLowerCase(Locale.ROOT).startsWith(prefix)).toList();
     }
 
     private static boolean parseBoolean(String value) {
@@ -529,25 +581,34 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         };
     }
 
-    private static int parseMinutes(String value) {
-        if (MINUTES_PLACEHOLDER.equals(value)) {
-            throw new NumberFormatException(value);
+    private static int parsePositiveInt(String value, String placeholder) {
+        int parsed = parseInt(value, placeholder);
+        if (parsed <= 0) {
+            throw new IllegalArgumentException("数值必须大于 0。");
         }
-        int minutes = Integer.parseInt(value);
-        if (minutes <= 0) {
-            throw new NumberFormatException(value);
-        }
-        return minutes;
+        return parsed;
     }
-    private static int parseInterval(String value) {
-        if (INTERVAL_PLACEHOLDER.equals(value)) {
+
+    private static int parseInt(String value, String placeholder) {
+        if (placeholder.equalsIgnoreCase(value)) {
             throw new NumberFormatException(value);
         }
-        int interval = Integer.parseInt(value);
-        if (interval <= 0) {
-            throw new NumberFormatException(value);
+        return Integer.parseInt(value);
+    }
+
+    private static int queryCount(String[] args, int defaultValue) {
+        if (args.length < 3) {
+            return defaultValue;
         }
-        return interval;
+        int value = Integer.parseInt(args[2]);
+        if (value < MonitorSettingsStore.MIN_QUERY_COUNT || value > MonitorSettingsStore.MAX_QUERY_COUNT) {
+            throw new NumberFormatException(args[2]);
+        }
+        return value;
+    }
+
+    private static String lower(String value) {
+        return value == null ? "" : value.toLowerCase(Locale.ROOT);
     }
 
     private static String state(boolean value) {
@@ -565,8 +626,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return value ? "✓" : "—";
     }
 
-    private static String format(long timestamp) {
-        return TIME.format(Instant.ofEpochMilli(timestamp));
+    private String format(long timestamp) {
+        return TIME_FORMAT.withZone(settings.displayZoneId()).format(Instant.ofEpochMilli(timestamp));
     }
 
     private static String highlightTimestamps(String line) {
@@ -578,6 +639,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         matcher.appendTail(output);
         return output.toString();
     }
+
     private static String value(Object value) {
         return value == null ? "未知" : value.toString();
     }

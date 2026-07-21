@@ -52,4 +52,32 @@ class PlayerMonitorServiceStatTest {
         assertFalse(reloaded.hasStatCapturedAtOrAfter("WaltomAdaam", 1_001L));
         assertFalse(reloaded.hasStatCapturedAtOrAfter("Unknown", 0L));
     }
+
+    @Test
+    void newerStatWriteReplacesPreviousStoredSnapshot() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor");
+        PlayerMonitorService service = new PlayerMonitorService(directory);
+        service.initialize();
+
+        StatSnapshot first = new StatSnapshot();
+        first.capturedAt = 100L;
+        first.deathCount = 1;
+        StatSnapshot second = new StatSnapshot();
+        second.capturedAt = 200L;
+        second.deathCount = 9;
+
+        service.recordStat("WaltomAdaam", first);
+        service.recordStat("WaltomAdaam", second);
+
+        Path statsFile = directory.resolve("players/WaltomAdaam/stats.jsonl");
+        long lineCount;
+        try (java.util.stream.Stream<String> lines = Files.lines(statsFile)) {
+            lineCount = lines.filter(line -> !line.isBlank()).count();
+        }
+        assertEquals(1L, lineCount);
+        var record = service.findRecord("WaltomAdaam").orElseThrow();
+        assertEquals(1, record.statSnapshots.size());
+        assertEquals(9, record.statSnapshots.get(0).deathCount);
+    }
+
 }

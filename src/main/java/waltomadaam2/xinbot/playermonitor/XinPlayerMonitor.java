@@ -37,12 +37,12 @@ public final class XinPlayerMonitor implements Plugin {
                 logger.warn(message);
                 log.info("WARN: " + message);
             };
-            PlayerMonitorService service = new PlayerMonitorService(dataDirectory);
-            service.setWarningSink(warningSink);
-            service.initialize();
             MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
             settings.setWarningSink(warningSink);
             settings.initialize();
+            PlayerMonitorService service = new PlayerMonitorService(dataDirectory, settings);
+            service.setWarningSink(warningSink);
+            service.initialize();
             installStatChatLogFilter(settings);
             listener = new PlayerMonitorListener(service, log, logger, settings);
             service.setEvictionGuard(listener::isProtectedFromEviction);
@@ -50,7 +50,7 @@ public final class XinPlayerMonitor implements Plugin {
             Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
-                            "playermonitor setting stat|<player> [stat|latestlogin|recentlogin|chat]"),
+                            "playermonitor setting|scan-stat|<player> [stat|latestlogin|recentlogin|chat]"),
                     new PlayerMonitorManagementCommand(service, settings, listener, logger),
                     this);
             log.info("plugin enabled");
@@ -79,7 +79,7 @@ public final class XinPlayerMonitor implements Plugin {
             return;
         }
         loggerContext = context;
-        statChatLogFilter = new StatChatLogFilter(settings::statOutputHidden);
+        statChatLogFilter = new StatChatLogFilter(settings::statOutputHide);
         statChatLogFilter.start();
         loggerContext.addTurboFilter(statChatLogFilter);
     }

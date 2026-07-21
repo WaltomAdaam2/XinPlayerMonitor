@@ -37,13 +37,16 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.function.IntSupplier;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 /**
  * Stores one directory per player under {@code playermonitor/players/<name>/} containing
  * {@code profile.json} (identity + open session + latest-state summary, rewritten atomically)
- * and three append-only JSON Lines logs: {@code sessions.jsonl}, {@code chat.jsonl}, {@code stats.jsonl}.
+ * and JSON Lines data files: {@code sessions.jsonl} and {@code chat.jsonl} are append-only,
+ * while {@code stats.jsonl} contains only the latest successfully captured Stat snapshot.
  */
 final class PlayerRecordStore {
     private static final String PROFILE_FILE = "profile.json";
@@ -52,18 +55,20 @@ final class PlayerRecordStore {
     private static final String STATS_FILE = "stats.jsonl";
 
     private static final String TEMP_PROFILE_PREFIX = "xpm-profile-";
+    private static final String TEMP_STAT_PREFIX = "xpm-stat-";
     private static final String TEMP_MIGRATION_PREFIX = "xpm-migration-";
     private static final String TEMP_REPAIR_PREFIX = "xpm-repair-";
 
-    private static final long EVICTION_IDLE_MILLIS = TimeUnit.MINUTES.toMillis(30);
     private static final long EVICTION_CHECK_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(5);
-    private static final int MAX_CACHED_HISTORY_ENTRIES = 200;
+    private static final int DEFAULT_MAX_CACHED_HISTORY_ENTRIES = 200;
     private static final int LOCK_STRIPE_COUNT = 256;
 
     private final Path directory;
     private final Path playersDirectory;
     private final Gson prettyGson = new GsonBuilder().setPrettyPrinting().create();
     private final Gson compactGson = new Gson();
+    private final IntSupplier maxCachedHistoryEntries;
+    private final LongSupplier cacheIdleMillis;
 
     private final ReentrantLock[] lockStripes = new ReentrantLock[LOCK_STRIPE_COUNT];
     /** normalizedKey → canonical directory name (persistent disk index, never evicted). */
@@ -87,8 +92,15 @@ final class PlayerRecordStore {
     private ScheduledExecutorService evictionExecutor;
 
     PlayerRecordStore(Path directory) {
+        this(directory, () -> DEFAULT_MAX_CACHED_HISTORY_ENTRIES,
+                () -> TimeUnit.MINUTES.toMillis(MonitorSettings.DEFAULT_CACHE_IDLE_MINUTES));
+    }
+
+    PlayerRecordStore(Path directory, IntSupplier maxCachedHistoryEntries, LongSupplier cacheIdleMillis) {
         this.directory = directory;
         this.playersDirectory = directory.resolve("players");
+        this.maxCachedHistoryEntries = Objects.requireNonNull(maxCachedHistoryEntries, "maxCachedHistoryEntries");
+        this.cacheIdleMillis = Objects.requireNonNull(cacheIdleMillis, "cacheIdleMillis");
         for (int i = 0; i < LOCK_STRIPE_COUNT; i++) {
             lockStripes[i] = new ReentrantLock();
         }
@@ -226,7 +238,7 @@ final class PlayerRecordStore {
             PlayerRecord record = records.get(normalizedKey);
             ChatEntry entry = new ChatEntry(now, message);
             appendJsonLine(playerDir.resolve(CHAT_FILE), entry);
-            addBounded(record.chatMessages, entry);
+            addBounded(record.chatMessages, entry, maxCachedHistory());
         } finally {
             lock.unlock();
         }
@@ -251,12 +263,11 @@ final class PlayerRecordStore {
 
             PlayerRecord record = records.get(normalizedKey);
             PlayerProfile profile = profiles.get(normalizedKey);
-            appendJsonLine(playerDir.resolve(STATS_FILE), snapshot);
-            addBounded(record.statSnapshots, snapshot);
+            writeLatestStat(playerDir.resolve(STATS_FILE), snapshot);
+            record.statSnapshots.clear();
+            record.statSnapshots.add(snapshot);
             profile.lastSeenAt = Math.max(profile.lastSeenAt, snapshot.capturedAt);
-            profile.lastStatCapturedAt = profile.lastStatCapturedAt == null
-                    ? snapshot.capturedAt
-                    : Math.max(profile.lastStatCapturedAt, snapshot.capturedAt);
+            profile.lastStatCapturedAt = snapshot.capturedAt;
             writeProfile(playerDir, profile);
         } finally {
             lock.unlock();
@@ -402,8 +413,8 @@ final class PlayerRecordStore {
         if (profile.currentSession != null) {
             sessions.add(profile.currentSession);
         }
-        List<ChatEntry> chat = boundedTail(loadJsonl(playerDir.resolve(CHAT_FILE), ChatEntry.class, normalizedKey));
-        List<StatSnapshot> stats = boundedTail(loadJsonl(playerDir.resolve(STATS_FILE), StatSnapshot.class, normalizedKey));
+        List<ChatEntry> chat = loadJsonl(playerDir.resolve(CHAT_FILE), ChatEntry.class, normalizedKey);
+        List<StatSnapshot> stats = loadLatestStat(playerDir.resolve(STATS_FILE), normalizedKey);
 
         PlayerRecord record = new PlayerRecord(profile.playerName, profile.firstSeenAt);
         record.loginSessions = sessions;
@@ -438,19 +449,15 @@ final class PlayerRecordStore {
         return profile;
     }
 
-    /** Bounds a long-lived cached history list so a busy player never grows it without limit. */
-    private static <T> List<T> boundedTail(List<T> values) {
-        if (values.size() <= MAX_CACHED_HISTORY_ENTRIES) {
-            return values;
-        }
-        return new ArrayList<>(values.subList(values.size() - MAX_CACHED_HISTORY_ENTRIES, values.size()));
-    }
-
-    private static <T> void addBounded(List<T> list, T value) {
-        list.add(value);
-        while (list.size() > MAX_CACHED_HISTORY_ENTRIES) {
+    private static <T> void trimToLimit(List<T> list, int maximum) {
+        while (list.size() > maximum) {
             list.remove(0);
         }
+    }
+
+    private static <T> void addBounded(List<T> list, T value, int maximum) {
+        list.add(value);
+        trimToLimit(list, maximum);
     }
 
     private String detectIdentityMismatch(Path profilePath, String displayName) {
@@ -472,7 +479,8 @@ final class PlayerRecordStore {
         if (!Files.exists(file)) {
             return new ArrayList<>();
         }
-        Deque<T> values = new ArrayDeque<>(MAX_CACHED_HISTORY_ENTRIES);
+        int maximum = maxCachedHistory();
+        Deque<T> values = new ArrayDeque<>(maximum);
         List<String> corruptedDescriptions = new ArrayList<>();
         int lineNumber = 0;
         try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
@@ -487,7 +495,7 @@ final class PlayerRecordStore {
                     if (value == null) {
                         throw new JsonParseException("line parsed to null");
                     }
-                    if (values.size() == MAX_CACHED_HISTORY_ENTRIES) {
+                    if (values.size() == maximum) {
                         values.removeFirst();
                     }
                     values.addLast(value);
@@ -629,6 +637,56 @@ final class PlayerRecordStore {
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
     }
 
+    private void writeLatestStat(Path file, StatSnapshot snapshot) throws IOException {
+        Files.createDirectories(file.getParent());
+        Path temp = Files.createTempFile(file.getParent(), TEMP_STAT_PREFIX, ".tmp");
+        try {
+            Files.writeString(temp, compactGson.toJson(snapshot) + System.lineSeparator(),
+                    StandardCharsets.UTF_8, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+            atomicMove(temp, file);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    private List<StatSnapshot> loadLatestStat(Path file, String normalizedKey) throws IOException {
+        if (!Files.exists(file)) {
+            return new ArrayList<>();
+        }
+
+        // Reuse the normal loader first so corrupted lines are safely repaired.
+        loadJsonl(file, StatSnapshot.class, normalizedKey);
+
+        StatSnapshot latest = null;
+        long validCount = 0L;
+        try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                StatSnapshot candidate = compactGson.fromJson(line, StatSnapshot.class);
+                if (candidate == null) {
+                    continue;
+                }
+                validCount++;
+                if (latest == null || candidate.capturedAt >= latest.capturedAt) {
+                    latest = candidate;
+                }
+            }
+        } catch (JsonParseException error) {
+            throw new IOException("Unable to read repaired Stat data from " + file, error);
+        }
+
+        if (latest == null) {
+            return new ArrayList<>();
+        }
+        if (validCount > 1L) {
+            writeLatestStat(file, latest);
+        }
+        return new ArrayList<>(List.of(latest));
+    }
+
     private static void atomicMove(Path source, Path target) throws IOException {
         try {
             Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -721,8 +779,9 @@ final class PlayerRecordStore {
     }
 
     private static boolean isPluginTempFile(String fileName) {
-        return (fileName.startsWith(TEMP_PROFILE_PREFIX) || fileName.startsWith("xpm-settings-")
-                || fileName.startsWith(TEMP_REPAIR_PREFIX)) && fileName.endsWith(".tmp");
+        return (fileName.startsWith(TEMP_PROFILE_PREFIX) || fileName.startsWith(TEMP_STAT_PREFIX)
+                || fileName.startsWith("xpm-settings-") || fileName.startsWith(TEMP_REPAIR_PREFIX))
+                && fileName.endsWith(".tmp");
     }
 
     private static boolean isInternalOrQuarantinedDirectory(Path path) {
@@ -874,7 +933,9 @@ final class PlayerRecordStore {
             writeMigratedProfile(stagingDir, legacyRecord);
             writeMigratedJsonl(stagingDir.resolve(SESSIONS_FILE), completedSessionsOf(legacyRecord));
             writeMigratedJsonl(stagingDir.resolve(CHAT_FILE), legacyRecord.chatMessages);
-            writeMigratedJsonl(stagingDir.resolve(STATS_FILE), legacyRecord.statSnapshots);
+            StatSnapshot latestLegacyStat = latestStatOf(legacyRecord.statSnapshots);
+            writeMigratedJsonl(stagingDir.resolve(STATS_FILE),
+                    latestLegacyStat == null ? List.of() : List.of(latestLegacyStat));
 
             if (!validateMigratedDirectory(stagingDir, legacyRecord)) {
                 warn("Failed to migrate " + legacy.getFileName() + ": validation of converted data failed; left in place.");
@@ -950,6 +1011,16 @@ final class PlayerRecordStore {
                 .toList();
     }
 
+    private static StatSnapshot latestStatOf(List<StatSnapshot> snapshots) {
+        if (snapshots == null || snapshots.isEmpty()) {
+            return null;
+        }
+        return snapshots.stream()
+                .filter(Objects::nonNull)
+                .max(Comparator.comparingLong(snapshot -> snapshot.capturedAt))
+                .orElse(null);
+    }
+
     private <T> void writeMigratedJsonl(Path target, List<T> values) throws IOException {
         StringBuilder builder = new StringBuilder();
         for (T value : values) {
@@ -983,8 +1054,9 @@ final class PlayerRecordStore {
                     != legacyRecord.chatMessages.size()) {
                 return false;
             }
+            long expectedStatEntries = latestStatOf(legacyRecord.statSnapshots) == null ? 0L : 1L;
             return countJsonlEntries(stagingDir.resolve(STATS_FILE), StatSnapshot.class)
-                    == legacyRecord.statSnapshots.size();
+                    == expectedStatEntries;
         } catch (IOException | JsonParseException error) {
             return false;
         }
@@ -1044,7 +1116,7 @@ final class PlayerRecordStore {
     }
 
     void evictIdleRecords() {
-        evictRecordsIdleSince(System.currentTimeMillis() - EVICTION_IDLE_MILLIS);
+        evictRecordsIdleSince(System.currentTimeMillis() - Math.max(1L, cacheIdleMillis.getAsLong()));
     }
 
     /** Package-private so tests can force eviction without waiting on real time. */
@@ -1075,6 +1147,30 @@ final class PlayerRecordStore {
                 lock.unlock();
             }
         }
+    }
+
+
+    /** Applies a reduced runtime history limit immediately without touching disk history. */
+    void trimCachedHistoryToConfiguredLimit() {
+        int maximum = maxCachedHistory();
+        for (String normalizedKey : List.copyOf(records.keySet())) {
+            ReentrantLock lock = lockFor(normalizedKey);
+            lock.lock();
+            try {
+                PlayerRecord record = records.get(normalizedKey);
+                if (record != null) {
+                    trimToLimit(record.loginSessions, maximum);
+                    trimToLimit(record.chatMessages, maximum);
+                    trimToLimit(record.statSnapshots, maximum);
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
+    private int maxCachedHistory() {
+        return Math.max(1, maxCachedHistoryEntries.getAsInt());
     }
 
     /** Test-only hook. */

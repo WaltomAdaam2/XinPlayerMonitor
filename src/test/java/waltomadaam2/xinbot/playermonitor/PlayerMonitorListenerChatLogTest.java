@@ -38,8 +38,8 @@ class PlayerMonitorListenerChatLogTest {
         service.initialize();
         MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         settings.initialize();
-        settings.setAutoScanOnGameEntry(false);
-        settings.setStatScanEnabled(false);
+        settings.setScanOnEntry(false);
+        settings.setStatEnabled(false);
         Path logDirectory = temporaryDirectory.resolve("playermonitor/log");
         logFile = logDirectory.resolve("playermonitor-" + LocalDate.now() + ".log");
         listener = new PlayerMonitorListener(

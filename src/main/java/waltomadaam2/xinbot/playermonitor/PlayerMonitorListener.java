@@ -7,12 +7,12 @@ import xin.bbtt.mcbot.Server;
 import xin.bbtt.mcbot.event.EventHandler;
 import xin.bbtt.mcbot.event.EventPriority;
 import xin.bbtt.mcbot.event.Listener;
+import xin.bbtt.mcbot.events.DisconnectEvent;
 import xin.bbtt.mcbot.events.PlayerJoinEvent;
 import xin.bbtt.mcbot.events.PlayerLeaveEvent;
-import xin.bbtt.mcbot.events.DisconnectEvent;
 import xin.bbtt.mcbot.events.PublicChatEvent;
-import xin.bbtt.mcbot.events.ServerChangeEvent;
 import xin.bbtt.mcbot.events.SendCommandEvent;
+import xin.bbtt.mcbot.events.ServerChangeEvent;
 import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.io.IOException;
@@ -28,9 +28,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 final class PlayerMonitorListener implements Listener {
-    private static final int MAX_STAT_SENDS = 4;
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
-    private static final long AUTOMATIC_STAT_COOLDOWN_MILLIS = TimeUnit.HOURS.toMillis(24L);
 
     private final PlayerMonitorService service;
     private final PluginLog log;
@@ -38,6 +36,7 @@ final class PlayerMonitorListener implements Listener {
     private final MonitorSettingsStore settings;
     private final Map<String, String> onlinePlayers = new ConcurrentHashMap<>();
     private final Set<String> pendingStatDispatches = ConcurrentHashMap.newKeySet();
+    private final Set<String> activeStatCycles = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
     private final Map<String, Integer> statAttempts = new ConcurrentHashMap<>();
     private final StatQueue statQueue;
@@ -55,6 +54,7 @@ final class PlayerMonitorListener implements Listener {
     private final Object connectionStateLock = new Object();
     private final Set<String> disconnectedPlayers = ConcurrentHashMap.newKeySet();
     private final Set<String> reconnectedNewPlayers = ConcurrentHashMap.newKeySet();
+    private final Set<String> reconnectedBrandNewPlayers = ConcurrentHashMap.newKeySet();
     private ScheduledFuture<?> disconnectFinalizer;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
@@ -65,9 +65,10 @@ final class PlayerMonitorListener implements Listener {
         statQueue = new StatQueue(
                 () -> gameActive,
                 name -> onlinePlayers.containsKey(normalize(name)),
-                settings::statIntervalMillis,
+                settings::statSendIntervalMillis,
                 command -> {
                     String playerName = command.substring("stat ".length());
+                    beginStatCycle(playerName);
                     pendingStatDispatches.add(normalize(playerName));
                     Bot.INSTANCE.sendCommand(command);
                 },
@@ -85,16 +86,15 @@ final class PlayerMonitorListener implements Listener {
             forceFreshRoster = false;
             disconnectedPlayers.clear();
             reconnectedNewPlayers.clear();
+            reconnectedBrandNewPlayers.clear();
             if (disconnectFinalizer != null) {
                 disconnectFinalizer.cancel(false);
                 disconnectFinalizer = null;
             }
         }
         statQueue.close();
+        clearStatTracking();
         retryExecutor.shutdownNow();
-        statResponses.clear();
-        statAttempts.clear();
-        pendingStatDispatches.clear();
     }
 
     @EventHandler
@@ -128,27 +128,26 @@ final class PlayerMonitorListener implements Listener {
         if (!resumed) {
             clearOnlinePlayers();
             clearStatTracking();
-            if (forceFreshRoster) {
-                recordFreshRoster(gameEntryAt);
-                forceFreshRoster = false;
-            }
+            recordFreshRoster(gameEntryAt);
+            forceFreshRoster = false;
         }
         log.info(resumed
                 ? "reconnected to Game; reconciled player roster"
                 : "entered Game; monitoring enabled");
         logger.info(resumed
                 ? "Reconnected to Game; reconciled player roster."
-                : "Entered Game; started scanning online players.");
+                : "Entered Game; player monitoring enabled.");
 
-        if (resumed && settings.statScanEnabled()) {
+        if (resumed && settings.statEnabled() && settings.scanOnJoin()) {
             for (String playerName : reconnectedNewPlayers) {
-                enqueueAutomaticJoinStat(playerName);
+                enqueueAutomaticJoinStat(playerName, reconnectedBrandNewPlayers.contains(normalize(playerName)));
             }
-            reconnectedNewPlayers.clear();
         }
+        reconnectedNewPlayers.clear();
+        reconnectedBrandNewPlayers.clear();
 
-        if (settings.autoScanOnGameEntry() && settings.statScanEnabled()) {
-            StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), true);
+        if (settings.scanOnEntry() && settings.statEnabled()) {
+            StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), true, StatQueue.PRIORITY_ENTRY);
             log.info("queued automatic stat scan for " + result.queued() + " online players");
             logger.info("Queued automatic stat scan for {} online players; skipped {} in cooldown.",
                     result.queued(), result.cooldownSkipped());
@@ -161,11 +160,12 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
+        boolean brandNew = isBrandNewPlayer(playerName);
         if (onlinePlayers.put(normalize(playerName), playerName) == null) {
             recordLogin(playerName, System.currentTimeMillis());
         }
-        if (settings.statScanEnabled()) {
-            enqueueAutomaticJoinStat(playerName);
+        if (settings.statEnabled() && settings.scanOnJoin()) {
+            enqueueAutomaticJoinStat(playerName, brandNew);
         }
     }
 
@@ -178,6 +178,7 @@ final class PlayerMonitorListener implements Listener {
         statResponses.cancel(playerName);
         statAttempts.remove(normalize(playerName));
         pendingStatDispatches.remove(normalize(playerName));
+        finishStatCycle(playerName);
         if (onlinePlayers.remove(normalize(playerName)) == null) {
             return;
         }
@@ -216,6 +217,7 @@ final class PlayerMonitorListener implements Listener {
             String normalizedName = normalize(captured.playerName());
             statAttempts.remove(normalizedName);
             pendingStatDispatches.remove(normalizedName);
+            finishStatCycle(captured.playerName());
             retryExecutor.schedule(() -> {
                 try {
                     service.recordStat(captured.playerName(), captured.snapshot());
@@ -242,11 +244,12 @@ final class PlayerMonitorListener implements Listener {
         if (event.isDefaultActionCancelled()) {
             pendingStatDispatches.remove(normalizedName);
             log.info("stat command cancelled for " + playerName);
+            handleStatSendFailure(playerName);
             return;
         }
         if (pendingStatDispatches.remove(normalizedName)) {
             statAttempts.merge(normalizedName, 1, Integer::sum);
-            statResponses.expect(playerName);
+            statResponses.expect(playerName, settings.statTimeoutMillis());
             logger.info("Sent stat for {}.", playerName);
         }
     }
@@ -255,7 +258,7 @@ final class PlayerMonitorListener implements Listener {
         if (!gameActive) {
             return -1;
         }
-        StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), false);
+        StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), false, StatQueue.PRIORITY_MANUAL);
         log.info("queued manual stat scan for " + result.queued() + " online players");
         return result.queued();
     }
@@ -268,6 +271,25 @@ final class PlayerMonitorListener implements Listener {
                 .map(PlayerMonitorListener::nameOf)
                 .filter(name -> name != null && !name.isBlank())
                 .toList();
+    }
+
+    /** Re-applies the configured timeout to an already active disconnect window. */
+    void applyDisconnectTimeoutNow() {
+        synchronized (connectionStateLock) {
+            if (closed || !reconnectPending) {
+                return;
+            }
+            if (disconnectFinalizer != null) {
+                disconnectFinalizer.cancel(false);
+            }
+            long timeoutMillis = TimeUnit.MINUTES.toMillis(settings.disconnectTimeoutMinutes());
+            long remainingMillis = Math.max(0L, disconnectAt + timeoutMillis - System.currentTimeMillis());
+            long expectedDisconnectAt = disconnectAt;
+            disconnectFinalizer = retryExecutor.schedule(
+                    () -> finalizeDisconnectedSessions(expectedDisconnectAt),
+                    remainingMillis,
+                    TimeUnit.MILLISECONDS);
+        }
     }
 
     private boolean beginReconnectWindow(long now) {
@@ -285,7 +307,7 @@ final class PlayerMonitorListener implements Listener {
             }
             disconnectFinalizer = retryExecutor.schedule(
                     () -> finalizeDisconnectedSessions(now),
-                    TimeUnit.MINUTES.toMillis(settings.disconnectFinalizationMinutes()),
+                    TimeUnit.MINUTES.toMillis(settings.disconnectTimeoutMinutes()),
                     TimeUnit.MILLISECONDS);
         }
         gameActive = false;
@@ -310,6 +332,11 @@ final class PlayerMonitorListener implements Listener {
         statResponses.clear();
         statAttempts.clear();
         pendingStatDispatches.clear();
+        for (String normalizedKey : Set.copyOf(activeStatCycles)) {
+            if (activeStatCycles.remove(normalizedKey)) {
+                settings.endStatOperation();
+            }
+        }
     }
 
     private boolean reconcileAfterReconnect(long gameEntryAt) {
@@ -333,8 +360,9 @@ final class PlayerMonitorListener implements Listener {
         int loggedOut = 0;
         int loggedIn = 0;
         reconnectedNewPlayers.clear();
+        reconnectedBrandNewPlayers.clear();
         for (String playerName : previousPlayers) {
-            if (!currentPlayers.contains(playerName)) {
+            if (!containsIgnoreCase(currentPlayers, playerName)) {
                 recordLogoutAt(playerName, lostAt);
                 loggedOut++;
             } else {
@@ -346,9 +374,13 @@ final class PlayerMonitorListener implements Listener {
             onlinePlayers.put(normalize(playerName), playerName);
         }
         for (String playerName : currentPlayers) {
-            if (!previousPlayers.contains(playerName)) {
+            if (!containsIgnoreCase(previousPlayers, playerName)) {
+                boolean brandNew = isBrandNewPlayer(playerName);
                 recordLogin(playerName, gameEntryAt);
                 reconnectedNewPlayers.add(playerName);
+                if (brandNew) {
+                    reconnectedBrandNewPlayers.add(normalize(playerName));
+                }
                 loggedIn++;
             }
         }
@@ -396,7 +428,8 @@ final class PlayerMonitorListener implements Listener {
             log.info("failed to record player " + playerName + ": " + error.getMessage());
         }
     }
-    private StatScanResult queueStatScan(Collection<GameProfile> profiles, boolean applyCooldown) {
+
+    private StatScanResult queueStatScan(Collection<GameProfile> profiles, boolean applyCooldown, int priority) {
         int queued = 0;
         int cooldownSkipped = 0;
         for (GameProfile profile : profiles) {
@@ -408,25 +441,47 @@ final class PlayerMonitorListener implements Listener {
                 cooldownSkipped++;
                 continue;
             }
-            if (statQueue.enqueue(playerName)) {
+            if (enqueueStatIfAvailable(playerName, priority)) {
                 queued++;
             }
         }
         return new StatScanResult(queued, cooldownSkipped);
     }
 
-    private void enqueueAutomaticJoinStat(String playerName) {
+    private void enqueueAutomaticJoinStat(String playerName, boolean brandNew) {
         if (isAutomaticStatCooldownActive(playerName)) {
             return;
         }
-        statQueue.enqueueFirst(playerName);
+        int priority;
+        if (brandNew) {
+            priority = StatQueue.PRIORITY_NEW_PLAYER;
+        } else if (settings.prioritizeJoinStat()) {
+            priority = StatQueue.PRIORITY_JOIN;
+        } else {
+            priority = StatQueue.PRIORITY_ENTRY;
+        }
+        enqueueStatIfAvailable(playerName, priority);
+    }
+
+    private boolean enqueueStatIfAvailable(String playerName, int priority) {
+        String normalizedName = normalize(playerName);
+        if (activeStatCycles.contains(normalizedName)
+                || pendingStatDispatches.contains(normalizedName)
+                || statResponses.isExpecting(normalizedName)) {
+            return false;
+        }
+        return statQueue.enqueue(playerName, priority);
     }
 
     private boolean isAutomaticStatCooldownActive(String playerName) {
+        int cooldownHours = settings.statCooldownHours();
+        if (cooldownHours <= 0) {
+            return false;
+        }
         try {
             return service.hasStatCapturedAtOrAfter(
                     playerName,
-                    System.currentTimeMillis() - AUTOMATIC_STAT_COOLDOWN_MILLIS);
+                    System.currentTimeMillis() - TimeUnit.HOURS.toMillis(cooldownHours));
         } catch (IOException error) {
             log.info("failed to check stat cooldown for " + playerName + ": " + error.getMessage());
             return false;
@@ -451,23 +506,51 @@ final class PlayerMonitorListener implements Listener {
 
     private void evaluateStatAttempt(String playerName, int attempts, String reason) {
         String normalizedName = normalize(playerName);
-        if (gameActive && onlinePlayers.containsKey(normalizedName) && attempts < MAX_STAT_SENDS) {
-            logger.warn("Stat request {} for {}; retrying ({}/{}).", reason, playerName, attempts, MAX_STAT_SENDS);
-            statQueue.enqueue(playerName);
+        int maximumAttempts = settings.statAttempts();
+        if (gameActive && onlinePlayers.containsKey(normalizedName) && attempts < maximumAttempts) {
+            logger.warn("Stat request {} for {}; retrying ({}/{}).",
+                    reason, playerName, attempts, maximumAttempts);
+            statQueue.enqueue(playerName, StatQueue.PRIORITY_MANUAL);
         } else if (attempts > 0) {
             logger.warn("Stat scan failed for {} after {} attempt(s).", playerName, attempts);
             statAttempts.remove(normalizedName);
             pendingStatDispatches.remove(normalizedName);
+            statResponses.cancel(playerName);
+            finishStatCycle(playerName);
+        }
+    }
+
+    private void beginStatCycle(String playerName) {
+        if (activeStatCycles.add(normalize(playerName))) {
+            settings.beginStatOperation();
+        }
+    }
+
+    private void finishStatCycle(String playerName) {
+        if (activeStatCycles.remove(normalize(playerName))) {
+            settings.endStatOperation();
+        }
+    }
+
+    private boolean isBrandNewPlayer(String playerName) {
+        try {
+            return service.findRecord(playerName).isEmpty();
+        } catch (IOException error) {
+            log.info("failed to check whether player is new " + playerName + ": " + error.getMessage());
+            return false;
         }
     }
 
     boolean isProtectedFromEviction(String normalizedPlayerName) {
-        if (onlinePlayers.containsKey(normalizedPlayerName)
-                || pendingStatDispatches.contains(normalizedPlayerName)
-                || statAttempts.containsKey(normalizedPlayerName)) {
+        String normalized = normalize(normalizedPlayerName);
+        if (onlinePlayers.containsKey(normalized)
+                || pendingStatDispatches.contains(normalized)
+                || statAttempts.containsKey(normalized)
+                || activeStatCycles.contains(normalized)
+                || statQueue.contains(normalized)) {
             return true;
         }
-        return statResponses.isExpecting(normalizedPlayerName);
+        return statResponses.isExpecting(normalized);
     }
 
     // ------------------------------------------------------------------
@@ -495,11 +578,17 @@ final class PlayerMonitorListener implements Listener {
     }
 
     void handleStatSendFailureForTesting(String playerName) {
+        beginStatCycle(playerName);
         handleStatSendFailure(playerName);
     }
 
     void evaluateStatAttemptForTesting(String playerName, int attempts) {
+        beginStatCycle(playerName);
         evaluateStatAttempt(playerName, attempts, "test");
+    }
+
+    boolean hasActiveStatCycleForTesting(String playerName) {
+        return activeStatCycles.contains(normalize(playerName));
     }
 
     private static String nameOf(GameProfile profile) {
@@ -508,6 +597,11 @@ final class PlayerMonitorListener implements Listener {
 
     private static String normalize(String playerName) {
         return playerName.toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean containsIgnoreCase(Set<String> names, String target) {
+        String normalized = normalize(target);
+        return names.stream().anyMatch(name -> normalize(name).equals(normalized));
     }
 
     private void clearOnlinePlayers() {
