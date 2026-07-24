@@ -68,12 +68,8 @@ class PlayerMonitorListenerChatLogTest {
         listener.onPlayerJoin(new PlayerJoinEvent(profile));
         listener.onPublicChat(new PublicChatEvent(profile, "hello world"));
 
-        assertTrue(Files.exists(logFile), "login must still be logged");
-        List<String> lines = Files.readAllLines(logFile, StandardCharsets.UTF_8);
-        assertFalse(lines.stream().anyMatch(line -> line.contains("recorded chat")),
-                "successful chat recording must not produce a success log line");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("recorded login")),
-                "login events must still be logged");
+        assertFalse(Files.exists(logFile),
+                "successful INFO-level player activity must not create a file log");
     }
 
     @Test
@@ -82,8 +78,10 @@ class PlayerMonitorListenerChatLogTest {
         listener.onDisconnect(new DisconnectEvent(Component.text("network")));
 
         List<String> lines = Files.readAllLines(logFile, StandardCharsets.UTF_8);
-        assertTrue(lines.stream().anyMatch(line -> line.contains("connection lost")),
-                "disconnect must still be logged");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("[WARN] connection lost")),
+                "disconnect must still be logged at WARN level");
+        assertFalse(lines.stream().anyMatch(line -> line.contains("recorded login")),
+                "INFO-level activity must not be persisted");
     }
 
     private static GameProfile profile(String name) {

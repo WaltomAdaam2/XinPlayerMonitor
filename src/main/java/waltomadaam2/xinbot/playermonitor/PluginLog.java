@@ -18,9 +18,25 @@ final class PluginLog {
         this.directory = directory;
     }
 
-    synchronized void info(String message) {
+    /**
+     * INFO messages are intentionally not persisted. XinPM's file log is reserved for WARN and ERROR
+     * so normal player activity cannot grow the log indefinitely.
+     */
+    void info(String message) {
+        // Deliberately ignored. Keep the method so existing informational call sites remain harmless.
+    }
+
+    synchronized void warn(String message) {
+        write("WARN", message);
+    }
+
+    synchronized void error(String message) {
+        write("ERROR", message);
+    }
+
+    private void write(String level, String message) {
         Path file = directory.resolve("playermonitor-" + LocalDate.now(zone) + ".log");
-        String line = Instant.now() + " " + message + System.lineSeparator();
+        String line = Instant.now() + " [" + level + "] " + message + System.lineSeparator();
         try {
             Files.writeString(file, line, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);

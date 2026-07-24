@@ -102,7 +102,7 @@ final class PlayerMonitorListener implements Listener {
         if (closed || !beginReconnectWindow(System.currentTimeMillis())) {
             return;
         }
-        log.info("connection lost; waiting for Game roster reconciliation");
+        log.warn("connection lost; waiting for Game roster reconciliation");
         logger.info("Connection lost; waiting for Game roster reconciliation.");
     }
 
@@ -186,7 +186,7 @@ final class PlayerMonitorListener implements Listener {
             service.recordLogout(playerName, System.currentTimeMillis());
             log.info("recorded logout for " + playerName);
         } catch (IOException error) {
-            log.info("failed to record player " + playerName + ": " + error.getMessage());
+            log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
     }
 
@@ -203,7 +203,7 @@ final class PlayerMonitorListener implements Listener {
         try {
             service.recordChat(playerName, message, System.currentTimeMillis());
         } catch (IOException error) {
-            log.info("failed to record player " + playerName + ": " + error.getMessage());
+            log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
     }
 
@@ -224,7 +224,7 @@ final class PlayerMonitorListener implements Listener {
                     log.info("recorded stat for " + captured.playerName());
                     logger.info("\u001B[94mRecorded stat for {}.\u001B[0m", captured.playerName());
                 } catch (IOException error) {
-                    log.info("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
+                    log.warn("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
                 }
             }, STAT_WRITE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
         });
@@ -243,7 +243,7 @@ final class PlayerMonitorListener implements Listener {
         }
         if (event.isDefaultActionCancelled()) {
             pendingStatDispatches.remove(normalizedName);
-            log.info("stat command cancelled for " + playerName);
+            log.warn("stat command cancelled for " + playerName);
             handleStatSendFailure(playerName);
             return;
         }
@@ -416,7 +416,7 @@ final class PlayerMonitorListener implements Listener {
         for (String playerName : playersToClose) {
             recordLogoutAt(playerName, expectedDisconnectAt);
         }
-        log.info("finalized disconnected sessions after timeout");
+        log.warn("finalized disconnected sessions after timeout");
         logger.info("Finalized disconnected sessions after timeout.");
     }
 
@@ -425,7 +425,7 @@ final class PlayerMonitorListener implements Listener {
             service.recordLogout(playerName, timestamp);
             log.info("recorded logout for " + playerName);
         } catch (IOException error) {
-            log.info("failed to record player " + playerName + ": " + error.getMessage());
+            log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
     }
 
@@ -483,7 +483,7 @@ final class PlayerMonitorListener implements Listener {
                     playerName,
                     System.currentTimeMillis() - TimeUnit.HOURS.toMillis(cooldownHours));
         } catch (IOException error) {
-            log.info("failed to check stat cooldown for " + playerName + ": " + error.getMessage());
+            log.warn("failed to check stat cooldown for " + playerName + ": " + error.getMessage());
             return false;
         }
     }
@@ -508,10 +508,13 @@ final class PlayerMonitorListener implements Listener {
         String normalizedName = normalize(playerName);
         int maximumAttempts = settings.statAttempts();
         if (gameActive && onlinePlayers.containsKey(normalizedName) && attempts < maximumAttempts) {
+            log.warn("stat request " + reason + " for " + playerName
+                    + "; retrying (" + attempts + "/" + maximumAttempts + ")");
             logger.warn("Stat request {} for {}; retrying ({}/{}).",
                     reason, playerName, attempts, maximumAttempts);
             statQueue.enqueue(playerName, StatQueue.PRIORITY_MANUAL);
         } else if (attempts > 0) {
+            log.warn("stat scan failed for " + playerName + " after " + attempts + " attempt(s)");
             logger.warn("Stat scan failed for {} after {} attempt(s).", playerName, attempts);
             statAttempts.remove(normalizedName);
             pendingStatDispatches.remove(normalizedName);
@@ -536,7 +539,7 @@ final class PlayerMonitorListener implements Listener {
         try {
             return service.findRecord(playerName).isEmpty();
         } catch (IOException error) {
-            log.info("failed to check whether player is new " + playerName + ": " + error.getMessage());
+            log.warn("failed to check whether player is new " + playerName + ": " + error.getMessage());
             return false;
         }
     }
@@ -613,7 +616,7 @@ final class PlayerMonitorListener implements Listener {
             service.recordLogin(playerName, now);
             log.info("recorded login for " + playerName);
         } catch (IOException error) {
-            log.info("failed to record player " + playerName + ": " + error.getMessage());
+            log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
     }
 

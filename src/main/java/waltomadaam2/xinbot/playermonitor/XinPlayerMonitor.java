@@ -39,13 +39,10 @@ public final class XinPlayerMonitor implements Plugin {
 
     void enable(Path dataDirectory) throws IOException {
         PluginLog log = new PluginLog(dataDirectory.resolve("log"));
-        Consumer<String> infoSink = message -> {
-            logger.info(message);
-            log.info(message);
-        };
+        Consumer<String> infoSink = logger::info;
         Consumer<String> warningSink = message -> {
             logger.warn(message);
-            log.info("WARN: " + message);
+            log.warn(message);
         };
         MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
         settings.setWarningSink(warningSink);
