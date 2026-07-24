@@ -70,6 +70,7 @@ final class MonitorSettings {
     int chatCount = DEFAULT_CHAT_COUNT;
     int cacheIdleMinutes = DEFAULT_CACHE_IDLE_MINUTES;
     int maxCachedHistory = DEFAULT_MAX_CACHED_HISTORY;
+    int backupInterval = 168;
     Database database = new Database();
 
     MonitorSettings copy() {
@@ -89,6 +90,7 @@ final class MonitorSettings {
         copy.chatCount = chatCount;
         copy.cacheIdleMinutes = cacheIdleMinutes;
         copy.maxCachedHistory = maxCachedHistory;
+        copy.backupInterval = backupInterval;
         copy.database = database == null ? new Database() : database.copy();
         return copy;
     }

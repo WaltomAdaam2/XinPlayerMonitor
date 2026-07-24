@@ -236,6 +236,10 @@ final class MonitorSettingsStore {
         return settings.maxCachedHistory;
     }
 
+    synchronized int backupInterval() {
+        return settings.backupInterval;
+    }
+
     synchronized MonitorSettings.Database database() {
         return settings.database == null ? new MonitorSettings.Database() : settings.database.copy();
     }
@@ -315,6 +319,13 @@ final class MonitorSettingsStore {
         validateRange(value, MIN_MAX_CACHED_HISTORY, MAX_MAX_CACHED_HISTORY,
                 "Max cached history must be between 50 and 10000");
         updateSetting(updated -> updated.maxCachedHistory = value);
+    }
+
+    synchronized void setBackupInterval(int value) throws IOException {
+        if (value <= 0) {
+            throw new IllegalArgumentException("Backup interval must be greater than 0 hours");
+        }
+        updateSetting(updated -> updated.backupInterval = value);
     }
 
     private void updateStatSetting(Consumer<MonitorSettings> update) throws IOException {
