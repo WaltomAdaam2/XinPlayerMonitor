@@ -329,16 +329,21 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return;
         }
         try {
-            Optional<PlayerRecord> record = service.findRecord(playerName);
+            Optional<PlayerRecord> record = service.findRecordSummary(playerName);
             if (record.isEmpty()) {
                 print("未找到玩家档案: " + playerName);
                 return;
             }
+            String displayName = record.get().playerName;
             switch (action) {
-                case "stat" -> stat(record.get());
-                case "latestlogin" -> latestLogin(record.get());
-                case "recentlogin" -> recentLogins(record.get(), queryCount(args, settings.recentLoginCount()));
-                case "chat" -> chats(record.get(), queryCount(args, settings.chatCount()));
+                case "stat" -> stat(displayName, service.latestStat(playerName));
+                case "latestlogin" -> latestLogin(displayName, service.latestLogin(playerName));
+                case "recentlogin" -> recentLogins(displayName,
+                        service.recentLogins(playerName, queryCount(args, settings.recentLoginCount())),
+                        service.loginCount(playerName));
+                case "chat" -> chats(displayName,
+                        service.recentChats(playerName, queryCount(args, settings.chatCount())),
+                        service.chatCount(playerName));
                 default -> playerHelp();
             }
         } catch (NumberFormatException error) {
@@ -432,17 +437,17 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print("已将 " + queued + " 名在线玩家加入 Stat 扫描队列。");
     }
 
-    private void stat(PlayerRecord record) {
-        if (record.statSnapshots.isEmpty()) {
-            print("暂无 stat 记录: " + record.playerName);
+    private void stat(String playerName, Optional<StatSnapshot> snapshotOptional) {
+        if (snapshotOptional.isEmpty()) {
+            print("暂无 stat 记录: " + playerName);
             return;
         }
-        StatSnapshot snapshot = record.statSnapshots.get(record.statSnapshots.size() - 1);
+        StatSnapshot snapshot = snapshotOptional.get();
         PlayerPermissions permissions = snapshot.permissions == null ? new PlayerPermissions() : snapshot.permissions;
         Integer deaths = snapshot.deathCount != null ? snapshot.deathCount : snapshot.onlineCount;
         String priority = snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
         print(DIM + "===== " + CYAN + "Player stat" + DIM + " =====" + RESET);
-        statField("玩家名称", record.playerName);
+        statField("玩家名称", playerName);
         statField("加入游戏", value(snapshot.addedGameCount) + " 次");
         statField("死亡计数", value(deaths) + " 次");
         statField("击杀计数", value(snapshot.killCount) + " 人");
@@ -457,24 +462,23 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(CYAN + label + ": " + RESET + value);
     }
 
-    private void latestLogin(PlayerRecord record) {
-        if (record.loginSessions.isEmpty()) {
-            report("Latest login", List.of("玩家: " + record.playerName, "暂无登录记录"));
+    private void latestLogin(String playerName, Optional<LoginSession> sessionOptional) {
+        if (sessionOptional.isEmpty()) {
+            report("Latest login", List.of("玩家: " + playerName, "暂无登录记录"));
             return;
         }
-        LoginSession session = service.latestLogin(record).orElseThrow();
-        report("Latest login", loginLines(record.playerName, session));
+        LoginSession session = sessionOptional.get();
+        report("Latest login", loginLines(playerName, session));
     }
 
-    private void recentLogins(PlayerRecord record, int count) {
-        if (record.loginSessions.isEmpty()) {
-            report("Recent logins", List.of("玩家: " + record.playerName, "暂无登录记录"));
+    private void recentLogins(String playerName, List<LoginSession> sessions, int totalCount) {
+        if (sessions.isEmpty()) {
+            report("Recent logins", List.of("玩家: " + playerName, "暂无登录记录"));
             return;
         }
         List<String> lines = new ArrayList<>();
-        List<LoginSession> sessions = service.recentLogins(record, count);
-        lines.add("玩家: " + record.playerName);
-        lines.add("显示最近 " + sessions.size() + " / " + record.loginSessions.size() + " 次登录");
+        lines.add("玩家: " + playerName);
+        lines.add("显示最近 " + sessions.size() + " / " + totalCount + " 次登录");
         for (int index = 0; index < sessions.size(); index++) {
             LoginSession session = sessions.get(index);
             String line = "#" + (index + 1) + "  登录: " + format(session.loginAt)
@@ -487,18 +491,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         report("Recent logins", lines);
     }
 
-    private void chats(PlayerRecord record, int count) {
-        if (record.chatMessages.isEmpty()) {
-            report("Recent chat", List.of("玩家: " + record.playerName, "暂无聊天记录"));
+    private void chats(String playerName, List<ChatEntry> chats, int totalCount) {
+        if (chats.isEmpty()) {
+            report("Recent chat", List.of("玩家: " + playerName, "暂无聊天记录"));
             return;
         }
         List<String> lines = new ArrayList<>();
-        lines.add("玩家: " + record.playerName);
-        int shown = Math.min(count, record.chatMessages.size());
-        lines.add("显示最近 " + shown + " / " + record.chatMessages.size() + " 条消息");
-        int start = Math.max(0, record.chatMessages.size() - count);
-        for (int index = record.chatMessages.size() - 1; index >= start; index--) {
-            ChatEntry entry = record.chatMessages.get(index);
+        lines.add("玩家: " + playerName);
+        int shown = chats.size();
+        lines.add("显示最近 " + shown + " / " + totalCount + " 条消息");
+        for (ChatEntry entry : chats) {
             lines.add(format(entry.timestamp) + "  " + entry.message);
         }
         report("Recent chat", lines);

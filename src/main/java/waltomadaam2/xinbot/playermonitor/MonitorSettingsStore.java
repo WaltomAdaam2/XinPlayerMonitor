@@ -34,6 +34,18 @@ final class MonitorSettingsStore {
     static final int MAX_CACHE_IDLE_MINUTES = 1_440;
     static final int MIN_MAX_CACHED_HISTORY = 50;
     static final int MAX_MAX_CACHED_HISTORY = 10_000;
+    static final int MIN_DATABASE_QUEUE_CAPACITY = 1_000;
+    static final int MAX_DATABASE_QUEUE_CAPACITY = 500_000;
+    static final int MIN_DATABASE_BATCH_SIZE = 1;
+    static final int MAX_DATABASE_BATCH_SIZE = 5_000;
+    static final int MIN_DATABASE_FLUSH_INTERVAL_MILLIS = 10;
+    static final int MAX_DATABASE_FLUSH_INTERVAL_MILLIS = 5_000;
+    static final int MIN_DATABASE_BUSY_TIMEOUT_MILLIS = 1_000;
+    static final int MAX_DATABASE_BUSY_TIMEOUT_MILLIS = 60_000;
+    static final int MIN_DATABASE_CACHE_SIZE_KIB = 1_024;
+    static final int MAX_DATABASE_CACHE_SIZE_KIB = 262_144;
+    static final int MIN_DATABASE_SHUTDOWN_TIMEOUT_MILLIS = 1_000;
+    static final int MAX_DATABASE_SHUTDOWN_TIMEOUT_MILLIS = 120_000;
 
     static final List<String> SUPPORTED_TIMEZONES = List.of(
             "UTC",
@@ -224,6 +236,10 @@ final class MonitorSettingsStore {
         return settings.maxCachedHistory;
     }
 
+    synchronized MonitorSettings.Database database() {
+        return settings.database == null ? new MonitorSettings.Database() : settings.database.copy();
+    }
+
     synchronized void setStatSendIntervalMillis(int value) throws IOException {
         validatePositive(value, "Stat send interval must be greater than 0 ms");
         updateStatSetting(updated -> updated.statSendIntervalMillis = value);
@@ -396,7 +412,7 @@ final class MonitorSettingsStore {
         return ZoneOffset.of(canonical.substring(3));
     }
 
-    private static void normalizeAndValidate(MonitorSettings value) {
+    private void normalizeAndValidate(MonitorSettings value) {
         validatePositive(value.statSendIntervalMillis, "Stat send interval must be greater than 0 ms");
         validatePositive(value.disconnectTimeoutMinutes, "Disconnect timeout must be greater than 0 minutes");
         validateRange(value.statCooldownHours, MIN_STAT_COOLDOWN_HOURS, MAX_STAT_COOLDOWN_HOURS,
@@ -414,6 +430,50 @@ final class MonitorSettingsStore {
         validateRange(value.maxCachedHistory, MIN_MAX_CACHED_HISTORY, MAX_MAX_CACHED_HISTORY,
                 "Max cached history must be between 50 and 10000");
         value.displayTimezone = canonicalTimezone(value.displayTimezone);
+        normalizeDatabaseSettings(value);
+    }
+
+    private void normalizeDatabaseSettings(MonitorSettings value) {
+        if (value.database == null) {
+            value.database = new MonitorSettings.Database();
+            return;
+        }
+        if (value.database.path == null || value.database.path.isBlank()) {
+            warnInvalidDatabaseSetting("path", value.database.path, MonitorSettings.Database.DEFAULT_PATH);
+            value.database.path = MonitorSettings.Database.DEFAULT_PATH;
+        }
+        value.database.queueCapacity = databaseRange("queueCapacity", value.database.queueCapacity,
+                MIN_DATABASE_QUEUE_CAPACITY, MAX_DATABASE_QUEUE_CAPACITY,
+                MonitorSettings.Database.DEFAULT_QUEUE_CAPACITY);
+        value.database.batchSize = databaseRange("batchSize", value.database.batchSize,
+                MIN_DATABASE_BATCH_SIZE, MAX_DATABASE_BATCH_SIZE,
+                MonitorSettings.Database.DEFAULT_BATCH_SIZE);
+        value.database.flushIntervalMs = databaseRange("flushIntervalMs", value.database.flushIntervalMs,
+                MIN_DATABASE_FLUSH_INTERVAL_MILLIS, MAX_DATABASE_FLUSH_INTERVAL_MILLIS,
+                MonitorSettings.Database.DEFAULT_FLUSH_INTERVAL_MILLIS);
+        value.database.busyTimeoutMs = databaseRange("busyTimeoutMs", value.database.busyTimeoutMs,
+                MIN_DATABASE_BUSY_TIMEOUT_MILLIS, MAX_DATABASE_BUSY_TIMEOUT_MILLIS,
+                MonitorSettings.Database.DEFAULT_BUSY_TIMEOUT_MILLIS);
+        value.database.cacheSizeKiB = databaseRange("cacheSizeKiB", value.database.cacheSizeKiB,
+                MIN_DATABASE_CACHE_SIZE_KIB, MAX_DATABASE_CACHE_SIZE_KIB,
+                MonitorSettings.Database.DEFAULT_CACHE_SIZE_KIB);
+        value.database.shutdownFlushTimeoutMs = databaseRange("shutdownFlushTimeoutMs",
+                value.database.shutdownFlushTimeoutMs,
+                MIN_DATABASE_SHUTDOWN_TIMEOUT_MILLIS, MAX_DATABASE_SHUTDOWN_TIMEOUT_MILLIS,
+                MonitorSettings.Database.DEFAULT_SHUTDOWN_FLUSH_TIMEOUT_MILLIS);
+    }
+
+    private int databaseRange(String name, int value, int minimum, int maximum, int fallback) {
+        if (value < minimum || value > maximum) {
+            warnInvalidDatabaseSetting(name, value, fallback);
+            return fallback;
+        }
+        return value;
+    }
+
+    private void warnInvalidDatabaseSetting(String name, Object value, Object fallback) {
+        warningSink.accept("Invalid database setting " + name + "=" + value
+                + "; using default " + fallback + ".");
     }
 
     private static boolean sameStatSettings(MonitorSettings first, MonitorSettings second) {

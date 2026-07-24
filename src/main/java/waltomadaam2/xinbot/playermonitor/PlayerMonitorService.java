@@ -1,5 +1,6 @@
 package waltomadaam2.xinbot.playermonitor;
 
+import waltomadaam2.xinbot.playermonitor.model.ChatEntry;
 import waltomadaam2.xinbot.playermonitor.model.LoginSession;
 import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
 import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
@@ -13,15 +14,18 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 public final class PlayerMonitorService {
-    private final PlayerRecordStore store;
+    private final PlayerRepository store;
 
     public PlayerMonitorService(Path directory) {
-        this.store = new PlayerRecordStore(directory);
+        this.store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
     }
 
     PlayerMonitorService(Path directory, MonitorSettingsStore settings) {
-        this.store = new PlayerRecordStore(directory, settings::maxCachedHistory,
-                () -> java.util.concurrent.TimeUnit.MINUTES.toMillis(settings.cacheIdleMinutes()));
+        this.store = new SQLitePlayerRecordStore(directory, settings.database());
+    }
+
+    PlayerMonitorService(PlayerRepository store) {
+        this.store = store;
     }
 
     public void setWarningSink(Consumer<String> warningSink) {
@@ -72,19 +76,36 @@ public final class PlayerMonitorService {
     public Optional<PlayerRecord> findRecord(String playerName) throws IOException {
         return store.find(playerName);
     }
+    public Optional<PlayerRecord> findRecordSummary(String playerName) throws IOException {
+        return store.findSummary(playerName);
+    }
+
+    public Optional<StatSnapshot> latestStat(String playerName) throws IOException {
+        return store.latestStat(playerName);
+    }
+
+    public Optional<LoginSession> latestLogin(String playerName) throws IOException {
+        return store.latestLogin(playerName);
+    }
+
+    public List<LoginSession> recentLogins(String playerName, int maximum) throws IOException {
+        return store.recentLogins(playerName, maximum);
+    }
+
+    public int loginCount(String playerName) throws IOException {
+        return store.loginCount(playerName);
+    }
+
+    public List<ChatEntry> recentChats(String playerName, int maximum) throws IOException {
+        return store.recentChats(playerName, maximum);
+    }
+
+    public int chatCount(String playerName) throws IOException {
+        return store.chatCount(playerName);
+    }
 
     public boolean hasStatCapturedAtOrAfter(String playerName, long cutoffAt) throws IOException {
-        Optional<PlayerRecord> record = findRecord(playerName);
-        if (record.isEmpty()) {
-            return false;
-        }
-        List<StatSnapshot> snapshots = record.get().statSnapshots;
-        for (int index = snapshots.size() - 1; index >= 0; index--) {
-            if (snapshots.get(index).capturedAt >= cutoffAt) {
-                return true;
-            }
-        }
-        return false;
+        return store.hasStatCapturedAtOrAfter(playerName, cutoffAt);
     }
 
     public Optional<LoginSession> latestLogin(PlayerRecord record) {

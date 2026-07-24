@@ -4,9 +4,15 @@ import org.jline.utils.AttributedStyle;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.helpers.NOPLogger;
+import waltomadaam2.xinbot.playermonitor.model.ChatEntry;
+import waltomadaam2.xinbot.playermonitor.model.LoginSession;
+import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
+import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -98,11 +104,106 @@ class PlayerMonitorManagementCommandTest {
         }
     }
 
+    @Test
+    void playerChatQueryUsesLimitedRepositoryMethods() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-limited-query");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setChatCount(7);
+        LimitedQueryRepository repository = new LimitedQueryRepository();
+        PlayerMonitorService service = new PlayerMonitorService(repository);
+        service.initialize();
+        PlayerMonitorListener listener = new PlayerMonitorListener(
+                service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    service, settings, listener, NOPLogger.NOP_LOGGER);
+            command.onCommand(null, "playermonitor", new String[]{"Steve", "chat"});
+            assertEquals(7, repository.recentChatLimit);
+            assertEquals(1, repository.chatCountCalls);
+            assertEquals(0, repository.fullFindCalls, "command must not load full player history for chat output");
+        } finally {
+            listener.close();
+            service.close();
+        }
+    }
     private static void assertStyle(int rgb, AttributedStyle actual) {
         assertEquals(AttributedStyle.DEFAULT.foregroundRgb(rgb).getStyle(), actual.getStyle());
     }
 
     private static int count(String text, String needle) {
         return text.split(java.util.regex.Pattern.quote(needle), -1).length - 1;
+    }
+
+    private static final class LimitedQueryRepository implements PlayerRepository {
+        int recentChatLimit;
+        int chatCountCalls;
+        int fullFindCalls;
+
+        @Override
+        public void initialize() {
+        }
+
+        @Override
+        public void setWarningSink(java.util.function.Consumer<String> warningSink) {
+        }
+
+        @Override
+        public void recordLogin(String playerName, long now) {
+        }
+
+        @Override
+        public void recordLogout(String playerName, long now) {
+        }
+
+        @Override
+        public void recordChat(String playerName, String message, long now) {
+        }
+
+        @Override
+        public void recordStat(String playerName, StatSnapshot snapshot) {
+        }
+
+        @Override
+        public PlayerRecord read(String playerName) throws IOException {
+            throw new IOException("full read should not be used");
+        }
+
+        @Override
+        public Optional<PlayerRecord> find(String playerName) throws IOException {
+            fullFindCalls++;
+            throw new IOException("full find should not be used");
+        }
+
+        @Override
+        public Optional<PlayerRecord> findSummary(String playerName) {
+            return Optional.of(new PlayerRecord("Steve", 100L));
+        }
+
+        @Override
+        public List<ChatEntry> recentChats(String playerName, int limit) {
+            recentChatLimit = limit;
+            return List.of(new ChatEntry(200L, "hello"));
+        }
+
+        @Override
+        public int chatCount(String playerName) {
+            chatCountCalls++;
+            return 123;
+        }
+
+        @Override
+        public Optional<LoginSession> latestLogin(String playerName) {
+            return Optional.empty();
+        }
+
+        @Override
+        public List<String> listPlayerNames() {
+            return List.of("Steve");
+        }
+
+        @Override
+        public void close() {
+        }
     }
 }

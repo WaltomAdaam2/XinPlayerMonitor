@@ -13,6 +13,36 @@ final class MonitorSettings {
     static final int DEFAULT_CACHE_IDLE_MINUTES = 30;
     static final int DEFAULT_MAX_CACHED_HISTORY = 200;
 
+    static final class Database {
+        static final String DEFAULT_PATH = "xinpm.db";
+        static final int DEFAULT_QUEUE_CAPACITY = 50_000;
+        static final int DEFAULT_BATCH_SIZE = 250;
+        static final int DEFAULT_FLUSH_INTERVAL_MILLIS = 250;
+        static final int DEFAULT_BUSY_TIMEOUT_MILLIS = 10_000;
+        static final int DEFAULT_CACHE_SIZE_KIB = 32_768;
+        static final int DEFAULT_SHUTDOWN_FLUSH_TIMEOUT_MILLIS = 30_000;
+
+        String path = DEFAULT_PATH;
+        int queueCapacity = DEFAULT_QUEUE_CAPACITY;
+        int batchSize = DEFAULT_BATCH_SIZE;
+        int flushIntervalMs = DEFAULT_FLUSH_INTERVAL_MILLIS;
+        int busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MILLIS;
+        int cacheSizeKiB = DEFAULT_CACHE_SIZE_KIB;
+        int shutdownFlushTimeoutMs = DEFAULT_SHUTDOWN_FLUSH_TIMEOUT_MILLIS;
+
+        Database copy() {
+            Database copy = new Database();
+            copy.path = path;
+            copy.queueCapacity = queueCapacity;
+            copy.batchSize = batchSize;
+            copy.flushIntervalMs = flushIntervalMs;
+            copy.busyTimeoutMs = busyTimeoutMs;
+            copy.cacheSizeKiB = cacheSizeKiB;
+            copy.shutdownFlushTimeoutMs = shutdownFlushTimeoutMs;
+            return copy;
+        }
+    }
+
     @SerializedName(value = "statSendIntervalMillis", alternate = {"statIntervalMillis"})
     int statSendIntervalMillis = DEFAULT_STAT_SEND_INTERVAL_MILLIS;
 
@@ -38,6 +68,7 @@ final class MonitorSettings {
     int chatCount = DEFAULT_CHAT_COUNT;
     int cacheIdleMinutes = DEFAULT_CACHE_IDLE_MINUTES;
     int maxCachedHistory = DEFAULT_MAX_CACHED_HISTORY;
+    Database database = new Database();
 
     MonitorSettings copy() {
         MonitorSettings copy = new MonitorSettings();
@@ -56,6 +87,7 @@ final class MonitorSettings {
         copy.chatCount = chatCount;
         copy.cacheIdleMinutes = cacheIdleMinutes;
         copy.maxCachedHistory = maxCachedHistory;
+        copy.database = database == null ? new Database() : database.copy();
         return copy;
     }
 }

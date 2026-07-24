@@ -1,51 +1,58 @@
 package waltomadaam2.xinbot.playermonitor;
 
-import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerMonitorServiceStatTest {
+    private final List<PlayerMonitorService> services = new ArrayList<>();
+
     @TempDir
     Path temporaryDirectory;
 
+    @AfterEach
+    void tearDown() {
+        services.forEach(PlayerMonitorService::close);
+    }
+
     @Test
     void writesCapturedStatImmediately() throws Exception {
-        PlayerMonitorService service = new PlayerMonitorService(temporaryDirectory.resolve("playermonitor"));
+        Path directory = temporaryDirectory.resolve("playermonitor");
+        PlayerMonitorService service = service(directory);
         service.initialize();
-        StatSnapshot snapshot = StatParser.parse("WaltomAdaam", java.util.List.of(
-                "玩家名称: WaltomAdaam",
-                "加入游戏: 1 次",
-                "死亡计数: 2 次",
-                "击杀计数: 3 人",
-                "游戏时长: 4秒",
-                "优先队列: 已过期",
-                "特殊权限: ✅"), 123L).orElseThrow();
+        StatSnapshot snapshot = new StatSnapshot();
+        snapshot.capturedAt = 123L;
+        snapshot.deathCount = 2;
+        snapshot.killCount = 3;
 
         service.recordStat("WaltomAdaam", snapshot);
 
-        Path playerDir = temporaryDirectory.resolve("playermonitor/players/WaltomAdaam");
-        assertTrue(Files.exists(playerDir.resolve("profile.json")));
-        assertTrue(Files.exists(playerDir.resolve("stats.jsonl")));
+        assertTrue(Files.exists(directory.resolve("xinpm.db")));
+        assertFalse(Files.exists(directory.resolve("players")), "runtime stat writes must use SQLite only");
         assertEquals(2, service.findRecord("WaltomAdaam").orElseThrow().statSnapshots.get(0).deathCount);
     }
 
     @Test
     void findsRecentStatsAfterReload() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
-        PlayerMonitorService service = new PlayerMonitorService(directory);
+        PlayerMonitorService service = service(directory);
         service.initialize();
         StatSnapshot snapshot = new StatSnapshot();
         snapshot.capturedAt = 1_000L;
         service.recordStat("WaltomAdaam", snapshot);
+        service.close();
 
-        PlayerMonitorService reloaded = new PlayerMonitorService(directory);
+        PlayerMonitorService reloaded = service(directory);
         reloaded.initialize();
 
         assertTrue(reloaded.hasStatCapturedAtOrAfter("WaltomAdaam", 1_000L));
@@ -54,9 +61,9 @@ class PlayerMonitorServiceStatTest {
     }
 
     @Test
-    void newerStatWriteReplacesPreviousStoredSnapshot() throws Exception {
+    void statSnapshotsAreRetainedAndReturnedInTimeOrder() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
-        PlayerMonitorService service = new PlayerMonitorService(directory);
+        PlayerMonitorService service = service(directory);
         service.initialize();
 
         StatSnapshot first = new StatSnapshot();
@@ -69,15 +76,15 @@ class PlayerMonitorServiceStatTest {
         service.recordStat("WaltomAdaam", first);
         service.recordStat("WaltomAdaam", second);
 
-        Path statsFile = directory.resolve("players/WaltomAdaam/stats.jsonl");
-        long lineCount;
-        try (java.util.stream.Stream<String> lines = Files.lines(statsFile)) {
-            lineCount = lines.filter(line -> !line.isBlank()).count();
-        }
-        assertEquals(1L, lineCount);
         var record = service.findRecord("WaltomAdaam").orElseThrow();
-        assertEquals(1, record.statSnapshots.size());
-        assertEquals(9, record.statSnapshots.get(0).deathCount);
+        assertEquals(2, record.statSnapshots.size());
+        assertEquals(1, record.statSnapshots.get(0).deathCount);
+        assertEquals(9, record.statSnapshots.get(1).deathCount);
     }
 
+    private PlayerMonitorService service(Path directory) {
+        PlayerMonitorService service = new PlayerMonitorService(directory);
+        services.add(service);
+        return service;
+    }
 }

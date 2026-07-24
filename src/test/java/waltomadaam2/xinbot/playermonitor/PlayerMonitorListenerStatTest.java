@@ -51,6 +51,9 @@ class PlayerMonitorListenerStatTest {
         if (listener != null) {
             listener.close();
         }
+        if (service != null) {
+            service.close();
+        }
         Bot.INSTANCE.players.clear();
     }
 
