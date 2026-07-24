@@ -1,73 +1,61 @@
 package waltomadaam2.xinbot.playermonitor;
 
-/**
- * Formats section headers and bottom dividers with consistent colors.
- * <p>
- * Every {@code =} character uses {@code #E0B0FF} and title text uses {@code #6a5acd}.
- * The bottom divider always contains exactly the same number of visible {@code =}
- * characters as the full header line, so the two lines are always visually aligned.
- */
+/** Formats section headers and bottom dividers with consistent colors. */
 final class SectionFormatter {
-    static final String TITLE_COLOR = "[38;2;106;90;205m";   // #6a5acd
-    static final String EQUAL_COLOR = "[38;2;224;176;255m";   // #E0B0FF
-    static final String RESET = "[0m";
+    static final String TITLE_COLOR = "\u001B[38;2;106;90;205m";   // #6a5acd
+    static final String EQUAL_COLOR = "\u001B[38;2;224;176;255m"; // #E0B0FF
+    static final String RESET = "\u001B[0m";
 
-    private static final int PREFIX_LEN = 6; // "===== "
-    private static final int SUFFIX_LEN = 6; // " ====="
+    private static final int FIXED_VISIBLE_WIDTH = 12; // "===== " + " ====="
 
     private SectionFormatter() {
     }
 
-    /**
-     * Returns the formatted header line.
-     * <p>
-     * Example for title {@code "Recent logins"}:<br>
-     * {@code ===== Recent logins =====}
-     * <p>
-     * All {@code =} signs use {@code #E0B0FF} and the title text uses {@code #6a5acd}.
-     */
     static String header(String title) {
-        StringBuilder sb = new StringBuilder();
-        // Prefix: 5 equals signs, each individually colored
-        for (int i = 0; i < 5; i++) {
-            sb.append(EQUAL_COLOR).append('=');
-        }
-        sb.append(RESET);
-        String coloredPrefix = sb.toString();
-
-        // Title part
-        String titlePart = " " + TITLE_COLOR + title + RESET + " ";
-
-        // Suffix: 5 equals signs, each individually colored
-        StringBuilder suffixSb = new StringBuilder();
-        for (int i = 0; i < 5; i++) {
-            suffixSb.append(EQUAL_COLOR).append('=');
-        }
-        suffixSb.append(RESET);
-
-        return coloredPrefix + titlePart + suffixSb.toString();
+        String safeTitle = title == null ? "" : title;
+        return EQUAL_COLOR + "=====" + RESET + " "
+                + TITLE_COLOR + safeTitle + RESET + " "
+                + EQUAL_COLOR + "=====" + RESET;
     }
 
-    /**
-     * Returns a bottom divider line whose visible width exactly matches that
-     * of the header produced by {@link #header(String)} for the same title.
-     * <p>
-     * Every character is an {@code =} colored with {@code #E0B0FF}.
-     */
     static String divider(String title) {
-        int visibleWidth = PREFIX_LEN + title.length() + SUFFIX_LEN;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < visibleWidth; i++) {
-            sb.append(EQUAL_COLOR).append('=');
-        }
-        sb.append(RESET);
-        return sb.toString();
+        return EQUAL_COLOR + "=".repeat(visibleWidth(title)) + RESET;
     }
 
-    /**
-     * Returns the visible (non-color-code) character count of the header line.
-     */
+    /** Returns terminal-cell width, not UTF-16 String.length(). */
     static int visibleWidth(String title) {
-        return PREFIX_LEN + title.length() + SUFFIX_LEN;
+        return FIXED_VISIBLE_WIDTH + terminalWidth(title == null ? "" : title);
+    }
+
+    private static int terminalWidth(String text) {
+        int width = 0;
+        for (int offset = 0; offset < text.length();) {
+            int codePoint = text.codePointAt(offset);
+            offset += Character.charCount(codePoint);
+            int type = Character.getType(codePoint);
+            if (type == Character.NON_SPACING_MARK
+                    || type == Character.COMBINING_SPACING_MARK
+                    || type == Character.ENCLOSING_MARK
+                    || codePoint == 0x200D
+                    || (codePoint >= 0xFE00 && codePoint <= 0xFE0F)) {
+                continue;
+            }
+            width += isWide(codePoint) ? 2 : 1;
+        }
+        return width;
+    }
+
+    private static boolean isWide(int cp) {
+        return cp >= 0x1100 && (cp <= 0x115F
+                || cp == 0x2329 || cp == 0x232A
+                || (cp >= 0x2E80 && cp <= 0xA4CF && cp != 0x303F)
+                || (cp >= 0xAC00 && cp <= 0xD7A3)
+                || (cp >= 0xF900 && cp <= 0xFAFF)
+                || (cp >= 0xFE10 && cp <= 0xFE19)
+                || (cp >= 0xFE30 && cp <= 0xFE6F)
+                || (cp >= 0xFF00 && cp <= 0xFF60)
+                || (cp >= 0xFFE0 && cp <= 0xFFE6)
+                || (cp >= 0x1F300 && cp <= 0x1FAFF)
+                || (cp >= 0x20000 && cp <= 0x3FFFD));
     }
 }

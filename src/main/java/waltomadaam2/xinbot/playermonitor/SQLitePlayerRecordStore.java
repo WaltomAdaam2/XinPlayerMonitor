@@ -381,17 +381,19 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
         Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
         Files.deleteIfExists(temporary);
+        if (Files.exists(target)) {
+            throw new IOException("Backup target already exists: " + target);
+        }
         try (Connection connection = openConnection(); Statement statement = connection.createStatement()) {
-            statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
             statement.execute("VACUUM INTO '" + temporary.toAbsolutePath().toString().replace("'", "''") + "'");
         } catch (SQLException error) {
             Files.deleteIfExists(temporary);
             throw SQLiteSchema.toIo("backup SQLite database", error);
         }
         try {
-            Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException ignored) {
-            Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(temporary, target);
         } finally {
             Files.deleteIfExists(temporary);
         }

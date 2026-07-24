@@ -64,7 +64,7 @@ public final class XinPlayerMonitor implements Plugin {
                     try {
                         service.flush();
                     } catch (IOException error) {
-                        warningSink.accept("Backup pre-flush failed: " + error.getMessage());
+                        throw new IllegalStateException("Backup pre-flush failed", error);
                     }
                 });
         command.setBackupManager(backupManager);

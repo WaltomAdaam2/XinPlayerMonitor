@@ -87,12 +87,18 @@ final class SQLiteBackupManager {
             task.cancel(false);
             nextBackupTask = null;
         }
-        scheduler.shutdownNow();
+        // Let an already-running VACUUM INTO finish before the database service closes.
+        scheduler.shutdown();
         try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                warn("Backup scheduler did not terminate within 5 seconds");
+            if (!scheduler.awaitTermination(60, TimeUnit.SECONDS)) {
+                warn("Backup scheduler did not terminate within 60 seconds; interrupting it.");
+                scheduler.shutdownNow();
+                if (!scheduler.awaitTermination(10, TimeUnit.SECONDS)) {
+                    warn("Backup scheduler is still running during shutdown.");
+                }
             }
         } catch (InterruptedException error) {
+            scheduler.shutdownNow();
             Thread.currentThread().interrupt();
             warn("Interrupted while waiting for backup scheduler to stop");
         }
@@ -128,11 +134,7 @@ final class SQLiteBackupManager {
             return false;
         }
         try {
-            doBackup();
-            return true;
-        } catch (Exception error) {
-            warn("Backup failed: " + error.getMessage());
-            return false;
+            return doBackup();
         } finally {
             backupLock.unlock();
         }
@@ -188,31 +190,30 @@ final class SQLiteBackupManager {
         }
     }
 
-    private void doBackup() {
-        // 1. Flush all pending writes so the main database is up to date.
+    private boolean doBackup() {
+        // Flush failures must abort the backup rather than being logged and ignored.
         try {
             flusher.run();
         } catch (RuntimeException error) {
             warn("Automatic backup aborted: flush failed: " + error.getMessage());
-            return;
+            return false;
         }
 
-        String timestamp = BACKUP_TIMESTAMP.format(Instant.now());
-        Path target = dataDirectory.resolve(BACKUP_PREFIX + timestamp + BACKUP_SUFFIX);
+        Path target = nextAvailableTarget();
         Path temp = dataDirectory.resolve(target.getFileName() + ".tmp");
+        boolean targetCreatedByThisRun = false;
 
         try {
             Files.deleteIfExists(temp);
 
-            // 2. Create backup via VACUUM INTO (safe for WAL mode).
+            // VACUUM INTO reads the complete committed database, including WAL content.
+            // A forced TRUNCATE checkpoint is unnecessary and can create avoidable lock contention.
             try (Connection connection = openMainConnection();
                  Statement statement = connection.createStatement()) {
-                statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
                 String escapedPath = temp.toAbsolutePath().toString().replace("'", "''");
                 statement.execute("VACUUM INTO '" + escapedPath + "'");
             }
 
-            // 3. Validate the backup.
             try (Connection backupConn = openBackupConnection(temp);
                  Statement stmt = backupConn.createStatement();
                  ResultSet rs = stmt.executeQuery("PRAGMA integrity_check")) {
@@ -222,15 +223,11 @@ final class SQLiteBackupManager {
                 }
             }
 
-            // 4. Move to final location.
             Files.move(temp, target);
-            info("Automatic backup completed: " + target.getFileName());
-
-            // 5. Clean up any stale WAL/SHM files that may have been created
-            //    alongside the backup (VACUUM INTO should not create them,
-            //    but ensure we don't leave anything behind).
+            targetCreatedByThisRun = true;
             cleanupWalFilesFor(target);
-
+            info("Automatic backup completed: " + target.getFileName());
+            return true;
         } catch (Exception error) {
             warn("Automatic backup failed: " + error.getMessage());
             try {
@@ -238,14 +235,29 @@ final class SQLiteBackupManager {
             } catch (IOException ignored) {
                 // best effort cleanup
             }
-            // Also remove the target if it was somehow partially created.
-            try {
-                Files.deleteIfExists(target);
-            } catch (IOException ignored) {
-                // best effort cleanup
+            // Never delete a pre-existing backup after a same-second filename collision.
+            if (targetCreatedByThisRun) {
+                try {
+                    Files.deleteIfExists(target);
+                } catch (IOException ignored) {
+                    // best effort cleanup
+                }
             }
-            cleanupWalFilesFor(target);
+            cleanupWalFilesFor(temp);
+            return false;
         }
+    }
+
+    private Path nextAvailableTarget() {
+        Instant candidate = Instant.now();
+        for (int attempt = 0; attempt < 120; attempt++) {
+            String timestamp = BACKUP_TIMESTAMP.format(candidate.plusSeconds(attempt));
+            Path target = dataDirectory.resolve(BACKUP_PREFIX + timestamp + BACKUP_SUFFIX);
+            if (!Files.exists(target) && !Files.exists(dataDirectory.resolve(target.getFileName() + ".tmp"))) {
+                return target;
+            }
+        }
+        throw new IllegalStateException("Unable to allocate a unique backup filename");
     }
 
     /**
