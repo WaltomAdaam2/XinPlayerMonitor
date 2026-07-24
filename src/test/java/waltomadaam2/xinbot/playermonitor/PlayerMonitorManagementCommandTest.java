@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerMonitorManagementCommandTest {
     @TempDir
@@ -127,6 +128,66 @@ class PlayerMonitorManagementCommandTest {
             service.close();
         }
     }
+    @Test
+    void countArgumentInChatAndRecentLoginUsesFfb343() {
+        // Chat count arg at index 2 should use #ffb343
+        assertStyle(0xFFB343, PlayerMonitorManagementCommand.styleForArgument(
+                new String[]{"WaltomAdaam_", "chat", "10"}, 2));
+        // Recentlogin count arg at index 2 should use #ffb343
+        assertStyle(0xFFB343, PlayerMonitorManagementCommand.styleForArgument(
+                new String[]{"WaltomAdaam_", "recentlogin", "15"}, 2));
+    }
+
+    @Test
+    void countPlaceholderInPlayerUsageUsesCountColor() {
+        String colored = PlayerMonitorManagementCommand.colorUsage(
+                "Usage: playermonitor <玩家名> [stat|latestlogin|recentlogin [count]|chat [count]]");
+        // [count] placeholders should use #ffb343
+        assertEquals(2, count(colored, "38;2;255;179;67m[count]"),
+                "[count] placeholders should use #ffb343");
+    }
+
+    @Test
+    void settingTabCompleteIncludesBackupInterval() {
+        PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                null, null, null, NOPLogger.NOP_LOGGER);
+        List<String> completions = command.onTabComplete(null, "playermonitor",
+                new String[]{"setting", ""});
+        assertTrue(completions.contains("backup-interval"),
+                "tab completion should include backup-interval after 'playermonitor setting'");
+    }
+
+    @Test
+    void backupIntervalCompletionOffersHourPlaceholder() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        PlayerMonitorService service = new PlayerMonitorService(directory, settings);
+        service.initialize();
+        PlayerMonitorListener listener = new PlayerMonitorListener(
+                service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    service, settings, listener, NOPLogger.NOP_LOGGER);
+            List<String> completions = command.onTabComplete(null, "playermonitor",
+                    new String[]{"setting", "backup-interval", ""});
+            assertEquals(List.of("<hour>"), completions);
+        } finally {
+            listener.close();
+            service.close();
+        }
+    }
+
+    @Test
+    void colorUsageDoesNotAlterPlainTextContent() {
+        String input = "Usage: playermonitor setting stat-send-interval <ms>";
+        String colored = PlayerMonitorManagementCommand.colorUsage(input);
+        // Strip ANSI codes
+        String plain = colored.replaceAll("\\u001B\\[[0-9;]*m", "");
+        assertEquals(input, plain,
+                "color formatting must not alter the plain text content");
+    }
+
     private static void assertStyle(int rgb, AttributedStyle actual) {
         assertEquals(AttributedStyle.DEFAULT.foregroundRgb(rgb).getStyle(), actual.getStyle());
     }
