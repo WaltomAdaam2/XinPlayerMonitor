@@ -13,6 +13,7 @@ import xin.bbtt.mcbot.command.TabExecutor;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -23,24 +24,26 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class PlayerMonitorManagementCommand extends TabExecutor {
-    private static final String DIM = "\u001B[90m";
-    private static final String CYAN = "\u001B[36m";
-    private static final String YELLOW = "\u001B[33m";
-    private static final String RED = "\u001B[31m";
-    private static final String RESET = "\u001B[0m";
+    private static final String DIM = "[90m";
+    private static final String CYAN = "[36m";
+    private static final String YELLOW = "[33m";
+    private static final String RED = "[31m";
+    private static final String RESET = "[0m";
 
-    private static final String ROOT_COMMAND = "\u001B[38;2;224;176;255m";  // #E0B0FF setting / scan-stat
-    private static final String PLAYER_COLOR = "\u001B[38;2;46;111;64m";     // #2E6F40
-    private static final String SETTING_NAME = "\u001B[38;2;173;235;179m";    // #ADEBB3
-    private static final String SETTING_VALUE = "\u001B[38;2;255;192;103m";   // #FFC067
-    private static final String PLAYER_ACTION = "\u001B[38;2;224;176;255m";   // #E0B0FF
-    private static final String COMMAND_NAME = "\u001B[38;2;166;173;180m";    // #A6ADB4
+    private static final String ROOT_COMMAND = "[38;2;224;176;255m";  // #E0B0FF setting / scan-stat
+    private static final String PLAYER_COLOR = "[38;2;46;111;64m";     // #2E6F40
+    private static final String SETTING_NAME = "[38;2;173;235;179m";    // #ADEBB3
+    private static final String SETTING_VALUE = "[38;2;255;192;103m";   // #FFC067
+    private static final String PLAYER_ACTION = "[38;2;224;176;255m";   // #E0B0FF
+    private static final String COMMAND_NAME = "[38;2;166;173;180m";    // #A6ADB4
+    private static final String COUNT_COLOR = "[38;2;255;179;67m";      // #ffb343
 
     private static final AttributedStyle ROOT_COMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
     private static final AttributedStyle PLAYER_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x2E6F40);
     private static final AttributedStyle SETTING_NAME_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xADEBB3);
     private static final AttributedStyle SETTING_VALUE_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFC067);
     private static final AttributedStyle PLAYER_ACTION_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
+    private static final AttributedStyle COUNT_ARG_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFB343);
 
     static final String PLAYER_PLACEHOLDER = "<玩家名>";
     private static final String TRUE_FALSE_PLACEHOLDER = "<true|false>";
@@ -67,7 +70,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             "recentlogin-count",
             "chat-count",
             "cache-idle",
-            "max-cached-history");
+            "max-cached-history",
+            "backup-interval");
 
     private static final List<String> TIMEZONE_VALUES = MonitorSettingsStore.SUPPORTED_TIMEZONES;
 
@@ -78,6 +82,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private final MonitorSettingsStore settings;
     private final PlayerMonitorListener listener;
     private final Logger logger;
+    private volatile SQLiteBackupManager backupManager;
 
     PlayerMonitorManagementCommand(PlayerMonitorService service, MonitorSettingsStore settings,
                                    PlayerMonitorListener listener, Logger logger) {
@@ -85,6 +90,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         this.settings = settings;
         this.listener = listener;
         this.logger = logger;
+    }
+
+    void setBackupManager(SQLiteBackupManager backupManager) {
+        this.backupManager = backupManager;
     }
 
     @Override
@@ -174,6 +183,12 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         if (index == 1 && PLAYER_ACTIONS.contains(value)) {
             return PLAYER_ACTION_STYLE;
         }
+        if (index == 2) {
+            String action = lower(args[1]);
+            if ("chat".equals(action) || "recentlogin".equals(action)) {
+                return COUNT_ARG_STYLE;
+            }
+        }
         return AttributedStyle.DEFAULT;
     }
 
@@ -206,6 +221,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         for (String action : PLAYER_ACTIONS) {
             remainder = remainder.replace(action, PLAYER_ACTION + action + RESET);
         }
+        remainder = remainder.replace("[count]", COUNT_COLOR + "[count]" + RESET);
         return colored + remainder;
     }
 
@@ -294,6 +310,20 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     service.applyCacheSettingsNow();
                     print("每类最大内存历史缓存已设置为 " + parsed + " 条，已立即生效。");
                 }
+                case "backup-interval" -> {
+                    int parsed = parseBackupInterval(value);
+                    settings.setBackupInterval(parsed);
+                    SQLiteBackupManager mgr = backupManager;
+                    if (mgr != null) {
+                        mgr.reschedule(parsed);
+                    }
+                    String nextBackupText = formatNextBackupTime();
+                    if (nextBackupText != null) {
+                        print("自动备份间隔已设置为 " + parsed + " 小时，已立即生效。下次备份时间: " + nextBackupText);
+                    } else {
+                        print("自动备份间隔已设置为 " + parsed + " 小时，已立即生效。");
+                    }
+                }
                 default -> settingHelp();
             }
         } catch (NumberFormatException error) {
@@ -303,6 +333,37 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         } catch (IOException error) {
             print("无法保存设置: " + error.getMessage());
         }
+    }
+
+    private String formatNextBackupTime() {
+        SQLiteBackupManager mgr = backupManager;
+        if (mgr == null) {
+            return null;
+        }
+        long nextTime = mgr.nextBackupTimeMillis();
+        ZoneId zone = settings.displayZoneId();
+        return TIME_FORMAT.withZone(zone).format(Instant.ofEpochMilli(nextTime));
+    }
+
+    private static int parseBackupInterval(String value) {
+        // Accept any positive whole number; reject decimals, zero, and negatives.
+        if (value == null || value.isBlank()) {
+            throw new NumberFormatException(value);
+        }
+        String trimmed = value.trim();
+        if (trimmed.contains(".")) {
+            throw new IllegalArgumentException("备份间隔必须是正整数（不允许小数）。");
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(trimmed);
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException("请输入有效的整数值。");
+        }
+        if (parsed <= 0) {
+            throw new IllegalArgumentException("备份间隔必须大于 0。");
+        }
+        return parsed;
     }
 
     private void statSettingSaved(String message) {
@@ -366,7 +427,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                         "prioritize-join-stat" -> BOOLEAN_VALUES;
                 case "disconnect-timeout", "cache-idle" -> List.of(MINUTE_PLACEHOLDER);
                 case "stat-send-interval", "stat-timeout" -> List.of(MS_PLACEHOLDER);
-                case "stat-cooldown" -> List.of(HOUR_PLACEHOLDER);
+                case "stat-cooldown", "backup-interval" -> List.of(HOUR_PLACEHOLDER);
                 case "stat-attempts", "max-cached-history" -> List.of(COUNT_PLACEHOLDER);
                 case "display-timezone" -> TIMEZONE_VALUES;
                 case "recentlogin-count" -> List.of(Integer.toString(settings.recentLoginCount()));
@@ -422,6 +483,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         lines.add("聊天默认数量: " + current.chatCount);
         lines.add("缓存空闲释放: " + current.cacheIdleMinutes + " min");
         lines.add("每类最大内存历史: " + current.maxCachedHistory);
+        lines.add("自动备份间隔: " + current.backupInterval + " h");
         if (settings.hasDeferredStatSettings()) {
             lines.add("状态: Stat 设置已保存，等待当前请求完成后生效");
         }
@@ -446,8 +508,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         PlayerPermissions permissions = snapshot.permissions == null ? new PlayerPermissions() : snapshot.permissions;
         Integer deaths = snapshot.deathCount != null ? snapshot.deathCount : snapshot.onlineCount;
         String priority = snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
-        print(DIM + "===== " + CYAN + "Player stat" + DIM + " =====" + RESET);
-        statField("玩家名称", playerName);
+        print(SectionFormatter.header("Player stat"));
+        print(CYAN + "玩家名称: " + PLAYER_COLOR + playerName + RESET);
         statField("加入游戏", value(snapshot.addedGameCount) + " 次");
         statField("死亡计数", value(deaths) + " 次");
         statField("击杀计数", value(snapshot.killCount) + " 人");
@@ -455,7 +517,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         String priorityColor = "已过期".equals(priority) ? RED : RESET;
         print(CYAN + "优先队列: " + priorityColor + value(priority) + RESET);
         statField("特殊权限", permissionsDisplay(snapshot, permissions));
-        print(DIM + "================================" + RESET);
+        print(SectionFormatter.divider("Player stat"));
     }
 
     private void statField(String label, String value) {
@@ -518,7 +580,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void report(String title, List<String> lines) {
-        print(DIM + "===== " + CYAN + title + DIM + " =====" + RESET);
+        print(SectionFormatter.header(title));
         print("");
         for (String line : lines) {
             String rendered;
@@ -529,12 +591,19 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 if (separator < 0) {
                     rendered = line;
                 } else {
-                    rendered = CYAN + line.substring(0, separator + 1) + RESET + line.substring(separator + 1);
+                    String label = line.substring(0, separator + 1);
+                    String value = line.substring(separator + 1);
+                    // Player name values should use green
+                    if (label.equals("玩家:") || label.equals("玩家：")) {
+                        rendered = CYAN + label + RESET + PLAYER_COLOR + value + RESET;
+                    } else {
+                        rendered = CYAN + label + RESET + value;
+                    }
                 }
             }
             print("  " + highlightTimestamps(rendered));
         }
-        print(DIM + "================================" + RESET);
+        print(SectionFormatter.divider(title));
     }
 
     private void help() {
@@ -564,7 +633,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     "prioritize-join-stat" -> TRUE_FALSE_PLACEHOLDER;
             case "disconnect-timeout", "cache-idle" -> MINUTE_PLACEHOLDER;
             case "stat-send-interval", "stat-timeout" -> MS_PLACEHOLDER;
-            case "stat-cooldown" -> HOUR_PLACEHOLDER;
+            case "stat-cooldown", "backup-interval" -> HOUR_PLACEHOLDER;
             case "display-timezone" -> TIMEZONE_PLACEHOLDER;
             default -> COUNT_PLACEHOLDER;
         };
