@@ -45,6 +45,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private volatile Consumer<String> warningSink = ignored -> {
     };
     private volatile Predicate<String> statWriteFailure = ignored -> false;
+    private volatile long writeDelayMillisForTesting;
     private volatile boolean accepting;
     private volatile boolean initialized;
     private Thread writerThread;
@@ -66,6 +67,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     @Override
     public void setStatWriteFailureForTesting(Predicate<String> statWriteFailure) {
         this.statWriteFailure = Objects.requireNonNull(statWriteFailure, "statWriteFailure");
+    }
+
+    void setWriteDelayForTesting(long writeDelayMillisForTesting) {
+        this.writeDelayMillisForTesting = Math.max(0L, writeDelayMillisForTesting);
     }
 
     @Override
@@ -423,6 +428,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                 }
                 List<WriteTask> batch = new ArrayList<>(databaseSettings.batchSize);
                 batch.add(first);
+                delayWriteForTesting();
                 queue.drainTo(batch, databaseSettings.batchSize - 1);
                 processBatch(connection, sql, batch);
             }
@@ -434,6 +440,12 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             IOException io = SQLiteSchema.toIo("run SQLite writer", error);
             warn("SEVERE: SQLite writer stopped: " + io.getMessage());
             failAllPending(io);
+        }
+    }
+    private void delayWriteForTesting() throws InterruptedException {
+        long delay = writeDelayMillisForTesting;
+        if (delay > 0L) {
+            Thread.sleep(delay);
         }
     }
     private void processBatch(Connection connection, WriterSql sql, List<WriteTask> batch) {

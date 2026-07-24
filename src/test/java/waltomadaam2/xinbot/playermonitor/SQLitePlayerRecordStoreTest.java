@@ -259,6 +259,51 @@ class SQLitePlayerRecordStoreTest {
         }
     }
     @Test
+    void flushIntervalCommitsSmallBatchWithoutExplicitFlush() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-time-flush");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.batchSize = 100;
+        settings.flushIntervalMs = 25;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        store.initialize();
+        try {
+            store.recordChat("Timer", "committed by interval", 100L);
+            Thread.sleep(250L);
+            try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+                assertEquals(1, countRows(connection, "chat_messages"));
+            }
+        } finally {
+            store.close();
+        }
+    }
+
+    @Test
+    void queueFullFailsExplicitlyWithoutSilentDrop() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-queue-full");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.queueCapacity = 1;
+        settings.batchSize = 10;
+        settings.flushIntervalMs = 10;
+        settings.shutdownFlushTimeoutMs = 5_000;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        store.setWriteDelayForTesting(2_000L);
+        List<String> warnings = new ArrayList<>();
+        store.setWarningSink(warnings::add);
+        store.initialize();
+        try {
+            store.recordChat("Queue", "first", 100L);
+            Thread.sleep(100L);
+            store.recordChat("Queue", "second", 101L);
+            IOException error = assertThrows(IOException.class,
+                    () -> store.recordChat("Queue", "third", 102L));
+            assertTrue(error.getMessage().contains("SQLite write queue is full"));
+            assertTrue(warnings.stream().anyMatch(line -> line.contains("SQLite write queue is full")));
+        } finally {
+            store.setWriteDelayForTesting(0L);
+            store.close();
+        }
+    }
+    @Test
     void stressWritesOneHundredThousandChatsAndInterleavedSessions() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-stress");
         MonitorSettings.Database settings = new MonitorSettings.Database();
