@@ -209,7 +209,6 @@ final class SQLiteSchema {
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_sessions_player_login ON sessions(player_id, login_at DESC)");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_sessions_login ON sessions(login_at)");
         statement.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_open_player ON sessions(player_id) WHERE logout_at IS NULL");
-        statement.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_complete_unique ON sessions(player_id, login_at, logout_at) WHERE logout_at IS NOT NULL");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_chat_player_time ON chat_messages(player_id, timestamp DESC)");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_chat_time ON chat_messages(timestamp DESC)");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_stats_player_time ON stat_snapshots(player_id, timestamp DESC)");

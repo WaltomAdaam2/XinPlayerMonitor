@@ -143,8 +143,8 @@ final class SQLiteLegacyMigrator {
             sessions.add(profile.currentSession.copy());
         }
         sessions = dedupeSessions(sessions, displayName, report);
-        List<ChatEntry> chats = dedupeChats(readChats(playerDir.resolve("chat.jsonl"), displayName), displayName, report);
-        List<StatSnapshot> stats = dedupeStats(readStats(playerDir.resolve("stats.jsonl"), displayName), displayName, report);
+        List<ChatEntry> chats = dedupeChats(readChats(playerDir.resolve("chat.jsonl"), displayName, report), displayName, report);
+        List<StatSnapshot> stats = dedupeStats(readStats(playerDir.resolve("stats.jsonl"), displayName, report), displayName, report);
         long firstSeen = profile.firstSeenAt > 0 ? profile.firstSeenAt : earliest(sessions, chats, stats, System.currentTimeMillis());
         long lastSeen = Math.max(profile.lastSeenAt, latest(sessions, chats, stats, firstSeen));
         Long lastStat = stats.stream().map(snapshot -> snapshot.capturedAt).max(Long::compareTo)
@@ -171,7 +171,7 @@ final class SQLiteLegacyMigrator {
         }
     }
     private List<LoginSession> readSessions(Path file, String playerName, Report report) throws IOException {
-        return readJsonl(file, LoginSession.class, (object, session, line) -> {
+        return readJsonl(file, LoginSession.class, playerName + " sessions.jsonl", report, (object, session, line) -> {
             if (!object.has("loginAt")) {
                 throw new JsonParseException("missing loginAt");
             }
@@ -182,8 +182,8 @@ final class SQLiteLegacyMigrator {
         });
     }
 
-    private List<ChatEntry> readChats(Path file, String playerName) throws IOException {
-        return readJsonl(file, ChatEntry.class, (object, chat, line) -> {
+    private List<ChatEntry> readChats(Path file, String playerName, Report report) throws IOException {
+        return readJsonl(file, ChatEntry.class, playerName + " chat.jsonl", report, (object, chat, line) -> {
             if (!object.has("timestamp")) {
                 throw new JsonParseException("missing timestamp");
             }
@@ -193,15 +193,15 @@ final class SQLiteLegacyMigrator {
         });
     }
 
-    private List<StatSnapshot> readStats(Path file, String playerName) throws IOException {
-        return readJsonl(file, StatSnapshot.class, (object, stat, line) -> {
+    private List<StatSnapshot> readStats(Path file, String playerName, Report report) throws IOException {
+        return readJsonl(file, StatSnapshot.class, playerName + " stats.jsonl", report, (object, stat, line) -> {
             if (!object.has("capturedAt")) {
                 throw new JsonParseException("missing capturedAt");
             }
         });
     }
 
-    private <T> List<T> readJsonl(Path file, Class<T> type, Validator<T> validator) throws IOException {
+    private <T> List<T> readJsonl(Path file, Class<T> type, String label, Report report, Validator<T> validator) throws IOException {
         List<T> values = new ArrayList<>();
         if (!Files.exists(file)) {
             return values;
@@ -227,8 +227,7 @@ final class SQLiteLegacyMigrator {
                     validator.validate(object, value, lineNumber);
                     values.add(value);
                 } catch (JsonParseException error) {
-                    throw new IOException("corrupted JSONL at " + file.getFileName() + ":" + lineNumber
-                            + " - " + error.getMessage(), error);
+                    report.warning(label + ":" + lineNumber + " skipped corrupt JSONL line: " + error.getMessage());
                 }
             }
         }

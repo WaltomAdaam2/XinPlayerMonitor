@@ -142,6 +142,85 @@ class SQLitePlayerRecordStoreTest {
         }
     }
     @Test
+    void corruptedJsonlLineIsReportedAndValidLinesContinue() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-corrupt-jsonl");
+        writeLegacyPlayer(directory, "Noisy", false);
+        ChatEntry before = new ChatEntry(150L, "before");
+        ChatEntry after = new ChatEntry(151L, "after");
+        Files.writeString(directory.resolve("players/Noisy/chat.jsonl"),
+                gson.toJson(before) + System.lineSeparator()
+                        + "{broken" + System.lineSeparator()
+                        + gson.toJson(after) + System.lineSeparator(),
+                StandardCharsets.UTF_8);
+
+        PlayerMonitorService service = service(directory);
+        service.initialize();
+
+        var record = service.findRecord("Noisy").orElseThrow();
+        assertEquals(2, record.chatMessages.size());
+        assertEquals("before", record.chatMessages.get(0).message);
+        assertEquals("after", record.chatMessages.get(1).message);
+        try (Stream<Path> reports = Files.list(directory.resolve("migration-reports"))) {
+            String reportText = reports.map(path -> {
+                try {
+                    return Files.readString(path, StandardCharsets.UTF_8);
+                } catch (IOException error) {
+                    throw new RuntimeException(error);
+                }
+            }).reduce("", String::concat);
+            assertTrue(reportText.contains("skipped corrupt JSONL line"));
+        }
+    }
+    @Test
+    void legacyDuplicateSessionsAndChatsAreDeduplicatedDuringMigration() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-duplicates");
+        writeLegacyPlayer(directory, "Dupe", false);
+        LoginSession session = new LoginSession(100L);
+        session.logoutAt = 200L;
+        Files.writeString(directory.resolve("players/Dupe/sessions.jsonl"),
+                gson.toJson(session) + System.lineSeparator()
+                        + gson.toJson(session) + System.lineSeparator(),
+                StandardCharsets.UTF_8);
+        ChatEntry chat = new ChatEntry(150L, "same");
+        Files.writeString(directory.resolve("players/Dupe/chat.jsonl"),
+                gson.toJson(chat) + System.lineSeparator()
+                        + gson.toJson(chat) + System.lineSeparator(),
+                StandardCharsets.UTF_8);
+
+        PlayerMonitorService service = service(directory);
+        service.initialize();
+
+        var record = service.findRecord("Dupe").orElseThrow();
+        assertEquals(1, record.loginSessions.size());
+        assertEquals(1, record.chatMessages.size());
+        assertEquals("same", record.chatMessages.get(0).message);
+    }
+
+    @Test
+    void legacyOpenSessionPreservesOnlineStateAndCurrentSession() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-open-session");
+        writeLegacyPlayer(directory, "Online", true);
+
+        PlayerMonitorService service = service(directory);
+        service.initialize();
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"));
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("""
+                     SELECT p.online, p.current_session_id, s.logout_at
+                     FROM players p
+                     JOIN sessions s ON s.id = p.current_session_id
+                     WHERE p.normalized_name = 'online'
+                     """)) {
+            assertTrue(resultSet.next());
+            assertEquals(1, resultSet.getInt(1));
+            assertTrue(resultSet.getLong(2) > 0);
+            assertEquals(0, resultSet.getLong(3));
+            assertTrue(resultSet.wasNull());
+            SQLiteSchema.verify(connection);
+        }
+    }
+    @Test
     void backupUsesConsistentSQLiteSnapshot() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
         SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
@@ -159,6 +238,26 @@ class SQLitePlayerRecordStoreTest {
         }
     }
 
+    @Test
+    void completedSessionsWithSameTimesAreNotRejectedBySqliteConstraint() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-duplicate-sessions");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        try {
+            store.recordLogin("DuplicateSession", 100L);
+            store.recordLogout("DuplicateSession", 200L);
+            store.recordLogin("DuplicateSession", 100L);
+            store.recordLogout("DuplicateSession", 200L);
+            store.flush();
+        } finally {
+            store.close();
+        }
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(2, countRows(connection, "sessions"));
+            SQLiteSchema.verify(connection);
+        }
+    }
     @Test
     void stressWritesOneHundredThousandChatsAndInterleavedSessions() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-stress");
