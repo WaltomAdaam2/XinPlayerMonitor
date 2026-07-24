@@ -10,45 +10,39 @@ class SectionFormatterTest {
     @Test
     void headerContainsTitleTextWithCorrectColor() {
         String header = SectionFormatter.header("Recent logins");
-        // Title color #6a5acd = 106;90;205
-        assertTrue(header.contains("38;2;106;90;205mRecent logins"));
+        assertTrue(header.contains(SectionFormatter.TITLE_COLOR + "Recent logins" + SectionFormatter.RESET));
     }
 
     @Test
-    void headerContainsEqualSignsWithMauveColor() {
-        String header = SectionFormatter.header("Player stat");
-        // Equal color #E0B0FF = 224;176;255
-        assertEquals(10, count(header, "38;2;224;176;255m="),
-                "header should have 10 = signs total (5 on each side)");
+    void headerColorsBothEqualSignGroups() {
+        String expected = SectionFormatter.EQUAL_COLOR + "=====" + SectionFormatter.RESET
+                + " " + SectionFormatter.TITLE_COLOR + "Player stat" + SectionFormatter.RESET + " "
+                + SectionFormatter.EQUAL_COLOR + "=====" + SectionFormatter.RESET;
+        assertEquals(expected, SectionFormatter.header("Player stat"));
     }
 
     @Test
-    void dividerMatchesHeaderVisibleWidth() {
+    void dividerMatchesHeaderTerminalWidth() {
         for (String title : new String[]{"Recent logins", "Latest login", "Player stat",
                 "Recent chat", "PlayerMonitor 设置", "Short"}) {
-            int headerWidth = SectionFormatter.visibleWidth(title);
-            String divider = SectionFormatter.divider(title);
-            // Count visible = characters by counting the equals sign characters
-            // Each = is preceded by the color code and followed by nothing visible
-            int equalsCount = count(divider, "38;2;224;176;255m=");
-            assertEquals(headerWidth, equalsCount,
+            String header = stripAnsi(SectionFormatter.header(title));
+            String divider = stripAnsi(SectionFormatter.divider(title));
+            assertEquals(terminalWidth(header), terminalWidth(divider),
                     "divider width must match header width for title: " + title);
         }
     }
 
     @Test
-    void dividerUsesEqualColorEverywhere() {
-        String divider = SectionFormatter.divider("Test");
-        // All visible characters should be = colored with #E0B0FF
-        int colorSequences = count(divider, "38;2;224;176;255m");
-        int visibleWidth = SectionFormatter.visibleWidth("Test");
-        assertEquals(visibleWidth, colorSequences,
-                "every = character should have its own color escape");
+    void dividerUsesEqualColorForTheWholeLine() {
+        String title = "Test";
+        String expected = SectionFormatter.EQUAL_COLOR
+                + "=".repeat(SectionFormatter.visibleWidth(title))
+                + SectionFormatter.RESET;
+        assertEquals(expected, SectionFormatter.divider(title));
     }
 
     @Test
     void titleColorIs6a5acd() {
-        // Verify the exact ANSI code for #6a5acd
         assertEquals("38;2;106;90;205", extractColorCode(SectionFormatter.TITLE_COLOR));
     }
 
@@ -59,48 +53,71 @@ class SectionFormatterTest {
 
     @Test
     void colorFormattingDoesNotAlterPlainText() {
-        String title = "Recent logins";
-        String header = SectionFormatter.header(title);
-        // Strip all ANSI codes and verify plain text
-        String plain = header.replaceAll("\\u001B\\[[0-9;]*m", "");
-        assertEquals("===== Recent logins =====", plain);
+        assertEquals("===== Recent logins =====",
+                stripAnsi(SectionFormatter.header("Recent logins")));
     }
 
     @Test
-    void bottomDividerHasExactSameVisibleWidthAsFullHeader() {
+    void bottomDividerHasExactSameTerminalWidthAsFullHeader() {
         String title = "Recent logins";
-        String header = SectionFormatter.header(title);
-        int headerVisibleWidth = header.replaceAll("\\u001B\\[[0-9;]*m", "").length();
-        String divider = SectionFormatter.divider(title);
-        int dividerVisibleWidth = divider.replaceAll("\\u001B\\[[0-9;]*m", "").length();
-        assertEquals(headerVisibleWidth, dividerVisibleWidth);
+        assertEquals(
+                terminalWidth(stripAnsi(SectionFormatter.header(title))),
+                terminalWidth(stripAnsi(SectionFormatter.divider(title))));
     }
 
     @Test
     void emptyTitleWorks() {
-        String header = SectionFormatter.header("");
-        String plain = header.replaceAll("\\u001B\\[[0-9;]*m", "");
-        assertEquals("=====  =====", plain);
+        assertEquals("=====  =====", stripAnsi(SectionFormatter.header("")));
         assertEquals(12, SectionFormatter.visibleWidth(""));
     }
 
     @Test
-    void chineseTitleWidthCalculatedCorrectly() {
+    void chineseTitleUsesTerminalCellWidth() {
         String title = "PlayerMonitor 设置";
-        int visibleWidth = SectionFormatter.visibleWidth(title);
-        // 6 + title.length() + 6
-        assertEquals(6 + title.length() + 6, visibleWidth);
-        String divider = SectionFormatter.divider(title);
-        int dividerVisible = divider.replaceAll("\\u001B\\[[0-9;]*m", "").length();
-        assertEquals(visibleWidth, dividerVisible);
+        // ASCII part is 14 cells and the two CJK characters are 2 cells each.
+        assertEquals(30, SectionFormatter.visibleWidth(title));
+        assertEquals(
+                terminalWidth(stripAnsi(SectionFormatter.header(title))),
+                terminalWidth(stripAnsi(SectionFormatter.divider(title))));
     }
 
-    private static int count(String text, String needle) {
-        return text.split(java.util.regex.Pattern.quote(needle), -1).length - 1;
+    private static String stripAnsi(String text) {
+        return text.replaceAll("\\u001B\\[[0-9;]*m", "");
     }
 
     private static String extractColorCode(String ansiSequence) {
-        // Extract "38;2;R;G;B" from "[38;2;R;G;Bm"
         return ansiSequence.replaceAll("\\u001B\\[", "").replaceAll("m$", "");
+    }
+
+    private static int terminalWidth(String text) {
+        int width = 0;
+        for (int offset = 0; offset < text.length();) {
+            int codePoint = text.codePointAt(offset);
+            offset += Character.charCount(codePoint);
+            int type = Character.getType(codePoint);
+            if (type == Character.NON_SPACING_MARK
+                    || type == Character.COMBINING_SPACING_MARK
+                    || type == Character.ENCLOSING_MARK
+                    || codePoint == 0x200D
+                    || (codePoint >= 0xFE00 && codePoint <= 0xFE0F)) {
+                continue;
+            }
+            width += isWide(codePoint) ? 2 : 1;
+        }
+        return width;
+    }
+
+    private static boolean isWide(int cp) {
+        return cp >= 0x1100 && (cp <= 0x115F
+                || cp == 0x2329 || cp == 0x232A
+                || (cp >= 0x2E80 && cp <= 0xA4CF && cp != 0x303F)
+                || (cp >= 0xAC00 && cp <= 0xD7A3)
+                || (cp >= 0xF900 && cp <= 0xFAFF)
+                || (cp >= 0xFE10 && cp <= 0xFE19)
+                || (cp >= 0xFE30 && cp <= 0xFE6F)
+                || (cp >= 0xFF00 && cp <= 0xFF60)
+                || (cp >= 0xFFE0 && cp <= 0xFFE6)
+                || (cp >= 0x1F300 && cp <= 0x1FAFF)
+                || (cp >= 0x20000 && cp <= 0x3FFFD));
     }
 }
