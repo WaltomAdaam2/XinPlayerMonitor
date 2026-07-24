@@ -577,7 +577,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             }
             if (first != null) {
                 task.completed.completeExceptionally(new IOException(
-                        failureCount + " SQLite event(s) before this flush failed; first failed sequence="
+                        failureCount + " SQLite events before this flush failed; first failed sequence="
                                 + first.sequence() + ", operation=" + first.operation(), first.error()));
                 return;
             }
