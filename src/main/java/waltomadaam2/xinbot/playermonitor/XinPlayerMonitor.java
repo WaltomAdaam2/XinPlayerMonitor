@@ -31,37 +31,47 @@ public final class XinPlayerMonitor implements Plugin {
     @Override
     public void onEnable() {
         try {
-            Path dataDirectory = Path.of("playermonitor");
-            PluginLog log = new PluginLog(dataDirectory.resolve("log"));
-            Consumer<String> warningSink = message -> {
-                logger.warn(message);
-                log.info("WARN: " + message);
-            };
-            MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
-            settings.setWarningSink(warningSink);
-            settings.initialize();
-            PlayerMonitorService service = new PlayerMonitorService(dataDirectory, settings);
-            service.setWarningSink(warningSink);
-            service.initialize();
-            installStatChatLogFilter(settings);
-            listener = new PlayerMonitorListener(service, log, logger, settings);
-            service.setEvictionGuard(listener::isProtectedFromEviction);
-            this.service = service;
-            Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
-            Bot.INSTANCE.getPluginManager().registerCommand(
-                    new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
-                            "playermonitor setting|scan-stat|<player> [stat|latestlogin|recentlogin|chat]"),
-                    new PlayerMonitorManagementCommand(service, settings, listener, logger),
-                    this);
-            log.info("plugin enabled");
-            logger.info("XinPlayerMonitor enabled; use playermonitor for help.");
+            enable(Path.of("playermonitor"));
         } catch (IOException error) {
             throw new IllegalStateException("Unable to initialize XinPlayerMonitor", error);
         }
     }
 
+    void enable(Path dataDirectory) throws IOException {
+        PluginLog log = new PluginLog(dataDirectory.resolve("log"));
+        Consumer<String> infoSink = message -> {
+            logger.info(message);
+            log.info(message);
+        };
+        Consumer<String> warningSink = message -> {
+            logger.warn(message);
+            log.info("WARN: " + message);
+        };
+        MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
+        settings.setWarningSink(warningSink);
+        settings.initialize();
+        PlayerMonitorService service = new PlayerMonitorService(dataDirectory, settings);
+        service.setWarningSink(warningSink);
+        service.setInfoSink(infoSink);
+        service.initialize();
+        installStatChatLogFilter(settings);
+        listener = new PlayerMonitorListener(service, log, logger, settings);
+        service.setEvictionGuard(listener::isProtectedFromEviction);
+        this.service = service;
+        Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
+        Bot.INSTANCE.getPluginManager().registerCommand(
+                new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
+                        "playermonitor setting|scan-stat|<player> [stat|latestlogin|recentlogin|chat]"),
+                new PlayerMonitorManagementCommand(service, settings, listener, logger),
+                this);
+        log.info("plugin enabled");
+        logger.info("XinPlayerMonitor enabled; use playermonitor for help.");
+    }
+
     @Override
     public void onDisable() {
+        Bot.INSTANCE.getPluginManager().events().unregisterAll(this);
+        Bot.INSTANCE.getPluginManager().commands().unregisterAll(this);
         if (listener != null) {
             listener.close();
             listener = null;

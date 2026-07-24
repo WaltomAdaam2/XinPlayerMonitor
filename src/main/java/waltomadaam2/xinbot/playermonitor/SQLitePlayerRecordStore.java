@@ -44,6 +44,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private final Object playerNamesLock = new Object();
     private volatile Consumer<String> warningSink = ignored -> {
     };
+    private volatile Consumer<String> infoSink = ignored -> {
+    };
     private volatile Predicate<String> statWriteFailure = ignored -> false;
     private volatile long writeDelayMillisForTesting;
     private volatile boolean accepting;
@@ -62,6 +64,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     @Override
     public void setWarningSink(Consumer<String> warningSink) {
         this.warningSink = Objects.requireNonNull(warningSink, "warningSink");
+    }
+    @Override
+    public void setInfoSink(Consumer<String> infoSink) {
+        this.infoSink = Objects.requireNonNull(infoSink, "infoSink");
     }
 
     @Override
@@ -92,11 +98,11 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             new SQLiteLegacyMigrator(directory, gson, warningSink).migrateIfNeeded(connection);
             SQLiteSchema.verify(connection);
             loadPlayerNameIndex(connection);
-            warn("XinPM SQLite database: " + databasePath.toAbsolutePath());
-            warn("Schema version: " + SQLiteSchema.schemaVersion(connection));
-            warn("Journal mode: " + SQLiteSchema.value(connection, "PRAGMA journal_mode"));
-            warn("Legacy migration status: " + legacyMigrationStatus(connection));
-            warn("Database writer batch size: " + databaseSettings.batchSize);
+            info("XinPM SQLite database: " + databasePath.toAbsolutePath());
+            info("Schema version: " + SQLiteSchema.schemaVersion(connection));
+            info("Journal mode: " + SQLiteSchema.value(connection, "PRAGMA journal_mode"));
+            info("Legacy migration status: " + legacyMigrationStatus(connection));
+            info("Database writer batch size: " + databaseSettings.batchSize);
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("initialize SQLite storage", error);
         }
@@ -756,6 +762,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
+    private void info(String message) {
+        infoSink.accept(message);
+    }
     private void warn(String message) {
         warningSink.accept(message);
     }

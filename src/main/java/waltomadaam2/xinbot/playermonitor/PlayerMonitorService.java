@@ -31,6 +31,9 @@ public final class PlayerMonitorService {
     public void setWarningSink(Consumer<String> warningSink) {
         store.setWarningSink(warningSink);
     }
+    public void setInfoSink(Consumer<String> infoSink) {
+        store.setInfoSink(infoSink);
+    }
 
     public void setEvictionGuard(Predicate<String> evictionGuard) {
         store.setEvictionGuard(evictionGuard);

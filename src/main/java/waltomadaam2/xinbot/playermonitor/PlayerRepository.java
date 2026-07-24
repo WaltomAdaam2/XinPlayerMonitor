@@ -16,6 +16,8 @@ interface PlayerRepository extends AutoCloseable {
     void initialize() throws IOException;
 
     void setWarningSink(Consumer<String> warningSink);
+    default void setInfoSink(Consumer<String> infoSink) {
+    }
 
     default void setEvictionGuard(Predicate<String> evictionGuard) {
     }

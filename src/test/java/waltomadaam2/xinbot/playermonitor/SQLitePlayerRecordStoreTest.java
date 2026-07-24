@@ -221,6 +221,47 @@ class SQLitePlayerRecordStoreTest {
         }
     }
     @Test
+    void completeLegacyUpgradeDrillMigratesRestartsAndWritesOnlySqlite() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-upgrade-drill");
+        writeLegacyPlayer(directory, "WaltomAdaam_", true);
+        writeLegacyPlayer(directory, "娑擃厽鏋冮悳鈺侇啀", false);
+
+        PlayerMonitorService upgraded = service(directory);
+        upgraded.initialize();
+        upgraded.recordChat("WaltomAdaam_", "runtime sqlite only", 500L);
+        upgraded.recordLogin("NewRuntime", 600L);
+        upgraded.recordLogout("NewRuntime", 700L);
+        upgraded.close();
+
+        assertFalse(Files.exists(directory.resolve("players")), "runtime writes must not recreate players/");
+        assertTrue(Files.exists(directory.resolve("legacy-json-backup")));
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(3, countRows(connection, "players"));
+            assertEquals(4, countRows(connection, "sessions"));
+            assertEquals(3, countRows(connection, "chat_messages"));
+            assertEquals(2, countRows(connection, "stat_snapshots"));
+            assertEquals("COMPLETED", scalar(connection,
+                    "SELECT status FROM migration_state WHERE migration_key = 'legacy-json-v1'"));
+            SQLiteSchema.verify(connection);
+        }
+
+        PlayerMonitorService restarted = service(directory);
+        restarted.initialize();
+        assertEquals(2, restarted.findRecord("WaltomAdaam_").orElseThrow().chatMessages.size());
+        assertEquals(1, restarted.findRecord("娑擃厽鏋冮悳鈺侇啀").orElseThrow().chatMessages.size());
+        assertEquals(1, restarted.findRecord("NewRuntime").orElseThrow().loginSessions.size());
+        assertTrue(restarted.findRecord("ExternalHistoryMustBeIgnored").isEmpty());
+        restarted.close();
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(3, countRows(connection, "players"));
+            assertEquals(4, countRows(connection, "sessions"));
+            assertEquals(3, countRows(connection, "chat_messages"));
+            assertEquals(2, countRows(connection, "stat_snapshots"));
+            SQLiteSchema.verify(connection);
+        }
+    }
+    @Test
     void backupUsesConsistentSQLiteSnapshot() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
         SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
@@ -401,6 +442,13 @@ class SQLitePlayerRecordStoreTest {
              ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
             assertTrue(resultSet.next());
             return resultSet.getInt(1);
+        }
+    }
+    private static String scalar(Connection connection, String sql) throws Exception {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(sql)) {
+            assertTrue(resultSet.next());
+            return resultSet.getString(1);
         }
     }
     private static String pragma(Statement statement, String pragma) throws Exception {
