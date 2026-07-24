@@ -56,6 +56,10 @@ public final class PlayerMonitorService {
         store.evictIdleRecords();
     }
 
+    public void flush() throws IOException {
+        store.flush();
+    }
+
     public void recordLogin(String playerName, long now) throws IOException {
         store.recordLogin(playerName, now);
     }
@@ -128,5 +132,13 @@ public final class PlayerMonitorService {
 
     public List<String> listPlayerNames() throws IOException {
         return store.listPlayerNames();
+    }
+
+    public void backupTo(Path target) throws IOException {
+        store.backupTo(target);
+    }
+
+    public Path databasePath() {
+        return store.databasePath();
     }
 }

@@ -109,6 +109,10 @@ interface PlayerRepository extends AutoCloseable {
         return null;
     }
 
+    default void backupTo(Path target) throws IOException {
+        throw new UnsupportedOperationException("backup not supported");
+    }
+
     @Override
     void close();
 }

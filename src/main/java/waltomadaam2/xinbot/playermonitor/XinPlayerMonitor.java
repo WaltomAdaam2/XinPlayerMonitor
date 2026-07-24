@@ -19,6 +19,7 @@ public final class XinPlayerMonitor implements Plugin {
     private PlayerMonitorListener listener;
     private LoggerContext loggerContext;
     private StatChatLogFilter statChatLogFilter;
+    private SQLiteBackupManager backupManager;
 
     @Override
     public void onLoad() {
@@ -56,10 +57,22 @@ public final class XinPlayerMonitor implements Plugin {
         service.setEvictionGuard(listener::isProtectedFromEviction);
         this.service = service;
         Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
+        PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                service, settings, listener, logger);
+        backupManager = new SQLiteBackupManager(dataDirectory, service.databasePath(),
+                warningSink, infoSink, () -> {
+                    try {
+                        service.flush();
+                    } catch (IOException error) {
+                        warningSink.accept("Backup pre-flush failed: " + error.getMessage());
+                    }
+                });
+        command.setBackupManager(backupManager);
+        backupManager.start(settings.backupInterval());
         Bot.INSTANCE.getPluginManager().registerCommand(
                 new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
                         "playermonitor setting|scan-stat|<player> [stat|latestlogin|recentlogin|chat]"),
-                new PlayerMonitorManagementCommand(service, settings, listener, logger),
+                command,
                 this);
         log.info("plugin enabled");
         logger.info("XinPlayerMonitor enabled; use playermonitor for help.");
@@ -69,6 +82,10 @@ public final class XinPlayerMonitor implements Plugin {
     public void onDisable() {
         Bot.INSTANCE.getPluginManager().events().unregisterAll(this);
         Bot.INSTANCE.getPluginManager().commands().unregisterAll(this);
+        if (backupManager != null) {
+            backupManager.stop();
+            backupManager = null;
+        }
         if (listener != null) {
             listener.close();
             listener = null;

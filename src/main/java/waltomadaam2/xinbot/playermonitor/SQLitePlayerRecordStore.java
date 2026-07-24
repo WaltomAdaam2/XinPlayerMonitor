@@ -374,7 +374,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         return databasePath;
     }
 
-    void backupTo(Path target) throws IOException {
+    public void backupTo(Path target) throws IOException {
         flush();
         if (target.toAbsolutePath().getParent() != null) {
             Files.createDirectories(target.toAbsolutePath().getParent());
