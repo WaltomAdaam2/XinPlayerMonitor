@@ -48,13 +48,16 @@ final class SQLiteLegacyMigrator {
     private final Path reportDirectory;
     private final Gson gson;
     private final Consumer<String> warningSink;
+    private final boolean allowPartialMigration;
 
-    SQLiteLegacyMigrator(Path directory, Gson gson, Consumer<String> warningSink) {
+    SQLiteLegacyMigrator(Path directory, Gson gson, Consumer<String> warningSink,
+            boolean allowPartialMigration) {
         this.directory = directory;
         this.playersDirectory = directory.resolve("players");
         this.reportDirectory = directory.resolve("migration-reports");
         this.gson = gson;
         this.warningSink = warningSink;
+        this.allowPartialMigration = allowPartialMigration;
     }
 
     void migrateIfNeeded(Connection connection) throws IOException, SQLException {
@@ -63,6 +66,11 @@ final class SQLiteLegacyMigrator {
         }
         Files.createDirectories(reportDirectory);
         Report report = new Report();
+        ensureNoUntrackedSqlitePlayers(connection, report);
+        if (allowPartialMigration) {
+            report.warning("allowPartialLegacyMigration=true: corrupted non-empty JSONL lines may be skipped");
+            warningSink.accept("WARNING: XinPM legacy migration is running in partial mode; damaged rows may be skipped");
+        }
         long startedAt = System.currentTimeMillis();
         upsertMigrationState(connection, "IN_PROGRESS", startedAt, null, "Legacy JSON migration started");
         List<Path> playerDirs = playerDirectories();
@@ -79,14 +87,23 @@ final class SQLiteLegacyMigrator {
                 continue;
             }
             try {
+                int corruptBefore = report.corruptLines;
                 LegacyPlayer player = readPlayer(playerDir, report);
-                writePlayer(connection, player);
-                markLegacyPlayer(connection, player.normalizedName, "COMPLETED",
-                        player.sessions.size(), player.chats.size(), player.stats.size(), null);
-                report.migratedPlayers++;
-                report.migratedSessions += player.sessions.size();
-                report.migratedChats += player.chats.size();
-                report.migratedStats += player.stats.size();
+                boolean playerHasCorruptRows = report.corruptLines > corruptBefore;
+                String playerStatus = playerHasCorruptRows && !allowPartialMigration ? "FAILED" : "COMPLETED";
+                String playerError = playerHasCorruptRows && !allowPartialMigration
+                        ? "one or more non-empty JSONL lines were corrupted" : null;
+                writePlayer(connection, player, playerStatus, playerError);
+                if ("FAILED".equals(playerStatus)) {
+                    report.failedPlayers++;
+                    report.error("Failed player " + player.displayName
+                            + ": corrupted JSONL rows were skipped in strict migration mode");
+                } else {
+                    report.migratedPlayers++;
+                    report.migratedSessions += player.sessions.size();
+                    report.migratedChats += player.chats.size();
+                    report.migratedStats += player.stats.size();
+                }
             } catch (IOException | SQLException error) {
                 report.failedPlayers++;
                 report.error("Failed player " + playerDir.getFileName() + ": " + error.getMessage());
@@ -98,13 +115,36 @@ final class SQLiteLegacyMigrator {
             }
         }
         SQLiteSchema.verify(connection);
-        if (report.failedPlayers > 0 || report.fatals > 0) {
-            failMigration(connection, report, "one or more players failed");
-            throw new IOException("Legacy JSON migration failed for " + report.failedPlayers + " player(s)");
+        if (report.failedPlayers > 0 || report.fatals > 0
+                || (!allowPartialMigration && report.corruptLines > 0)) {
+            failMigration(connection, report, "one or more players or JSONL rows failed");
+            throw new IOException("Legacy JSON migration failed for " + report.failedPlayers
+                    + " player(s), corrupt JSONL lines=" + report.corruptLines);
         }
         upsertMigrationState(connection, "COMPLETED", startedAt, System.currentTimeMillis(), report.summary());
         writeReport(report, "completed");
         moveLegacyDirectory(report);
+    }
+
+    private void ensureNoUntrackedSqlitePlayers(Connection connection, Report report)
+            throws SQLException, IOException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("""
+                     SELECT p.normalized_name
+                     FROM players p
+                     LEFT JOIN legacy_migration_players legacy
+                       ON legacy.normalized_name = p.normalized_name
+                     WHERE legacy.normalized_name IS NULL
+                     LIMIT 1
+                     """)) {
+            if (resultSet.next()) {
+                String normalized = resultSet.getString(1);
+                report.fatal("SQLite already contains untracked player data for " + normalized
+                        + "; refusing to overwrite a database that may have received live writes");
+                writeReport(report, "unsafe-existing-data");
+                throw new IOException("Legacy JSON migration refused: xinpm.db already contains non-migration player data");
+            }
+        }
     }
 
     private List<Path> playerDirectories() throws IOException {
@@ -227,7 +267,8 @@ final class SQLiteLegacyMigrator {
                     validator.validate(object, value, lineNumber);
                     values.add(value);
                 } catch (JsonParseException error) {
-                    report.warning(label + ":" + lineNumber + " skipped corrupt JSONL line: " + error.getMessage());
+                    report.corruptLine(label + ":" + lineNumber + " corrupt JSONL line: " + error.getMessage(),
+                            allowPartialMigration);
                 }
             }
         }
@@ -281,20 +322,21 @@ final class SQLiteLegacyMigrator {
     }
 
     private List<StatSnapshot> dedupeStats(List<StatSnapshot> stats, String playerName, Report report) {
-        Set<String> seen = new HashSet<>();
-        List<StatSnapshot> result = new ArrayList<>();
-        for (StatSnapshot stat : stats) {
-            String key = gson.toJson(stat);
-            if (seen.add(key)) {
-                result.add(stat);
-            } else {
-                report.warning(playerName + " duplicate legacy stat skipped at " + stat.capturedAt);
-            }
+        if (stats.isEmpty()) {
+            return List.of();
         }
-        return result;
+        StatSnapshot latest = stats.stream()
+                .max(Comparator.comparingLong(snapshot -> snapshot.capturedAt))
+                .orElseThrow();
+        if (stats.size() > 1) {
+            report.warning(playerName + " legacy stats contained " + stats.size()
+                    + " snapshots; kept only latest capturedAt=" + latest.capturedAt);
+        }
+        return List.of(latest);
     }
 
-    private void writePlayer(Connection connection, LegacyPlayer player) throws SQLException, IOException {
+    private void writePlayer(Connection connection, LegacyPlayer player, String migrationStatus,
+            String migrationError) throws SQLException, IOException {
         connection.setAutoCommit(false);
         try {
             deleteExistingPlayer(connection, player.normalizedName);
@@ -335,6 +377,8 @@ final class SQLiteLegacyMigrator {
                 }
             }
             verifyImportedPlayerCounts(connection, playerId, player);
+            markLegacyPlayer(connection, player.normalizedName, migrationStatus,
+                    player.sessions.size(), player.chats.size(), player.stats.size(), migrationError);
             connection.commit();
         } catch (SQLException | IOException error) {
             SQLiteSchema.rollbackQuietly(connection);
@@ -408,15 +452,16 @@ final class SQLiteLegacyMigrator {
     }
 
     private void insertStats(Connection connection, long playerId, List<StatSnapshot> stats) throws SQLException {
+        if (stats.isEmpty()) {
+            return;
+        }
+        StatSnapshot stat = stats.get(0);
         try (PreparedStatement statement = connection.prepareStatement(
                 "INSERT INTO stat_snapshots(player_id, timestamp, stat_json) VALUES(?, ?, ?)")) {
-            for (StatSnapshot stat : stats) {
-                statement.setLong(1, playerId);
-                statement.setLong(2, stat.capturedAt);
-                statement.setString(3, gson.toJson(stat));
-                statement.addBatch();
-            }
-            statement.executeBatch();
+            statement.setLong(1, playerId);
+            statement.setLong(2, stat.capturedAt);
+            statement.setString(3, gson.toJson(stat));
+            statement.executeUpdate();
         }
     }
 
@@ -594,12 +639,22 @@ final class SQLiteLegacyMigrator {
         private int migratedChats;
         private int migratedStats;
         private int warnings;
+        private int corruptLines;
         private int errors;
         private int fatals;
 
         void warning(String message) {
             warnings++;
             lines.add("WARNING: " + message);
+        }
+
+        void corruptLine(String message, boolean partialAllowed) {
+            corruptLines++;
+            if (partialAllowed) {
+                warning("PARTIAL: " + message + " (skipped by explicit configuration)");
+            } else {
+                error(message);
+            }
         }
 
         void error(String message) {
@@ -620,6 +675,7 @@ final class SQLiteLegacyMigrator {
                     + ", chats=" + migratedChats
                     + ", stats=" + migratedStats
                     + ", warnings=" + warnings
+                    + ", corruptLines=" + corruptLines
                     + ", errors=" + errors
                     + ", fatals=" + fatals;
         }

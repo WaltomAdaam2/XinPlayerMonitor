@@ -52,7 +52,7 @@ class SQLitePlayerRecordStoreTest {
             assertEquals("1", pragma(statement, "PRAGMA foreign_keys"));
             try (ResultSet resultSet = statement.executeQuery("SELECT MAX(version) FROM schema_migrations")) {
                 assertTrue(resultSet.next());
-                assertEquals(1, resultSet.getInt(1));
+                assertEquals(2, resultSet.getInt(1));
             }
         }
     }
@@ -70,6 +70,75 @@ class SQLitePlayerRecordStoreTest {
 
         PlayerMonitorService future = service(directory);
         assertThrows(IOException.class, future::initialize);
+    }
+
+    @Test
+    void upgradesSchemaV1AndCompactsStatsToLatestSnapshot() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-v1-upgrade");
+        PlayerMonitorService initial = service(directory);
+        initial.initialize();
+        initial.close();
+
+        StatSnapshot older = new StatSnapshot();
+        older.capturedAt = 100L;
+        older.deathCount = 1;
+        StatSnapshot newer = new StatSnapshot();
+        newer.capturedAt = 200L;
+        newer.deathCount = 9;
+        try (Connection connection = openRaw(directory.resolve("xinpm.db")); Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DROP INDEX idx_stats_one_per_player");
+            statement.executeUpdate("DELETE FROM schema_migrations WHERE version = 2");
+            statement.executeUpdate("INSERT INTO players(normalized_name, display_name, first_seen_at, last_seen_at, "
+                    + "online, current_session_id, last_stat_at, created_at, updated_at) "
+                    + "VALUES('statuser', 'StatUser', 100, 200, 0, NULL, 200, 100, 200)");
+            long playerId;
+            try (ResultSet resultSet = statement.executeQuery("SELECT id FROM players WHERE normalized_name='statuser'")) {
+                assertTrue(resultSet.next());
+                playerId = resultSet.getLong(1);
+            }
+            try (var prepared = connection.prepareStatement(
+                    "INSERT INTO stat_snapshots(player_id, timestamp, stat_json) VALUES(?, ?, ?)")) {
+                prepared.setLong(1, playerId);
+                prepared.setLong(2, older.capturedAt);
+                prepared.setString(3, gson.toJson(older));
+                prepared.executeUpdate();
+                prepared.setLong(1, playerId);
+                prepared.setLong(2, newer.capturedAt);
+                prepared.setString(3, gson.toJson(newer));
+                prepared.executeUpdate();
+            }
+        }
+
+        PlayerMonitorService upgraded = service(directory);
+        upgraded.initialize();
+        var record = upgraded.findRecord("StatUser").orElseThrow();
+        assertEquals(1, record.statSnapshots.size());
+        assertEquals(9, record.statSnapshots.get(0).deathCount);
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(2, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
+            assertEquals(1, countRows(connection, "stat_snapshots"));
+            SQLiteSchema.verify(connection);
+        }
+    }
+
+    @Test
+    void legacyMigrationRefusesToOverwriteUntrackedLiveSqliteData() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-live-data-protection");
+        SQLitePlayerRecordStore liveStore = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        liveStore.initialize();
+        liveStore.recordChat("LivePlayer", "already persisted", 100L);
+        liveStore.flush();
+        liveStore.close();
+        writeLegacyPlayer(directory, "LegacyPlayer", false);
+
+        PlayerMonitorService service = service(directory);
+        IOException error = assertThrows(IOException.class, service::initialize);
+        assertTrue(error.getMessage().contains("already contains non-migration player data"));
+        assertTrue(Files.exists(directory.resolve("players")));
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(1, countRows(connection, "players"));
+            assertEquals("LivePlayer", scalar(connection, "SELECT display_name FROM players"));
+        }
     }
 
     @Test
@@ -143,7 +212,7 @@ class SQLitePlayerRecordStoreTest {
         }
     }
     @Test
-    void corruptedJsonlLineIsReportedAndValidLinesContinue() throws Exception {
+    void corruptedJsonlLineFailsStrictMigrationAndKeepsLegacyDirectory() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-corrupt-jsonl");
         writeLegacyPlayer(directory, "Noisy", false);
         ChatEntry before = new ChatEntry(150L, "before");
@@ -155,12 +224,16 @@ class SQLitePlayerRecordStoreTest {
                 StandardCharsets.UTF_8);
 
         PlayerMonitorService service = service(directory);
-        service.initialize();
+        assertThrows(IOException.class, service::initialize);
 
-        var record = service.findRecord("Noisy").orElseThrow();
-        assertEquals(2, record.chatMessages.size());
-        assertEquals("before", record.chatMessages.get(0).message);
-        assertEquals("after", record.chatMessages.get(1).message);
+        assertTrue(Files.exists(directory.resolve("players")));
+        assertFalse(Files.exists(directory.resolve("legacy-json-backup")));
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(2, countRows(connection, "chat_messages"),
+                    "valid rows may be staged for resumable migration");
+            assertEquals("FAILED", scalar(connection,
+                    "SELECT status FROM migration_state WHERE migration_key='legacy-json-v1'"));
+        }
         try (Stream<Path> reports = Files.list(directory.resolve("migration-reports"))) {
             String reportText = reports.map(path -> {
                 try {
@@ -169,7 +242,31 @@ class SQLitePlayerRecordStoreTest {
                     throw new RuntimeException(error);
                 }
             }).reduce("", String::concat);
-            assertTrue(reportText.contains("skipped corrupt JSONL line"));
+            assertTrue(reportText.contains("corrupt JSONL line"));
+            assertTrue(reportText.contains("Noisy chat.jsonl:2"));
+        }
+    }
+
+    @Test
+    void explicitPartialMigrationCanSkipCorruptJsonlLine() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-partial-jsonl");
+        writeLegacyPlayer(directory, "Noisy", false);
+        Files.writeString(directory.resolve("players/Noisy/chat.jsonl"),
+                gson.toJson(new ChatEntry(150L, "before")) + System.lineSeparator()
+                        + "{broken" + System.lineSeparator()
+                        + gson.toJson(new ChatEntry(151L, "after")) + System.lineSeparator(),
+                StandardCharsets.UTF_8);
+
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.allowPartialLegacyMigration = true;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        store.initialize();
+        try {
+            assertEquals(2, store.read("Noisy").chatMessages.size());
+            assertFalse(Files.exists(directory.resolve("players")));
+            assertTrue(Files.exists(directory.resolve("legacy-json-backup")));
+        } finally {
+            store.close();
         }
     }
     @Test
@@ -195,6 +292,28 @@ class SQLitePlayerRecordStoreTest {
         assertEquals(1, record.loginSessions.size());
         assertEquals(1, record.chatMessages.size());
         assertEquals("same", record.chatMessages.get(0).message);
+    }
+
+    @Test
+    void migrationKeepsOnlyLatestLegacyStatSnapshot() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-latest-stat");
+        writeLegacyPlayer(directory, "Stats", false);
+        StatSnapshot older = new StatSnapshot();
+        older.capturedAt = 100L;
+        older.deathCount = 1;
+        StatSnapshot newer = new StatSnapshot();
+        newer.capturedAt = 300L;
+        newer.deathCount = 9;
+        Files.writeString(directory.resolve("players/Stats/stats.jsonl"),
+                gson.toJson(older) + System.lineSeparator() + gson.toJson(newer) + System.lineSeparator(),
+                StandardCharsets.UTF_8);
+
+        PlayerMonitorService service = service(directory);
+        service.initialize();
+        var record = service.findRecord("Stats").orElseThrow();
+        assertEquals(1, record.statSnapshots.size());
+        assertEquals(300L, record.statSnapshots.get(0).capturedAt);
+        assertEquals(9, record.statSnapshots.get(0).deathCount);
     }
 
     @Test
@@ -448,7 +567,7 @@ class SQLitePlayerRecordStoreTest {
         }
     }
     @Test
-    void badStatEventDoesNotDiscardOtherEventsInTheBatch() throws Exception {
+    void badStatEventIsReportedByFlushWithoutDiscardingOtherEvents() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-batch-failure");
         MonitorSettings.Database settings = new MonitorSettings.Database();
         settings.batchSize = 10;
@@ -463,7 +582,9 @@ class SQLitePlayerRecordStoreTest {
             bad.capturedAt = 101L;
             store.recordStat("bad", bad);
             store.recordChat("Good", "after", 102L);
-            store.flush();
+            IOException failure = assertThrows(IOException.class, store::flush);
+            assertTrue(failure.getMessage().contains("events before this flush failed"));
+            store.flush(); // the acknowledged non-terminal failure must not poison later flushes
         } finally {
             store.close();
         }
@@ -473,6 +594,7 @@ class SQLitePlayerRecordStoreTest {
             assertEquals(0, countRows(connection, "stat_snapshots"));
             SQLiteSchema.verify(connection);
         }
+        assertTrue(Files.exists(directory.resolve("failed-events.jsonl")));
         assertTrue(warnings.stream().anyMatch(line -> line.contains("operation=stat")));
     }
     private PlayerMonitorService service(Path directory) {

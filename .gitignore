@@ -6,3 +6,6 @@ target/
 
 # Runtime data is intentionally retained next to XinBot, never in the repository.
 /playermonitor/
+
+# Local Codex progress notes are not part of repository history.
+.codex/

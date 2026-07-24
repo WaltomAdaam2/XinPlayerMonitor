@@ -61,7 +61,7 @@ class PlayerMonitorServiceStatTest {
     }
 
     @Test
-    void statSnapshotsAreRetainedAndReturnedInTimeOrder() throws Exception {
+    void recordStatKeepsOnlyLatestSnapshot() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
         PlayerMonitorService service = service(directory);
         service.initialize();
@@ -77,9 +77,8 @@ class PlayerMonitorServiceStatTest {
         service.recordStat("WaltomAdaam", second);
 
         var record = service.findRecord("WaltomAdaam").orElseThrow();
-        assertEquals(2, record.statSnapshots.size());
-        assertEquals(1, record.statSnapshots.get(0).deathCount);
-        assertEquals(9, record.statSnapshots.get(1).deathCount);
+        assertEquals(1, record.statSnapshots.size());
+        assertEquals(9, record.statSnapshots.get(0).deathCount);
     }
 
     private PlayerMonitorService service(Path directory) {

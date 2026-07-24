@@ -29,6 +29,7 @@ final class MonitorSettings {
         int busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MILLIS;
         int cacheSizeKiB = DEFAULT_CACHE_SIZE_KIB;
         int shutdownFlushTimeoutMs = DEFAULT_SHUTDOWN_FLUSH_TIMEOUT_MILLIS;
+        boolean allowPartialLegacyMigration = false;
 
         Database copy() {
             Database copy = new Database();
@@ -39,6 +40,7 @@ final class MonitorSettings {
             copy.busyTimeoutMs = busyTimeoutMs;
             copy.cacheSizeKiB = cacheSizeKiB;
             copy.shutdownFlushTimeoutMs = shutdownFlushTimeoutMs;
+            copy.allowPartialLegacyMigration = allowPartialLegacyMigration;
             return copy;
         }
     }

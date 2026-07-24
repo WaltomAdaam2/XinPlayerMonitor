@@ -9,35 +9,42 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 final class SQLiteSchema {
-    static final int VERSION = 1;
+    static final int VERSION = 2;
 
     private SQLiteSchema() {
     }
 
     static Connection open(Path databasePath, MonitorSettings.Database settings) throws SQLException {
         Connection connection = DriverManager.getConnection("jdbc:sqlite:" + databasePath.toAbsolutePath());
-        configure(connection, settings);
+        configureConnection(connection, settings);
         return connection;
     }
 
-    static void configure(Connection connection, MonitorSettings.Database settings) throws SQLException {
-        String journal = value(connection, "PRAGMA journal_mode = WAL");
-        if (!"wal".equalsIgnoreCase(journal)) {
-            throw new SQLException("SQLite journal_mode is " + journal + ", expected WAL");
-        }
-        execute(connection, "PRAGMA synchronous = NORMAL");
-        execute(connection, "PRAGMA foreign_keys = ON");
+    /**
+     * Applies per-connection settings. journal_mode is deliberately not changed here: it is a persistent
+     * database setting and is established once during initialize(). Re-running journal_mode on every read
+     * connection can itself contend with the writer.
+     */
+    static void configureConnection(Connection connection, MonitorSettings.Database settings) throws SQLException {
         execute(connection, "PRAGMA busy_timeout = " + settings.busyTimeoutMs);
+        execute(connection, "PRAGMA foreign_keys = ON");
+        execute(connection, "PRAGMA synchronous = NORMAL");
         execute(connection, "PRAGMA temp_store = MEMORY");
         execute(connection, "PRAGMA wal_autocheckpoint = 1000");
         execute(connection, "PRAGMA cache_size = -" + settings.cacheSizeKiB);
     }
 
     static void initialize(Connection connection) throws SQLException, IOException {
+        String journal = value(connection, "PRAGMA journal_mode = WAL");
+        if (!"wal".equalsIgnoreCase(journal)) {
+            throw new SQLException("SQLite journal_mode is " + journal + ", expected WAL");
+        }
+
         boolean hasSchemaTable = tableExists(connection, "schema_migrations");
         if (!hasSchemaTable && hasUserTables(connection)) {
             throw new IOException("Existing SQLite database has no schema_migrations table; refusing to guess schema version");
         }
+
         connection.setAutoCommit(false);
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("""
@@ -47,13 +54,21 @@ final class SQLiteSchema {
                         applied_at INTEGER NOT NULL
                     )
                     """);
+
             Integer currentVersion = schemaVersion(connection);
             if (currentVersion != null && currentVersion > VERSION) {
                 throw new IOException("Unsupported future SQLite schema version " + currentVersion);
             }
+
             createTables(statement);
             if (currentVersion == null) {
                 statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(1, 'Initial SQLite player monitor schema', "
+                        + System.currentTimeMillis() + ")");
+                currentVersion = 1;
+            }
+            if (currentVersion < 2) {
+                migrateToV2(statement);
+                statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(2, 'Keep only the latest stat snapshot per player', "
                         + System.currentTimeMillis() + ")");
             }
             connection.commit();
@@ -63,6 +78,25 @@ final class SQLiteSchema {
         } finally {
             connection.setAutoCommit(true);
         }
+    }
+
+    private static void migrateToV2(Statement statement) throws SQLException {
+        // Keep the newest timestamp, then the highest row id for ties.
+        statement.executeUpdate("""
+                DELETE FROM stat_snapshots
+                WHERE id NOT IN (
+                    SELECT newest.id
+                    FROM stat_snapshots newest
+                    WHERE newest.id = (
+                        SELECT candidate.id
+                        FROM stat_snapshots candidate
+                        WHERE candidate.player_id = newest.player_id
+                        ORDER BY candidate.timestamp DESC, candidate.id DESC
+                        LIMIT 1
+                    )
+                )
+                """);
+        statement.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS idx_stats_one_per_player ON stat_snapshots(player_id)");
     }
 
     static Integer schemaVersion(Connection connection) throws SQLException {
@@ -104,6 +138,18 @@ final class SQLiteSchema {
         }
         try (Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery("""
+                     SELECT player_id, COUNT(*)
+                     FROM stat_snapshots
+                     GROUP BY player_id
+                     HAVING COUNT(*) > 1
+                     """)) {
+            if (resultSet.next()) {
+                throw new IOException("SQLite verification failed: multiple stat snapshots exist for player_id="
+                        + resultSet.getLong(1));
+            }
+        }
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("""
                      SELECT p.normalized_name
                      FROM players p
                      LEFT JOIN sessions s ON s.id = p.current_session_id
@@ -130,7 +176,7 @@ final class SQLiteSchema {
 
     static IOException toIo(String operation, SQLException error) {
         return new IOException(operation + " failed; sqlState=" + error.getSQLState()
-                + ", message=" + error.getMessage(), error);
+                + ", errorCode=" + error.getErrorCode() + ", message=" + error.getMessage(), error);
     }
 
     static void rollbackQuietly(Connection connection) {

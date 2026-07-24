@@ -12,6 +12,7 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -28,20 +29,25 @@ import java.util.TreeSet;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 final class SQLitePlayerRecordStore implements PlayerRepository {
     private final Path directory;
     private final Path databasePath;
+    private final Path failedEventsPath;
     private final MonitorSettings.Database databaseSettings;
     private final Gson gson = new Gson();
     private final BlockingQueue<WriteTask> queue;
     private final TreeSet<String> playerNames = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
     private final Object playerNamesLock = new Object();
+    private final AtomicLong nextSequence = new AtomicLong();
+    private final ConcurrentLinkedQueue<FailureRecord> pendingFailures = new ConcurrentLinkedQueue<>();
     private volatile Consumer<String> warningSink = ignored -> {
     };
     private volatile Consumer<String> infoSink = ignored -> {
@@ -50,6 +56,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private volatile long writeDelayMillisForTesting;
     private volatile boolean accepting;
     private volatile boolean initialized;
+    private volatile IOException terminalFailure;
     private Thread writerThread;
 
     SQLitePlayerRecordStore(Path directory, MonitorSettings.Database settings) {
@@ -58,6 +65,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         Path configured = Path.of(this.databaseSettings.path == null || this.databaseSettings.path.isBlank()
                 ? MonitorSettings.Database.DEFAULT_PATH : this.databaseSettings.path);
         this.databasePath = configured.isAbsolute() ? configured : directory.resolve(configured);
+        this.failedEventsPath = directory.resolve("failed-events.jsonl");
         this.queue = new ArrayBlockingQueue<>(Math.max(1, this.databaseSettings.queueCapacity));
     }
 
@@ -95,7 +103,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
         try (Connection connection = openConnection()) {
             SQLiteSchema.initialize(connection);
-            new SQLiteLegacyMigrator(directory, gson, warningSink).migrateIfNeeded(connection);
+            new SQLiteLegacyMigrator(directory, gson, warningSink,
+                    databaseSettings.allowPartialLegacyMigration).migrateIfNeeded(connection);
             SQLiteSchema.verify(connection);
             loadPlayerNameIndex(connection);
             info("XinPM SQLite database: " + databasePath.toAbsolutePath());
@@ -132,6 +141,14 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
         writerThread = null;
         initialized = false;
+        IOException fatal = terminalFailure;
+        FailureRecord failure = pendingFailures.peek();
+        if (fatal != null) {
+            warn("SEVERE: SQLite writer closed in failed state: " + fatal.getMessage());
+        } else if (failure != null) {
+            warn("SEVERE: SQLite writer closed with an unacknowledged failed event; sequence="
+                    + failure.sequence() + ", error=" + failure.error().getMessage());
+        }
     }
 
     @Override
@@ -385,13 +402,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private void submit(DatabaseEvent event) throws IOException {
+        IOException fatal = terminalFailure;
+        if (fatal != null) {
+            throw new IOException("SQLite writer is in a terminal failed state", fatal);
+        }
         if (!accepting && !(event instanceof FlushEvent)) {
             throw new IOException("SQLite storage is not accepting new events");
         }
         if (!initialized && !(event instanceof FlushEvent)) {
             throw new IOException("SQLite storage has not been initialized");
         }
-        WriteTask task = new WriteTask(event);
+        WriteTask task = new WriteTask(nextSequence.incrementAndGet(), event);
         try {
             if (!queue.offer(task, Math.max(1000L, databaseSettings.flushIntervalMs), TimeUnit.MILLISECONDS)) {
                 IOException error = new IOException("SQLite write queue is full; event=" + event.operation());
@@ -441,10 +462,21 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             SQLiteSchema.checkpoint(connection);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            failAllPending(new IOException("SQLite writer interrupted", error));
+            IOException io = new IOException("SQLite writer interrupted", error);
+            terminalFailure = io;
+            accepting = false;
+            failAllPending(io);
         } catch (SQLException error) {
             IOException io = SQLiteSchema.toIo("run SQLite writer", error);
+            terminalFailure = io;
+            accepting = false;
             warn("SEVERE: SQLite writer stopped: " + io.getMessage());
+            failAllPending(io);
+        } catch (RuntimeException error) {
+            IOException io = new IOException("SQLite writer stopped unexpectedly", error);
+            terminalFailure = io;
+            accepting = false;
+            warn("SEVERE: SQLite writer stopped: " + error.getMessage());
             failAllPending(io);
         }
     }
@@ -461,13 +493,22 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                 applyEvent(sql, task.event);
             }
             connection.commit();
-            batch.forEach(task -> task.completed.complete(null));
+            batch.forEach(this::completeCommitted);
         } catch (Exception batchError) {
             SQLiteSchema.rollbackQuietly(connection);
             if (batch.size() == 1) {
                 completeFailed(batch.get(0), batchError);
             } else {
-                batch.forEach(task -> processOne(connection, sql, task));
+                for (int index = 0; index < batch.size(); index++) {
+                    if (!processOne(connection, sql, batch.get(index))) {
+                        IOException fatal = terminalFailure == null
+                                ? new IOException("SQLite writer entered a failed state") : terminalFailure;
+                        for (int remaining = index + 1; remaining < batch.size(); remaining++) {
+                            batch.get(remaining).completed.completeExceptionally(fatal);
+                        }
+                        break;
+                    }
+                }
             }
         } finally {
             try {
@@ -478,15 +519,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
-    private void processOne(Connection connection, WriterSql sql, WriteTask task) {
+    private boolean processOne(Connection connection, WriterSql sql, WriteTask task) {
         try {
             connection.setAutoCommit(false);
             applyEvent(sql, task.event);
             connection.commit();
-            task.completed.complete(null);
+            completeCommitted(task);
+            return true;
         } catch (Exception error) {
             SQLiteSchema.rollbackQuietly(connection);
             completeFailed(task, error);
+            return terminalFailure == null;
         } finally {
             try {
                 connection.setAutoCommit(true);
@@ -515,6 +558,33 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
+    private void completeCommitted(WriteTask task) {
+        if (task.event instanceof FlushEvent) {
+            FailureRecord first = null;
+            int failureCount = 0;
+            while (true) {
+                FailureRecord candidate = pendingFailures.peek();
+                if (candidate == null || candidate.sequence() >= task.sequence) {
+                    break;
+                }
+                candidate = pendingFailures.poll();
+                if (candidate != null) {
+                    if (first == null) {
+                        first = candidate;
+                    }
+                    failureCount++;
+                }
+            }
+            if (first != null) {
+                task.completed.completeExceptionally(new IOException(
+                        failureCount + " SQLite event(s) before this flush failed; first failed sequence="
+                                + first.sequence() + ", operation=" + first.operation(), first.error()));
+                return;
+            }
+        }
+        task.completed.complete(null);
+    }
+
     private void completeFailed(WriteTask task, Exception error) {
         IOException io;
         if (error instanceof IOException existing) {
@@ -524,11 +594,47 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         } else {
             io = new IOException("write SQLite event " + task.event.operation() + " failed: " + error.getMessage(), error);
         }
-        warn("SQLite event failed; operation=" + task.event.operation()
+        pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), io));
+        persistFailedEvent(task, io);
+        warn("SQLite event failed; sequence=" + task.sequence
+                + ", operation=" + task.event.operation()
                 + ", player=" + task.event.playerNameForLog()
                 + ", error=" + io.getMessage()
                 + ", rolledBack=true, retriedIndividually=true");
         task.completed.completeExceptionally(io);
+
+        if (error instanceof SQLException sqlError && isTerminalSqliteFailure(sqlError)) {
+            terminalFailure = io;
+            accepting = false;
+            warn("SEVERE: SQLite writer entered terminal failed state; pending events will be rejected: "
+                    + io.getMessage());
+            failAllPending(io);
+        }
+    }
+
+    private boolean isTerminalSqliteFailure(SQLException error) {
+        int primaryCode = error.getErrorCode() & 0xFF;
+        return primaryCode == 7   // SQLITE_NOMEM
+                || primaryCode == 10  // SQLITE_IOERR
+                || primaryCode == 11  // SQLITE_CORRUPT
+                || primaryCode == 13  // SQLITE_FULL
+                || primaryCode == 14  // SQLITE_CANTOPEN
+                || primaryCode == 21  // SQLITE_MISUSE
+                || primaryCode == 26; // SQLITE_NOTADB
+    }
+
+    private void persistFailedEvent(WriteTask task, IOException error) {
+        FailedEventRecord record = new FailedEventRecord(
+                task.sequence, System.currentTimeMillis(), task.event.operation(),
+                task.event.playerNameForLog(), error.getMessage(), gson.toJson(task.event));
+        try {
+            Files.createDirectories(directory);
+            Files.writeString(failedEventsPath, gson.toJson(record) + System.lineSeparator(),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+        } catch (IOException persistError) {
+            warn("SEVERE: Unable to persist failed SQLite event sequence=" + task.sequence
+                    + " to " + failedEventsPath + ": " + persistError.getMessage());
+        }
     }
 
     private void failAllPending(IOException error) {
@@ -597,7 +703,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         sql.updatePlayerStat.setLong(1, snapshot.capturedAt);
         sql.updatePlayerStat.setLong(2, snapshot.capturedAt);
         sql.updatePlayerStat.setLong(3, snapshot.capturedAt);
-        sql.updatePlayerStat.setLong(4, playerId);
+        sql.updatePlayerStat.setLong(4, snapshot.capturedAt);
+        sql.updatePlayerStat.setLong(5, playerId);
         sql.updatePlayerStat.executeUpdate();
         rememberPlayerName(playerName);
     }
@@ -716,7 +823,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT stat_json FROM stat_snapshots
-                WHERE player_id = ? ORDER BY timestamp ASC, id ASC
+                WHERE player_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1
                 """)) {
             statement.setLong(1, playerId);
             try (ResultSet resultSet = statement.executeQuery()) {
@@ -801,11 +908,21 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private static final class WriteTask {
+        private final long sequence;
         private final DatabaseEvent event;
         private final CompletableFuture<Void> completed = new CompletableFuture<>();
-        private WriteTask(DatabaseEvent event) {
+
+        private WriteTask(long sequence, DatabaseEvent event) {
+            this.sequence = sequence;
             this.event = event;
         }
+    }
+
+    private record FailureRecord(long sequence, String operation, IOException error) {
+    }
+
+    private record FailedEventRecord(long sequence, long failedAt, String operation, String playerName,
+                                     String error, String eventJson) {
     }
 
     private record PlayerRow(long id, String displayName) {
@@ -855,9 +972,19 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                         last_seen_at = MAX(last_seen_at, ?), updated_at = ? WHERE id = ?
                     """);
             insertChat = connection.prepareStatement("INSERT INTO chat_messages(player_id, timestamp, message) VALUES(?, ?, ?)");
-            insertStat = connection.prepareStatement("INSERT INTO stat_snapshots(player_id, timestamp, stat_json) VALUES(?, ?, ?)");
+            insertStat = connection.prepareStatement("""
+                    INSERT INTO stat_snapshots(player_id, timestamp, stat_json) VALUES(?, ?, ?)
+                    ON CONFLICT(player_id) DO UPDATE SET
+                        timestamp = excluded.timestamp,
+                        stat_json = excluded.stat_json
+                    WHERE excluded.timestamp >= stat_snapshots.timestamp
+                    """);
             updatePlayerStat = connection.prepareStatement("""
-                    UPDATE players SET last_seen_at = MAX(last_seen_at, ?), last_stat_at = ?, updated_at = ? WHERE id = ?
+                    UPDATE players
+                    SET last_seen_at = MAX(last_seen_at, ?),
+                        last_stat_at = MAX(COALESCE(last_stat_at, ?), ?),
+                        updated_at = ?
+                    WHERE id = ?
                     """);
         }
 
