@@ -19,6 +19,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -224,7 +225,7 @@ class SQLitePlayerRecordStoreTest {
     void completeLegacyUpgradeDrillMigratesRestartsAndWritesOnlySqlite() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-upgrade-drill");
         writeLegacyPlayer(directory, "WaltomAdaam_", true);
-        writeLegacyPlayer(directory, "娑擃厽鏋冮悳鈺侇啀", false);
+        writeLegacyPlayer(directory, "濞戞搩鍘介弸鍐偝閳轰緡鍟€", false);
 
         PlayerMonitorService upgraded = service(directory);
         upgraded.initialize();
@@ -248,7 +249,7 @@ class SQLitePlayerRecordStoreTest {
         PlayerMonitorService restarted = service(directory);
         restarted.initialize();
         assertEquals(2, restarted.findRecord("WaltomAdaam_").orElseThrow().chatMessages.size());
-        assertEquals(1, restarted.findRecord("娑擃厽鏋冮悳鈺侇啀").orElseThrow().chatMessages.size());
+        assertEquals(1, restarted.findRecord("濞戞搩鍘介弸鍐偝閳轰緡鍟€").orElseThrow().chatMessages.size());
         assertEquals(1, restarted.findRecord("NewRuntime").orElseThrow().loginSessions.size());
         assertTrue(restarted.findRecord("ExternalHistoryMustBeIgnored").isEmpty());
         restarted.close();
@@ -377,6 +378,75 @@ class SQLitePlayerRecordStoreTest {
         }
     }
 
+    @Test
+    void interleavedLoginLogoutStressKeepsDatabaseConsistent() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-interleaved-stress");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.queueCapacity = 20_000;
+        settings.batchSize = 1_000;
+        settings.flushIntervalMs = 25;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        store.initialize();
+        try {
+            for (int player = 0; player < 3_000; player++) {
+                String name = "Mixed" + player;
+                long base = player * 10L;
+                store.recordLogin(name, base);
+                store.recordChat(name, "hello-" + player, base + 1L);
+                store.recordLogout(name, base + 5L);
+            }
+            store.flush();
+        } finally {
+            store.close();
+        }
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(3_000, countRows(connection, "players"));
+            assertEquals(3_000, countRows(connection, "sessions"));
+            assertEquals(3_000, countRows(connection, "chat_messages"));
+            SQLiteSchema.verify(connection);
+        }
+    }
+
+    @Test
+    void simultaneousReadsAndWritesKeepAllMessages() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-concurrent-read-write");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.queueCapacity = 10_000;
+        settings.batchSize = 100;
+        settings.flushIntervalMs = 10;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+        store.initialize();
+        Thread writer = new Thread(() -> {
+            try {
+                for (int index = 0; index < 1_000; index++) {
+                    store.recordChat("Concurrent", "msg-" + index, index);
+                }
+            } catch (Throwable error) {
+                writerFailure.set(error);
+            }
+        }, "sqlite-concurrent-writer-test");
+        try {
+            writer.start();
+            while (writer.isAlive()) {
+                store.recentChats("Concurrent", 10);
+                Thread.sleep(1L);
+            }
+            writer.join();
+            if (writerFailure.get() != null) {
+                throw new AssertionError("writer failed", writerFailure.get());
+            }
+            store.flush();
+        } finally {
+            store.close();
+        }
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(1_000, countRows(connection, "chat_messages"));
+            SQLiteSchema.verify(connection);
+        }
+    }
     @Test
     void badStatEventDoesNotDiscardOtherEventsInTheBatch() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-batch-failure");
