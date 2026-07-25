@@ -42,13 +42,13 @@ class SectionFormatterTest {
     }
 
     @Test
-    void titleColorIs6a5acd() {
-        assertEquals("38;2;106;90;205", extractColorCode(SectionFormatter.TITLE_COLOR));
+    void titleUsesCompatiblePurpleForeground() {
+        assertEquals("38;5;62", extractColorCode(SectionFormatter.TITLE_COLOR));
     }
 
     @Test
-    void equalColorIsE0B0FF() {
-        assertEquals("38;2;224;176;255", extractColorCode(SectionFormatter.EQUAL_COLOR));
+    void equalSignsUseCompatibleLavenderForeground() {
+        assertEquals("38;5;183", extractColorCode(SectionFormatter.EQUAL_COLOR));
     }
 
     @Test
@@ -79,6 +79,15 @@ class SectionFormatterTest {
         assertEquals(
                 terminalWidth(stripAnsi(SectionFormatter.header(title))),
                 terminalWidth(stripAnsi(SectionFormatter.divider(title))));
+    }
+
+
+    @Test
+    void outputDoesNotUseTrueColorOrBackgroundSequences() {
+        String rendered = SectionFormatter.header("Recent chat")
+                + SectionFormatter.divider("Recent chat");
+        assertTrue(!rendered.contains("[38;2;"), "24-bit SGR is misrendered by the target terminal");
+        assertTrue(!rendered.contains("[48;"), "section formatting must never set a background color");
     }
 
     private static String stripAnsi(String text) {

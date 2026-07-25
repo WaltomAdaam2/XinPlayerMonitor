@@ -30,13 +30,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String RED = "[31m";
     private static final String RESET = "[0m";
 
-    private static final String ROOT_COMMAND = "[38;2;224;176;255m";  // #E0B0FF setting / scan-stat
-    private static final String PLAYER_COLOR = "[38;2;46;111;64m";     // #2E6F40
-    private static final String SETTING_NAME = "[38;2;173;235;179m";    // #ADEBB3
-    private static final String SETTING_VALUE = "[38;2;255;192;103m";   // #FFC067
-    private static final String PLAYER_ACTION = "[38;2;224;176;255m";   // #E0B0FF
-    private static final String COMMAND_NAME = "[38;2;166;173;180m";    // #A6ADB4
-    private static final String COUNT_COLOR = "[38;2;255;179;67m";      // #ffb343
+    private static final String ROOT_COMMAND = "\u001B[38;5;183m"; // xterm-256 approximation of #E0B0FF
+    private static final String PLAYER_COLOR = "\u001B[38;5;29m";  // compatible green approximation of #2E6F40
+    private static final String SETTING_NAME = "\u001B[38;5;151m"; // xterm-256 approximation of #ADEBB3
+    private static final String SETTING_VALUE = "\u001B[38;5;215m"; // xterm-256 approximation of #FFC067
+    private static final String PLAYER_ACTION = "\u001B[38;5;183m"; // xterm-256 approximation of #E0B0FF
+    private static final String COMMAND_NAME = "\u001B[38;5;145m"; // xterm-256 approximation of #A6ADB4
+    private static final String COUNT_COLOR = "\u001B[38;5;215m"; // xterm-256 approximation of #ffb343
 
     private static final AttributedStyle ROOT_COMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
     private static final AttributedStyle PLAYER_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x2E6F40);
@@ -595,7 +595,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     String value = line.substring(separator + 1);
                     // Player name values should use green
                     if (label.equals("玩家:") || label.equals("玩家：")) {
-                        rendered = CYAN + label + RESET + PLAYER_COLOR + value + RESET;
+                        int contentStart = 0;
+                        while (contentStart < value.length() && Character.isWhitespace(value.charAt(contentStart))) {
+                            contentStart++;
+                        }
+                        String spacing = value.substring(0, contentStart);
+                        String playerName = value.substring(contentStart);
+                        rendered = CYAN + label + RESET + spacing + PLAYER_COLOR + playerName + RESET;
                     } else {
                         rendered = CYAN + label + RESET + value;
                     }

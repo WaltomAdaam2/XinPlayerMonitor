@@ -2,8 +2,8 @@ package waltomadaam2.xinbot.playermonitor;
 
 /** Formats section headers and bottom dividers with consistent colors. */
 final class SectionFormatter {
-    static final String TITLE_COLOR = "\u001B[38;2;106;90;205m";   // #6a5acd
-    static final String EQUAL_COLOR = "\u001B[38;2;224;176;255m"; // #E0B0FF
+    static final String TITLE_COLOR = "\u001B[38;5;62m";  // xterm-256 approximation of #6a5acd
+    static final String EQUAL_COLOR = "\u001B[38;5;183m"; // xterm-256 approximation of #E0B0FF
     static final String RESET = "\u001B[0m";
 
     private static final int FIXED_VISIBLE_WIDTH = 12; // "===== " + " ====="

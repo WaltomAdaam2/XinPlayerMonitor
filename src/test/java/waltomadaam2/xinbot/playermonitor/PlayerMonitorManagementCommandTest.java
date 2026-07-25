@@ -57,24 +57,24 @@ class PlayerMonitorManagementCommandTest {
     void settingUsageContainsFinalColorMapping() {
         String colored = PlayerMonitorManagementCommand.colorUsage(
                 "Usage: playermonitor setting stat-send-interval <ms>");
-        assertEquals(1, count(colored, "38;2;166;173;180mplayermonitor"));
-        assertEquals(1, count(colored, "38;2;224;176;255msetting"));
-        assertEquals(1, count(colored, "38;2;173;235;179mstat-send-interval"));
-        assertEquals(1, count(colored, "38;2;255;192;103m<ms>"));
+        assertEquals(1, count(colored, "38;5;145mplayermonitor"));
+        assertEquals(1, count(colored, "38;5;183msetting"));
+        assertEquals(1, count(colored, "38;5;151mstat-send-interval"));
+        assertEquals(1, count(colored, "38;5;215m<ms>"));
     }
 
     @Test
     void scanStatUsageUsesLavender() {
         String colored = PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor scan-stat");
-        assertEquals(1, count(colored, "38;2;224;176;255mscan-stat"));
+        assertEquals(1, count(colored, "38;5;183mscan-stat"));
     }
 
     @Test
     void playerUsageColorsAllActionsLavender() {
         String colored = PlayerMonitorManagementCommand.colorUsage(
                 "Usage: playermonitor <玩家名> [stat|latestlogin|recentlogin [count]|chat [count]]");
-        assertEquals(4, count(colored, "38;2;224;176;255m"));
-        assertEquals(1, count(colored, "38;2;46;111;64m<玩家名>"));
+        assertEquals(4, count(colored, "38;5;183m"));
+        assertEquals(1, count(colored, "38;5;29m<玩家名>"));
     }
 
 
@@ -143,7 +143,7 @@ class PlayerMonitorManagementCommandTest {
         String colored = PlayerMonitorManagementCommand.colorUsage(
                 "Usage: playermonitor <玩家名> [stat|latestlogin|recentlogin [count]|chat [count]]");
         // [count] placeholders should use #ffb343
-        assertEquals(2, count(colored, "38;2;255;179;67m[count]"),
+        assertEquals(2, count(colored, "38;5;215m[count]"),
                 "[count] placeholders should use #ffb343");
     }
 
@@ -186,6 +186,15 @@ class PlayerMonitorManagementCommandTest {
         String plain = colored.replaceAll("\\u001B\\[[0-9;]*m", "");
         assertEquals(input, plain,
                 "color formatting must not alter the plain text content");
+    }
+
+
+    @Test
+    void loggerRenderedUsageAvoidsUnsupportedTrueColorAndBackgroundCodes() {
+        String colored = PlayerMonitorManagementCommand.colorUsage(
+                "Usage: playermonitor <玩家名> [stat|latestlogin|recentlogin [count]|chat [count]]");
+        assertTrue(!colored.contains("[38;2;"), "logger output should use xterm-256 colors");
+        assertTrue(!colored.contains("[48;"), "logger output must not set background colors");
     }
 
     private static void assertStyle(int rgb, AttributedStyle actual) {
