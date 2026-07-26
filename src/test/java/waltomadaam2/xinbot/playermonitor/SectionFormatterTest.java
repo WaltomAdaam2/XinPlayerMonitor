@@ -10,21 +10,23 @@ class SectionFormatterTest {
     @Test
     void headerContainsTitleTextWithCorrectColor() {
         String header = SectionFormatter.header("Recent logins");
-        assertTrue(header.contains(SectionFormatter.TITLE_COLOR + "Recent logins" + SectionFormatter.RESET));
+        assertTrue(header.contains(SectionFormatter.TITLE_COLOR + "Recent logins"));
     }
 
     @Test
     void headerColorsBothEqualSignGroups() {
-        String expected = SectionFormatter.EQUAL_COLOR + "=====" + SectionFormatter.RESET
-                + " " + SectionFormatter.TITLE_COLOR + "Player stat" + SectionFormatter.RESET + " "
-                + SectionFormatter.EQUAL_COLOR + "=====" + SectionFormatter.RESET;
+        String expected = SectionFormatter.RESET
+                + SectionFormatter.BORDER_COLOR + "===== "
+                + SectionFormatter.TITLE_COLOR + "Player stat"
+                + SectionFormatter.BORDER_COLOR + " ====="
+                + SectionFormatter.RESET;
         assertEquals(expected, SectionFormatter.header("Player stat"));
     }
 
     @Test
     void dividerMatchesHeaderTerminalWidth() {
         for (String title : new String[]{"Recent logins", "Latest login", "Player stat",
-                "Recent chat", "PlayerMonitor 设置", "Short"}) {
+                "Recent chat", "PlayerMonitor \u8bbe\u7f6e", "Short"}) {
             String header = stripAnsi(SectionFormatter.header(title));
             String divider = stripAnsi(SectionFormatter.divider(title));
             assertEquals(terminalWidth(header), terminalWidth(divider),
@@ -33,22 +35,23 @@ class SectionFormatterTest {
     }
 
     @Test
-    void dividerUsesEqualColorForTheWholeLine() {
+    void dividerUsesBorderColorForTheWholeLine() {
         String title = "Test";
-        String expected = SectionFormatter.EQUAL_COLOR
+        String expected = SectionFormatter.RESET
+                + SectionFormatter.BORDER_COLOR
                 + "=".repeat(SectionFormatter.visibleWidth(title))
                 + SectionFormatter.RESET;
         assertEquals(expected, SectionFormatter.divider(title));
     }
 
     @Test
-    void titleUsesCompatiblePurpleForeground() {
-        assertEquals("38;5;62", extractColorCode(SectionFormatter.TITLE_COLOR));
+    void titleUsesTrueColorPurpleForeground() {
+        assertEquals("38;2;95;95;215", extractColorCode(SectionFormatter.TITLE_COLOR));
     }
 
     @Test
-    void equalSignsUseCompatibleLavenderForeground() {
-        assertEquals("38;5;183", extractColorCode(SectionFormatter.EQUAL_COLOR));
+    void bordersUseTrueColorLavenderForeground() {
+        assertEquals("38;2;215;175;255", extractColorCode(SectionFormatter.BORDER_COLOR));
     }
 
     @Test
@@ -73,25 +76,32 @@ class SectionFormatterTest {
 
     @Test
     void chineseTitleUsesTerminalCellWidth() {
-        String title = "PlayerMonitor 设置";
-        // ASCII part is 14 cells and the two CJK characters are 2 cells each.
+        String title = "PlayerMonitor \u8bbe\u7f6e";
         assertEquals(30, SectionFormatter.visibleWidth(title));
         assertEquals(
                 terminalWidth(stripAnsi(SectionFormatter.header(title))),
                 terminalWidth(stripAnsi(SectionFormatter.divider(title))));
     }
 
+    @Test
+    void headerUsesExpectedColorOrderAndFinalReset() {
+        String expected = SectionFormatter.RESET
+                + SectionFormatter.BORDER_COLOR + "===== "
+                + SectionFormatter.TITLE_COLOR + "Recent logins"
+                + SectionFormatter.BORDER_COLOR + " ====="
+                + SectionFormatter.RESET;
+        assertEquals(expected, SectionFormatter.header("Recent logins"));
+    }
 
     @Test
-    void outputDoesNotUseTrueColorOrBackgroundSequences() {
+    void outputDoesNotUseBackgroundSequences() {
         String rendered = SectionFormatter.header("Recent chat")
                 + SectionFormatter.divider("Recent chat");
-        assertTrue(!rendered.contains("[38;2;"), "24-bit SGR is misrendered by the target terminal");
         assertTrue(!rendered.contains("[48;"), "section formatting must never set a background color");
     }
 
     private static String stripAnsi(String text) {
-        return text.replaceAll("\\u001B\\[[0-9;]*m", "");
+        return StatText.stripAnsi(text);
     }
 
     private static String extractColorCode(String ansiSequence) {

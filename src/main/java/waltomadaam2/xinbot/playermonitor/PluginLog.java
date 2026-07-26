@@ -36,7 +36,7 @@ final class PluginLog {
 
     private void write(String level, String message) {
         Path file = directory.resolve("playermonitor-" + LocalDate.now(zone) + ".log");
-        String line = Instant.now() + " [" + level + "] " + message + System.lineSeparator();
+        String line = Instant.now() + " [" + level + "] " + StatText.stripAnsi(message) + System.lineSeparator();
         try {
             Files.writeString(file, line, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);

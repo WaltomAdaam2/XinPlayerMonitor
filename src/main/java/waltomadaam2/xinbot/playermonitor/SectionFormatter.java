@@ -2,8 +2,8 @@ package waltomadaam2.xinbot.playermonitor;
 
 /** Formats section headers and bottom dividers with consistent colors. */
 final class SectionFormatter {
-    static final String TITLE_COLOR = "\u001B[38;5;62m";  // xterm-256 approximation of #6a5acd
-    static final String EQUAL_COLOR = "\u001B[38;5;183m"; // xterm-256 approximation of #E0B0FF
+    static final String TITLE_COLOR = "\u001B[38;2;95;95;215m";
+    static final String BORDER_COLOR = "\u001B[38;2;215;175;255m";
     static final String RESET = "\u001B[0m";
 
     private static final int FIXED_VISIBLE_WIDTH = 12; // "===== " + " ====="
@@ -13,13 +13,21 @@ final class SectionFormatter {
 
     static String header(String title) {
         String safeTitle = title == null ? "" : title;
-        return EQUAL_COLOR + "=====" + RESET + " "
-                + TITLE_COLOR + safeTitle + RESET + " "
-                + EQUAL_COLOR + "=====" + RESET;
+        if (!ansiEnabled()) {
+            return "===== " + safeTitle + " =====";
+        }
+        return RESET + BORDER_COLOR + "===== "
+                + TITLE_COLOR + safeTitle
+                + BORDER_COLOR + " ====="
+                + RESET;
     }
 
     static String divider(String title) {
-        return EQUAL_COLOR + "=".repeat(visibleWidth(title)) + RESET;
+        String line = "=".repeat(visibleWidth(title));
+        if (!ansiEnabled()) {
+            return line;
+        }
+        return RESET + BORDER_COLOR + line + RESET;
     }
 
     /** Returns terminal-cell width, not UTF-16 String.length(). */
@@ -57,5 +65,13 @@ final class SectionFormatter {
                 || (cp >= 0xFFE0 && cp <= 0xFFE6)
                 || (cp >= 0x1F300 && cp <= 0x1FAFF)
                 || (cp >= 0x20000 && cp <= 0x3FFFD));
+    }
+
+    private static boolean ansiEnabled() {
+        String noColor = System.getenv("NO_COLOR");
+        if (noColor != null && !noColor.isBlank()) {
+            return false;
+        }
+        return !"dumb".equalsIgnoreCase(System.getenv("TERM"));
     }
 }
