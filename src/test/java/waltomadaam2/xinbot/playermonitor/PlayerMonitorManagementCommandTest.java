@@ -3,6 +3,7 @@ package waltomadaam2.xinbot.playermonitor;
 import org.jline.utils.AttributedStyle;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.helpers.MarkerIgnoringBase;
 import org.slf4j.helpers.NOPLogger;
 import waltomadaam2.xinbot.playermonitor.model.ChatEntry;
 import waltomadaam2.xinbot.playermonitor.model.LoginSession;
@@ -11,6 +12,7 @@ import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -78,6 +80,36 @@ class PlayerMonitorManagementCommandTest {
     }
 
 
+    @Test
+    void highlightsDatabaseAsRootCommand() {
+        String[] args = {"database"};
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(args, 0));
+    }
+
+    @Test
+    void databaseUsageUsesLavender() {
+        String colored = PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor database");
+        assertEquals(1, count(colored, "38;5;183mdatabase"));
+    }
+
+    @Test
+    void databaseCommandPrintsSectionColorsAndOrangeNumbers() {
+        CapturingLogger logger = new CapturingLogger();
+        PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                new PlayerMonitorService(new OverviewRepository()), null, null, logger);
+
+        command.onCommand(null, "playermonitor", new String[]{"database"});
+
+        assertEquals(8, logger.messages.size());
+        assertEquals(SectionFormatter.header("Database overview"), logger.messages.get(0));
+        assertEquals("", logger.messages.get(1));
+        assertEquals("  " + CYAN() + "Players:" + RESET() + " " + orange("2"), logger.messages.get(2));
+        assertEquals("  " + CYAN() + "Chat messages:" + RESET() + " " + orange("15"), logger.messages.get(3));
+        assertEquals("  " + CYAN() + "Login sessions:" + RESET() + " " + orange("7"), logger.messages.get(4));
+        assertEquals("  " + CYAN() + "Stat snapshots:" + RESET() + " " + orange("3"), logger.messages.get(5));
+        assertEquals("  " + CYAN() + "Open sessions:" + RESET() + " " + orange("1"), logger.messages.get(6));
+        assertEquals(SectionFormatter.divider("Database overview"), logger.messages.get(7));
+    }
     @Test
     void completesCurrentConfiguredCountsAndUtcOffsets() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
@@ -197,6 +229,17 @@ class PlayerMonitorManagementCommandTest {
         assertTrue(!colored.contains("[48;"), "logger output must not set background colors");
     }
 
+    private static String CYAN() {
+        return "\u001B[36m";
+    }
+
+    private static String RESET() {
+        return "\u001B[0m";
+    }
+
+    private static String orange(String value) {
+        return "\u001B[38;5;215m" + value + RESET();
+    }
     private static void assertStyle(int rgb, AttributedStyle actual) {
         assertEquals(AttributedStyle.DEFAULT.foregroundRgb(rgb).getStyle(), actual.getStyle());
     }
@@ -275,5 +318,124 @@ class PlayerMonitorManagementCommandTest {
         @Override
         public void close() {
         }
+    }
+    private static final class OverviewRepository implements PlayerRepository {
+        @Override
+        public void initialize() {
+        }
+
+        @Override
+        public void setWarningSink(java.util.function.Consumer<String> warningSink) {
+        }
+
+        @Override
+        public void recordLogin(String playerName, long now) {
+        }
+
+        @Override
+        public void recordLogout(String playerName, long now) {
+        }
+
+        @Override
+        public void recordChat(String playerName, String message, long now) {
+        }
+
+        @Override
+        public void recordStat(String playerName, StatSnapshot snapshot) {
+        }
+
+        @Override
+        public PlayerRecord read(String playerName) throws IOException {
+            throw new IOException("not used");
+        }
+
+        @Override
+        public Optional<PlayerRecord> find(String playerName) throws IOException {
+            throw new IOException("not used");
+        }
+
+        @Override
+        public DatabaseOverview databaseOverview() {
+            return new DatabaseOverview(2, 15, 7, 3, 1);
+        }
+
+        @Override
+        public List<String> listPlayerNames() {
+            return List.of();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class CapturingLogger extends MarkerIgnoringBase {
+        private final List<String> messages = new ArrayList<>();
+
+        @Override
+        public String getName() {
+            return "capture";
+        }
+
+        @Override
+        public boolean isTraceEnabled() { return false; }
+        @Override
+        public void trace(String msg) { }
+        @Override
+        public void trace(String format, Object arg) { }
+        @Override
+        public void trace(String format, Object arg1, Object arg2) { }
+        @Override
+        public void trace(String format, Object... arguments) { }
+        @Override
+        public void trace(String msg, Throwable t) { }
+        @Override
+        public boolean isDebugEnabled() { return false; }
+        @Override
+        public void debug(String msg) { }
+        @Override
+        public void debug(String format, Object arg) { }
+        @Override
+        public void debug(String format, Object arg1, Object arg2) { }
+        @Override
+        public void debug(String format, Object... arguments) { }
+        @Override
+        public void debug(String msg, Throwable t) { }
+        @Override
+        public boolean isInfoEnabled() { return true; }
+        @Override
+        public void info(String msg) { messages.add(msg); }
+        @Override
+        public void info(String format, Object arg) { messages.add(format); }
+        @Override
+        public void info(String format, Object arg1, Object arg2) { messages.add(format); }
+        @Override
+        public void info(String format, Object... arguments) { messages.add(format); }
+        @Override
+        public void info(String msg, Throwable t) { messages.add(msg); }
+        @Override
+        public boolean isWarnEnabled() { return false; }
+        @Override
+        public void warn(String msg) { }
+        @Override
+        public void warn(String format, Object arg) { }
+        @Override
+        public void warn(String format, Object... arguments) { }
+        @Override
+        public void warn(String format, Object arg1, Object arg2) { }
+        @Override
+        public void warn(String msg, Throwable t) { }
+        @Override
+        public boolean isErrorEnabled() { return false; }
+        @Override
+        public void error(String msg) { }
+        @Override
+        public void error(String format, Object arg) { }
+        @Override
+        public void error(String format, Object arg1, Object arg2) { }
+        @Override
+        public void error(String format, Object... arguments) { }
+        @Override
+        public void error(String msg, Throwable t) { }
     }
 }

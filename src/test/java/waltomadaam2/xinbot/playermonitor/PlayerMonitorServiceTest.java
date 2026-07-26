@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
+import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -64,6 +65,28 @@ class PlayerMonitorServiceTest {
         assertEquals("cached message", service.getRecord("WaltomAdaam").chatMessages.get(0).message);
     }
 
+    @Test
+    void databaseOverviewCountsPlayersChatsSessionsStatsAndOpenSessions() throws Exception {
+        PlayerMonitorService service = service(temporaryDirectory.resolve("playermonitor"));
+        service.initialize();
+        service.recordLogin("Alice", 100L);
+        service.recordChat("Alice", "hello", 110L);
+        service.recordLogout("Alice", 200L);
+        service.recordLogin("Bob", 300L);
+        service.recordChat("Bob", "one", 310L);
+        service.recordChat("Bob", "two", 320L);
+        StatSnapshot snapshot = new StatSnapshot();
+        snapshot.capturedAt = 330L;
+        service.recordStat("Bob", snapshot);
+
+        DatabaseOverview overview = service.databaseOverview();
+
+        assertEquals(2, overview.players());
+        assertEquals(3, overview.chats());
+        assertEquals(2, overview.sessions());
+        assertEquals(1, overview.stats());
+        assertEquals(1, overview.openSessions());
+    }
     @Test
     void listsStoredPlayerNamesForCommandCompletion() throws Exception {
         PlayerMonitorService service = service(temporaryDirectory.resolve("playermonitor"));

@@ -200,6 +200,22 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             return List.copyOf(playerNames);
         }
     }
+
+    @Override
+    public DatabaseOverview databaseOverview() throws IOException {
+        flush();
+        try (Connection connection = openConnection()) {
+            return new DatabaseOverview(
+                    countRows(connection, "players"),
+                    countRows(connection, "chat_messages"),
+                    countRows(connection, "sessions"),
+                    countRows(connection, "stat_snapshots"),
+                    countOpenSessions(connection));
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("read database overview", error);
+        }
+    }
+
     @Override
     public Optional<PlayerRecord> findSummary(String playerName) throws IOException {
         validatePlayerName(playerName);
@@ -336,6 +352,20 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             }
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("count " + tableName + " for " + playerName, error);
+        }
+    }
+
+    private int countRows(Connection connection, String tableName) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM " + tableName)) {
+            return resultSet.next() ? resultSet.getInt(1) : 0;
+        }
+    }
+
+    private int countOpenSessions(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM sessions WHERE logout_at IS NULL")) {
+            return resultSet.next() ? resultSet.getInt(1) : 0;
         }
     }
 
