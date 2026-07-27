@@ -166,5 +166,5 @@ mvn package
 生成文件：
 
 ```text
-target/XinPlayerMonitor-v1.3.1.jar
+target/XinPlayerMonitor-v1.4.3.jar
 ```

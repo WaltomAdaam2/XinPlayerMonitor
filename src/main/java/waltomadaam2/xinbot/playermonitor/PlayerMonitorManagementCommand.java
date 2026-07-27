@@ -114,18 +114,29 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             }
             return;
         }
+        if ("db-stat".equalsIgnoreCase(args[0])) {
+            if (args.length == 1) {
+                databaseStats();
+            } else {
+                help();
+            }
+            return;
+        }
         player(args);
     }
 
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
         if (args == null || args.length == 0) {
-            return List.of("setting", "scan-stat", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", "db-stat", PLAYER_PLACEHOLDER);
         }
         if ("setting".equalsIgnoreCase(args[0])) {
             return completeSetting(args);
         }
         if ("scan-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
+            return List.of();
+        }
+        if ("db-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
             return List.of();
         }
         if (args.length == 1) {
@@ -162,13 +173,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         String value = lower(args[index]);
         if (index == 0) {
-            if ("setting".equals(value) || "scan-stat".equals(value)) {
+            if ("setting".equals(value) || "scan-stat".equals(value) || "db-stat".equals(value)) {
                 return ROOT_COMMAND_STYLE;
             }
             return PLAYER_STYLE;
         }
         String root = lower(args[0]);
-        if ("scan-stat".equals(root)) {
+        if ("scan-stat".equals(root) || "db-stat".equals(root)) {
             return AttributedStyle.DEFAULT;
         }
         if ("setting".equals(root)) {
@@ -206,6 +217,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         if (usage.equals("Usage: playermonitor scan-stat")) {
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
                     + ROOT_COMMAND + "scan-stat" + RESET;
+        }
+        if (usage.equals("Usage: playermonitor db-stat")) {
+            return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                    + ROOT_COMMAND + "db-stat" + RESET;
         }
         if (usage.startsWith("Usage: playermonitor " + PLAYER_PLACEHOLDER)) {
             return colorPlayerUsage(usage);
@@ -441,7 +456,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private List<String> completePlayerNames(String input) {
         if (input == null || input.isEmpty()) {
-            return List.of("setting", "scan-stat", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", "db-stat", PLAYER_PLACEHOLDER);
         }
         try {
             TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -454,6 +469,9 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             }
             if ("scan-stat".startsWith(prefix)) {
                 matches.add("scan-stat");
+            }
+            if ("db-stat".startsWith(prefix)) {
+                matches.add("db-stat");
             }
             names.stream()
                     .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
@@ -499,6 +517,14 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print("已将 " + queued + " 名在线玩家加入 Stat 扫描队列。");
     }
 
+    private void databaseStats() {
+        try {
+            DatabaseStats stats = service.databaseStats();
+            report("Database overview", databaseStatsLines(stats));
+        } catch (IOException error) {
+            print("Unable to read database stats: " + error.getMessage());
+        }
+    }
     private void stat(String playerName, Optional<StatSnapshot> snapshotOptional) {
         if (snapshotOptional.isEmpty()) {
             print("暂无 stat 记录: " + playerName);
@@ -615,6 +641,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private void help() {
         print(colorUsage("Usage: playermonitor setting <option> <value>"));
         print(colorUsage("Usage: playermonitor scan-stat"));
+        print(colorUsage("Usage: playermonitor db-stat"));
         playerHelp();
     }
 
@@ -719,6 +746,18 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private static String value(Object value) {
         return value == null ? "未知" : value.toString();
+    }
+
+    static List<String> databaseStatsLines(DatabaseStats stats) {
+        return List.of(
+                "Players: " + gold(stats.players()),
+                "Chat: " + gold(stats.chats()),
+                "Sessions: " + gold(stats.sessions()),
+                "Stats: " + gold(stats.stats()));
+    }
+
+    private static String gold(int value) {
+        return COUNT_COLOR + value + RESET;
     }
 
     private static String duration(Long seconds) {

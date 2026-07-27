@@ -603,6 +603,31 @@ class SQLitePlayerRecordStoreTest {
         return service;
     }
 
+
+    @Test
+    void databaseStatsCountsRows() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-db-stat");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        try {
+            StatSnapshot snapshot = new StatSnapshot();
+            snapshot.capturedAt = 400L;
+            store.recordLogin("Steve", 100L);
+            store.recordLogout("Steve", 200L);
+            store.recordChat("Steve", "hello", 300L);
+            store.recordStat("Steve", snapshot);
+            store.recordLogin("Alex", 500L);
+
+            DatabaseStats stats = store.databaseStats();
+
+            assertEquals(2, stats.players());
+            assertEquals(1, stats.chats());
+            assertEquals(2, stats.sessions());
+            assertEquals(1, stats.stats());
+        } finally {
+            store.close();
+        }
+    }
     private void writeLegacyPlayer(Path directory, String name, boolean openSession) throws Exception {
         Path playerDirectory = directory.resolve("players").resolve(name);
         Files.createDirectories(playerDirectory);

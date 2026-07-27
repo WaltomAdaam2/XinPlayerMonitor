@@ -89,6 +89,10 @@ interface PlayerRepository extends AutoCloseable {
 
     List<String> listPlayerNames() throws IOException;
 
+    default DatabaseStats databaseStats() throws IOException {
+        return new DatabaseStats(listPlayerNames().size(), 0, 0, 0);
+    }
+
     default boolean hasStatCapturedAtOrAfter(String playerName, long cutoffAt) throws IOException {
         Optional<PlayerRecord> record = find(playerName);
         if (record.isEmpty()) {

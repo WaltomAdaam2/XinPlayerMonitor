@@ -197,6 +197,24 @@ class PlayerMonitorManagementCommandTest {
         assertTrue(!colored.contains("[48;"), "logger output must not set background colors");
     }
 
+
+    @Test
+    void dbStatRootCommandUsesLavenderAndNoTrailingArguments() {
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"db-stat"}, 0));
+        assertEquals(AttributedStyle.DEFAULT.getStyle(),
+                PlayerMonitorManagementCommand.styleForArgument(new String[]{"db-stat", "extra"}, 1).getStyle());
+    }
+
+    @Test
+    void databaseStatsLinesUseGoldNumbers() {
+        String rendered = String.join("\\n", PlayerMonitorManagementCommand.databaseStatsLines(
+                new DatabaseStats(2, 3, 4, 5)));
+
+        assertTrue(rendered.contains("Players: \u001B[38;5;215m2\u001B[0m"));
+        assertTrue(rendered.contains("Chat: \u001B[38;5;215m3\u001B[0m"));
+        assertTrue(rendered.contains("Sessions: \u001B[38;5;215m4\u001B[0m"));
+        assertTrue(rendered.contains("Stats: \u001B[38;5;215m5\u001B[0m"));
+    }
     private static void assertStyle(int rgb, AttributedStyle actual) {
         assertEquals(AttributedStyle.DEFAULT.foregroundRgb(rgb).getStyle(), actual.getStyle());
     }

@@ -134,6 +134,10 @@ public final class PlayerMonitorService {
         return store.listPlayerNames();
     }
 
+    public DatabaseStats databaseStats() throws IOException {
+        return store.databaseStats();
+    }
+
     public void backupTo(Path target) throws IOException {
         store.backupTo(target);
     }
