@@ -25,6 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 final class PlayerMonitorListener implements Listener {
@@ -51,7 +52,12 @@ final class PlayerMonitorListener implements Listener {
     private volatile boolean rosterReconciling;
     private volatile boolean forceFreshRoster;
     private volatile long disconnectAt;
+    private long reconnectGeneration;
     private final Object connectionStateLock = new Object();
+    private final Object statWriteLock = new Object();
+    private int pendingStatWrites;
+    private int activeStatCallbacks;
+    private volatile long statOutputSuppressionUntilNanos;
     private final Set<String> disconnectedPlayers = ConcurrentHashMap.newKeySet();
     private final Set<String> reconnectedNewPlayers = ConcurrentHashMap.newKeySet();
     private final Set<String> reconnectedBrandNewPlayers = ConcurrentHashMap.newKeySet();
@@ -79,11 +85,16 @@ final class PlayerMonitorListener implements Listener {
     }
 
     void close() {
-        synchronized (connectionStateLock) {
+        synchronized (statWriteLock) {
             closed = true;
+            waitForActiveStatCallbacksLocked();
+        }
+        synchronized (connectionStateLock) {
+            reconnectGeneration++;
             reconnectPending = false;
             rosterReconciling = false;
             forceFreshRoster = false;
+            gameActive = false;
             disconnectedPlayers.clear();
             reconnectedNewPlayers.clear();
             reconnectedBrandNewPlayers.clear();
@@ -94,7 +105,71 @@ final class PlayerMonitorListener implements Listener {
         }
         statQueue.close();
         clearStatTracking();
+        retryExecutor.shutdown();
+        waitForPendingStatWrites();
         retryExecutor.shutdownNow();
+        try {
+            if (!retryExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                log.warn("stat retry executor did not terminate cleanly");
+            }
+        } catch (InterruptedException error) {
+            retryExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+            log.warn("interrupted while waiting for stat retry executor shutdown");
+        }
+    }
+
+    private void waitForActiveStatCallbacksLocked() {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (activeStatCallbacks > 0) {
+            if (!waitForStatWorkLocked(deadline, "active stat callback(s)", activeStatCallbacks)) {
+                return;
+            }
+        }
+    }
+
+    private void waitForPendingStatWrites() {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        synchronized (statWriteLock) {
+            while (pendingStatWrites > 0) {
+                if (!waitForStatWorkLocked(deadline, "pending stat write(s)", pendingStatWrites)) {
+                    return;
+                }
+            }
+        }
+    }
+
+    private boolean waitForStatWorkLocked(long deadline, String description, int remaining) {
+        long remainingNanos = deadline - System.nanoTime();
+        if (remainingNanos <= 0L) {
+            log.warn("timed out waiting for " + remaining + " " + description);
+            return false;
+        }
+        try {
+            TimeUnit.NANOSECONDS.timedWait(statWriteLock, remainingNanos);
+            return true;
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            log.warn("interrupted while waiting for " + description);
+            return false;
+        }
+    }
+
+    private boolean beginStatCallback() {
+        synchronized (statWriteLock) {
+            if (closed) {
+                return false;
+            }
+            activeStatCallbacks++;
+            return true;
+        }
+    }
+
+    private void endStatCallback() {
+        synchronized (statWriteLock) {
+            activeStatCallbacks--;
+            statWriteLock.notifyAll();
+        }
     }
 
     @EventHandler
@@ -123,13 +198,20 @@ final class PlayerMonitorListener implements Listener {
         }
 
         long gameEntryAt = System.currentTimeMillis();
-        gameActive = true;
         boolean resumed = reconcileAfterReconnect(gameEntryAt);
         if (!resumed) {
+            synchronized (connectionStateLock) {
+                if (closed || reconnectPending || rosterReconciling) {
+                    return;
+                }
+                gameActive = true;
+                forceFreshRoster = false;
+            }
             clearOnlinePlayers();
             clearStatTracking();
-            recordFreshRoster(gameEntryAt);
-            forceFreshRoster = false;
+            if (gameActive) {
+                recordFreshRoster(gameEntryAt);
+            }
         }
         log.info(resumed
                 ? "reconnected to Game; reconciled player roster"
@@ -209,25 +291,49 @@ final class PlayerMonitorListener implements Listener {
 
     @EventHandler
     public void onSystemChat(SystemChatMessageEvent event) {
-        if (!gameActive) {
+        if (!gameActive || !beginStatCallback()) {
             return;
         }
-        retryTimedOutStats();
-        statResponses.accept(event.getText()).ifPresent(captured -> {
-            String normalizedName = normalize(captured.playerName());
-            statAttempts.remove(normalizedName);
-            pendingStatDispatches.remove(normalizedName);
-            finishStatCycle(captured.playerName());
-            retryExecutor.schedule(() -> {
-                try {
-                    service.recordStat(captured.playerName(), captured.snapshot());
-                    log.info("recorded stat for " + captured.playerName());
-                    logger.info("\u001B[94mRecorded stat for {}.\u001B[0m", captured.playerName());
-                } catch (IOException error) {
-                    log.warn("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
-                }
-            }, STAT_WRITE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
-        });
+        try {
+            retryTimedOutStats();
+            statResponses.accept(event.getText()).ifPresent(captured -> {
+                statOutputSuppressionUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+                String normalizedName = normalize(captured.playerName());
+                statAttempts.remove(normalizedName);
+                pendingStatDispatches.remove(normalizedName);
+                finishStatCycle(captured.playerName());
+                scheduleStatWrite(captured);
+            });
+        } finally {
+            endStatCallback();
+        }
+    }
+
+    private void scheduleStatWrite(StatResponseCollector.CapturedStat captured) {
+        synchronized (statWriteLock) {
+            pendingStatWrites++;
+        }
+        Runnable write = () -> persistCapturedStat(captured);
+        try {
+            retryExecutor.schedule(write, STAT_WRITE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException error) {
+            write.run();
+        }
+    }
+
+    private void persistCapturedStat(StatResponseCollector.CapturedStat captured) {
+        try {
+            service.recordStat(captured.playerName(), captured.snapshot());
+            log.info("recorded stat for " + captured.playerName());
+            logger.info("\u001B[94mRecorded stat for {}.\u001B[0m", captured.playerName());
+        } catch (IOException error) {
+            log.warn("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
+        } finally {
+            synchronized (statWriteLock) {
+                pendingStatWrites--;
+                statWriteLock.notifyAll();
+            }
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -285,8 +391,9 @@ final class PlayerMonitorListener implements Listener {
             long timeoutMillis = TimeUnit.MINUTES.toMillis(settings.disconnectTimeoutMinutes());
             long remainingMillis = Math.max(0L, disconnectAt + timeoutMillis - System.currentTimeMillis());
             long expectedDisconnectAt = disconnectAt;
+            long expectedGeneration = reconnectGeneration;
             disconnectFinalizer = retryExecutor.schedule(
-                    () -> finalizeDisconnectedSessions(expectedDisconnectAt),
+                    () -> finalizeDisconnectedSessions(expectedDisconnectAt, expectedGeneration),
                     remainingMillis,
                     TimeUnit.MILLISECONDS);
         }
@@ -294,26 +401,27 @@ final class PlayerMonitorListener implements Listener {
 
     private boolean beginReconnectWindow(long now) {
         synchronized (connectionStateLock) {
-            if (reconnectPending) {
+            if (closed || reconnectPending || rosterReconciling) {
                 return false;
             }
+            long generation = ++reconnectGeneration;
             disconnectAt = now;
             disconnectedPlayers.clear();
             disconnectedPlayers.addAll(onlinePlayers.values());
             reconnectPending = true;
             rosterReconciling = false;
+            gameActive = false;
+            clearOnlinePlayers();
+            clearStatTracking();
             if (disconnectFinalizer != null) {
                 disconnectFinalizer.cancel(false);
             }
             disconnectFinalizer = retryExecutor.schedule(
-                    () -> finalizeDisconnectedSessions(now),
+                    () -> finalizeDisconnectedSessions(now, generation),
                     TimeUnit.MINUTES.toMillis(settings.disconnectTimeoutMinutes()),
                     TimeUnit.MILLISECONDS);
+            return true;
         }
-        gameActive = false;
-        clearOnlinePlayers();
-        clearStatTracking();
-        return true;
     }
 
     private void recordFreshRoster(long gameEntryAt) {
@@ -340,58 +448,58 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private boolean reconcileAfterReconnect(long gameEntryAt) {
-        Set<String> previousPlayers;
-        long lostAt;
-        synchronized (connectionStateLock) {
-            if (!reconnectPending) {
-                return false;
-            }
-            rosterReconciling = true;
-            previousPlayers = Set.copyOf(disconnectedPlayers);
-            lostAt = disconnectAt;
-        }
-
-        Set<String> currentPlayers = Bot.INSTANCE.players.values().stream()
-                .map(PlayerMonitorListener::nameOf)
-                .filter(name -> name != null && !name.isBlank())
-                .collect(java.util.stream.Collectors.toSet());
-
         int continued = 0;
         int loggedOut = 0;
         int loggedIn = 0;
-        reconnectedNewPlayers.clear();
-        reconnectedBrandNewPlayers.clear();
-        for (String playerName : previousPlayers) {
-            if (!containsIgnoreCase(currentPlayers, playerName)) {
-                recordLogoutAt(playerName, lostAt);
-                loggedOut++;
-            } else {
-                continued++;
-            }
-        }
-        onlinePlayers.clear();
-        for (String playerName : currentPlayers) {
-            onlinePlayers.put(normalize(playerName), playerName);
-        }
-        for (String playerName : currentPlayers) {
-            if (!containsIgnoreCase(previousPlayers, playerName)) {
-                boolean brandNew = isBrandNewPlayer(playerName);
-                recordLogin(playerName, gameEntryAt);
-                reconnectedNewPlayers.add(playerName);
-                if (brandNew) {
-                    reconnectedBrandNewPlayers.add(normalize(playerName));
-                }
-                loggedIn++;
-            }
-        }
-
         synchronized (connectionStateLock) {
+            if (!reconnectPending || closed) {
+                return false;
+            }
             reconnectPending = false;
-            rosterReconciling = false;
-            disconnectedPlayers.clear();
+            rosterReconciling = true;
+            gameActive = true;
+            long generation = reconnectGeneration;
+            long lostAt = disconnectAt;
+            Set<String> previousPlayers = Set.copyOf(disconnectedPlayers);
             if (disconnectFinalizer != null) {
                 disconnectFinalizer.cancel(false);
                 disconnectFinalizer = null;
+            }
+
+            Set<String> currentPlayers = Bot.INSTANCE.players.values().stream()
+                    .map(PlayerMonitorListener::nameOf)
+                    .filter(name -> name != null && !name.isBlank())
+                    .collect(java.util.stream.Collectors.toSet());
+
+            reconnectedNewPlayers.clear();
+            reconnectedBrandNewPlayers.clear();
+            for (String playerName : previousPlayers) {
+                if (!containsIgnoreCase(currentPlayers, playerName)) {
+                    recordLogoutAt(playerName, lostAt);
+                    loggedOut++;
+                } else {
+                    continued++;
+                }
+            }
+            onlinePlayers.clear();
+            for (String playerName : currentPlayers) {
+                onlinePlayers.put(normalize(playerName), playerName);
+            }
+            for (String playerName : currentPlayers) {
+                if (!containsIgnoreCase(previousPlayers, playerName)) {
+                    boolean brandNew = isBrandNewPlayer(playerName);
+                    recordLogin(playerName, gameEntryAt);
+                    reconnectedNewPlayers.add(playerName);
+                    if (brandNew) {
+                        reconnectedBrandNewPlayers.add(normalize(playerName));
+                    }
+                    loggedIn++;
+                }
+            }
+
+            if (reconnectGeneration == generation) {
+                rosterReconciling = false;
+                disconnectedPlayers.clear();
             }
         }
         log.info("reconciled Game roster: continued=" + continued
@@ -400,14 +508,24 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private void finalizeDisconnectedSessions(long expectedDisconnectAt) {
+        long generation;
+        synchronized (connectionStateLock) {
+            generation = reconnectGeneration;
+        }
+        finalizeDisconnectedSessions(expectedDisconnectAt, generation);
+    }
+
+    private void finalizeDisconnectedSessions(long expectedDisconnectAt, long expectedGeneration) {
         Set<String> playersToClose;
         synchronized (connectionStateLock) {
-            if (!reconnectPending || disconnectAt != expectedDisconnectAt) {
+            if (!reconnectPending || rosterReconciling
+                    || disconnectAt != expectedDisconnectAt
+                    || reconnectGeneration != expectedGeneration) {
                 return;
             }
             reconnectPending = false;
-            rosterReconciling = false;
             forceFreshRoster = true;
+            gameActive = false;
             playersToClose = Set.copyOf(disconnectedPlayers);
             disconnectedPlayers.clear();
             disconnectFinalizer = null;
@@ -542,6 +660,13 @@ final class PlayerMonitorListener implements Listener {
             log.warn("failed to check whether player is new " + playerName + ": " + error.getMessage());
             return false;
         }
+    }
+
+    boolean hasActiveStatCapture() {
+        return !activeStatCycles.isEmpty()
+                || !pendingStatDispatches.isEmpty()
+                || statResponses.hasPending()
+                || System.nanoTime() < statOutputSuppressionUntilNanos;
     }
 
     boolean isProtectedFromEviction(String normalizedPlayerName) {

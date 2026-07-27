@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -23,6 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SQLiteBackupManagerTest {
 
@@ -308,6 +311,52 @@ class SQLiteBackupManagerTest {
         assertTrue(diffFromExpected < TimeUnit.HOURS.toMillis(1),
                 "next backup should be based on last successful backup time, got diff="
                         + (diffFromExpected / 60000) + " min");
+    }
+
+    @Test
+    void staleScheduleGenerationCannotRunAfterReschedule() throws Exception {
+        Path dataDir = temporaryDirectory.resolve("playermonitor-stale-generation");
+        Files.createDirectories(dataDir);
+
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(dataDir, new MonitorSettings.Database());
+        store.initialize();
+        store.close();
+
+        AtomicInteger flushes = new AtomicInteger();
+        SQLiteBackupManager backupManager = createBackupManager(
+                dataDir, dataDir.resolve("xinpm.db"), flushes::incrementAndGet);
+        backupManager.start(168);
+
+        Field generationField = SQLiteBackupManager.class.getDeclaredField("scheduleGeneration");
+        generationField.setAccessible(true);
+        java.util.concurrent.atomic.AtomicLong generation =
+                (java.util.concurrent.atomic.AtomicLong) generationField.get(backupManager);
+        long staleGeneration = generation.get();
+
+        backupManager.reschedule(24);
+        Method executeBackup = SQLiteBackupManager.class.getDeclaredMethod("executeBackup", long.class);
+        executeBackup.setAccessible(true);
+        executeBackup.invoke(backupManager, staleGeneration);
+
+        assertEquals(0, flushes.get(), "a stale task must not execute a backup or schedule follow-up work");
+    }
+
+    @Test
+    void stoppedManagerCannotBeRestarted() throws Exception {
+        Path dataDir = temporaryDirectory.resolve("playermonitor-no-restart");
+        Files.createDirectories(dataDir);
+
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(dataDir, new MonitorSettings.Database());
+        store.initialize();
+        store.close();
+
+        SQLiteBackupManager backupManager = createBackupManager(dataDir, dataDir.resolve("xinpm.db"), () -> {
+        });
+        backupManager.start(168);
+        backupManager.stop();
+        managers.remove(backupManager);
+
+        assertThrows(IllegalStateException.class, () -> backupManager.start(168));
     }
 
     @Test

@@ -264,6 +264,23 @@ class MonitorSettingsStoreTest {
     }
 
     @Test
+    void invalidLoadedBackupIntervalFallsBackToDefault() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-invalid-backup-interval");
+        Files.createDirectories(directory);
+        Files.writeString(directory.resolve("settings.json"), "{\"backupInterval\":0}", StandardCharsets.UTF_8);
+        List<String> warnings = new ArrayList<>();
+
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.setWarningSink(warnings::add);
+        settings.initialize();
+
+        assertEquals(MonitorSettings.DEFAULT_BACKUP_INTERVAL_HOURS, settings.backupInterval());
+        assertTrue(warnings.stream().anyMatch(line -> line.contains("Invalid backupInterval")));
+        assertTrue(Files.readString(directory.resolve("settings.json"), StandardCharsets.UTF_8)
+                .contains("\"backupInterval\": " + MonitorSettings.DEFAULT_BACKUP_INTERVAL_HOURS));
+    }
+
+    @Test
     void backupIntervalRejectsZero() throws Exception {
         MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         settings.initialize();

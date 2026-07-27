@@ -12,6 +12,7 @@ final class MonitorSettings {
     static final int DEFAULT_CHAT_COUNT = 10;
     static final int DEFAULT_CACHE_IDLE_MINUTES = 30;
     static final int DEFAULT_MAX_CACHED_HISTORY = 200;
+    static final int DEFAULT_BACKUP_INTERVAL_HOURS = 168;
 
     static final class Database {
         static final String DEFAULT_PATH = "xinpm.db";
@@ -70,7 +71,7 @@ final class MonitorSettings {
     int chatCount = DEFAULT_CHAT_COUNT;
     int cacheIdleMinutes = DEFAULT_CACHE_IDLE_MINUTES;
     int maxCachedHistory = DEFAULT_MAX_CACHED_HISTORY;
-    int backupInterval = 168;
+    int backupInterval = DEFAULT_BACKUP_INTERVAL_HOURS;
     Database database = new Database();
 
     MonitorSettings copy() {

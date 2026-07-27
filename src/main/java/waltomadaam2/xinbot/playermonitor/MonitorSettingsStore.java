@@ -440,6 +440,11 @@ final class MonitorSettingsStore {
                 "Cache idle time must be between 5 and 1440 minutes");
         validateRange(value.maxCachedHistory, MIN_MAX_CACHED_HISTORY, MAX_MAX_CACHED_HISTORY,
                 "Max cached history must be between 50 and 10000");
+        if (value.backupInterval <= 0) {
+            warningSink.accept("Invalid backupInterval=" + value.backupInterval
+                    + "; using default " + MonitorSettings.DEFAULT_BACKUP_INTERVAL_HOURS + ".");
+            value.backupInterval = MonitorSettings.DEFAULT_BACKUP_INTERVAL_HOURS;
+        }
         value.displayTimezone = canonicalTimezone(value.displayTimezone);
         normalizeDatabaseSettings(value);
     }

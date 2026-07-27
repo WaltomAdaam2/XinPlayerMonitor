@@ -112,6 +112,32 @@ class PlayerMonitorListenerReconnectTest {
 
 
     @Test
+    void staleTimeoutCannotCloseSessionAfterReconnectClaimsGeneration() throws Exception {
+        GameProfile player = profile("GenerationPlayer");
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onPlayerJoin(new PlayerJoinEvent(player));
+        listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+
+        Field disconnectAtField = PlayerMonitorListener.class.getDeclaredField("disconnectAt");
+        disconnectAtField.setAccessible(true);
+        Field generationField = PlayerMonitorListener.class.getDeclaredField("reconnectGeneration");
+        generationField.setAccessible(true);
+        long disconnectAt = disconnectAtField.getLong(listener);
+        long generation = generationField.getLong(listener);
+
+        Bot.INSTANCE.players.put(player.getId(), player);
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+
+        Method staleFinalizer = PlayerMonitorListener.class
+                .getDeclaredMethod("finalizeDisconnectedSessions", long.class, long.class);
+        staleFinalizer.setAccessible(true);
+        staleFinalizer.invoke(listener, disconnectAt, generation);
+
+        assertEquals(1, service.getRecord("GenerationPlayer").loginSessions.size());
+        assertNull(service.getRecord("GenerationPlayer").loginSessions.get(0).logoutAt);
+    }
+
+    @Test
     void changingDisconnectTimeoutReschedulesAnActiveDisconnectWindow() throws Exception {
         settings.setDisconnectTimeoutMinutes(60);
         GameProfile player = profile("TimeoutPlayer");

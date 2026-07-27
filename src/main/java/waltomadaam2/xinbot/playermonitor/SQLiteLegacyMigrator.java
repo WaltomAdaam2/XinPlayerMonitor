@@ -61,7 +61,16 @@ final class SQLiteLegacyMigrator {
     }
 
     void migrateIfNeeded(Connection connection) throws IOException, SQLException {
-        if ("COMPLETED".equals(migrationStatus(connection)) || !Files.isDirectory(playersDirectory)) {
+        String status = migrationStatus(connection);
+        if ("COMPLETED".equals(status)) {
+            if (Files.isDirectory(playersDirectory)) {
+                Report report = new Report();
+                report.warning("Migration data was already committed; retrying legacy directory archival");
+                moveLegacyDirectory(report);
+            }
+            return;
+        }
+        if (!Files.isDirectory(playersDirectory)) {
             return;
         }
         Files.createDirectories(reportDirectory);
@@ -565,15 +574,31 @@ final class SQLiteLegacyMigrator {
         if (Files.exists(backup)) {
             backup = directory.resolve("legacy-json-backup-" + REPORT_TIME.format(Instant.now()));
         }
+        IOException atomicFailure = null;
         try {
             Files.move(playersDirectory, backup, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException ignored) {
+            return;
+        } catch (AtomicMoveNotSupportedException error) {
+            atomicFailure = error;
+        } catch (IOException error) {
+            // Some providers report a cross-device atomic move as a generic IOException.
+            atomicFailure = error;
+        }
+        try {
             Files.move(playersDirectory, backup);
         } catch (IOException error) {
-            report.warning("Unable to move legacy players directory after completed migration: " + error.getMessage());
-            warningSink.accept("Legacy JSON migration completed, but moving players directory failed: " + error.getMessage());
-            writeReport(report, "backup-warning");
+            if (atomicFailure != null) {
+                error.addSuppressed(atomicFailure);
+            }
+            reportMoveFailure(report, error);
         }
+    }
+
+    private void reportMoveFailure(Report report, IOException error) throws IOException {
+        report.warning("Unable to move legacy players directory after completed migration: " + error.getMessage());
+        warningSink.accept("Legacy JSON migration completed, but moving players directory failed: "
+                + error.getMessage() + "; XinPM will retry the archival on next startup.");
+        writeReport(report, "backup-warning");
     }
 
     private long earliest(List<LoginSession> sessions, List<ChatEntry> chats, List<StatSnapshot> stats, long fallback) {

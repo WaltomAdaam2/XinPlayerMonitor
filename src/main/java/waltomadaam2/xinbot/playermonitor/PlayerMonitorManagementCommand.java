@@ -757,7 +757,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 "Open sessions: " + gold(stats.openSessions()));
     }
 
-    private static String gold(int value) {
+    private static String gold(long value) {
         return COUNT_COLOR + value + RESET;
     }
 

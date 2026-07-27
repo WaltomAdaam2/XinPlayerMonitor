@@ -45,65 +45,183 @@ public final class XinPlayerMonitor implements Plugin {
             logger.warn(message);
             log.warn(message);
         };
-        MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
-        settings.setWarningSink(warningSink);
-        settings.initialize();
-        PlayerMonitorService service = new PlayerMonitorService(dataDirectory, settings);
-        service.setWarningSink(warningSink);
-        service.setInfoSink(infoSink);
-        service.initialize();
-        installStatChatLogFilter(settings);
-        listener = new PlayerMonitorListener(service, log, logger, settings);
-        service.setEvictionGuard(listener::isProtectedFromEviction);
-        this.service = service;
-        Bot.INSTANCE.getPluginManager().events().registerEvents(listener, this);
-        PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
-                service, settings, listener, logger);
-        backupManager = new SQLiteBackupManager(dataDirectory, service.databasePath(),
-                warningSink, infoSink, () -> {
-                    try {
-                        service.flush();
-                    } catch (IOException error) {
-                        throw new IllegalStateException("Backup pre-flush failed", error);
-                    }
-                });
-        command.setBackupManager(backupManager);
-        backupManager.start(settings.backupInterval());
-        Bot.INSTANCE.getPluginManager().registerCommand(
-                new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
-                        "playermonitor setting|scan-stat|<player> [stat|latestlogin|recentlogin|chat]"),
-                command,
-                this);
-        log.info("plugin enabled");
-        logger.info("XinPlayerMonitor enabled; use playermonitor for help.");
+
+        PlayerMonitorService createdService = null;
+        PlayerMonitorListener createdListener = null;
+        SQLiteBackupManager createdBackupManager = null;
+        boolean eventsMayBeRegistered = false;
+        boolean commandMayBeRegistered = false;
+        try {
+            MonitorSettingsStore settings = new MonitorSettingsStore(dataDirectory);
+            settings.setWarningSink(warningSink);
+            settings.initialize();
+
+            createdService = new PlayerMonitorService(dataDirectory, settings);
+            createdService.setWarningSink(warningSink);
+            createdService.setInfoSink(infoSink);
+            createdService.initialize();
+            this.service = createdService;
+
+            createdListener = new PlayerMonitorListener(createdService, log, logger, settings);
+            this.listener = createdListener;
+            createdService.setEvictionGuard(createdListener::isProtectedFromEviction);
+            installStatChatLogFilter(settings, createdListener);
+
+            eventsMayBeRegistered = true;
+            Bot.INSTANCE.getPluginManager().events().registerEvents(createdListener, this);
+
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    createdService, settings, createdListener, logger);
+            createdBackupManager = new SQLiteBackupManager(dataDirectory, createdService.databasePath(),
+                    warningSink, infoSink, () -> {
+                        try {
+                            PlayerMonitorService current = this.service;
+                            if (current == null) {
+                                throw new IllegalStateException("Database service is unavailable");
+                            }
+                            current.flush();
+                        } catch (IOException error) {
+                            throw new IllegalStateException("Backup pre-flush failed", error);
+                        }
+                    });
+            this.backupManager = createdBackupManager;
+            command.setBackupManager(createdBackupManager);
+            createdBackupManager.start(settings.backupInterval());
+
+            commandMayBeRegistered = true;
+            Bot.INSTANCE.getPluginManager().registerCommand(
+                    new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
+                            "playermonitor setting|scan-stat|<player> [stat|latestlogin|recentlogin|chat]"),
+                    command,
+                    this);
+            log.info("plugin enabled");
+            logger.info("XinPlayerMonitor enabled; use playermonitor for help.");
+        } catch (Throwable failure) {
+            Throwable cleanupFailure = null;
+            if (commandMayBeRegistered) {
+                try {
+                    Bot.INSTANCE.getPluginManager().commands().unregisterAll(this);
+                } catch (Throwable error) {
+                    cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+                }
+            }
+            if (eventsMayBeRegistered) {
+                try {
+                    Bot.INSTANCE.getPluginManager().events().unregisterAll(this);
+                } catch (Throwable error) {
+                    cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+                }
+            }
+            if (createdBackupManager != null) {
+                try {
+                    createdBackupManager.stop();
+                } catch (Throwable error) {
+                    cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+                }
+            }
+            if (createdListener != null) {
+                try {
+                    createdListener.close();
+                } catch (Throwable error) {
+                    cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+                }
+            }
+            if (createdService != null) {
+                try {
+                    createdService.close();
+                } catch (Throwable error) {
+                    cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+                }
+            }
+            try {
+                removeStatChatLogFilter();
+            } catch (Throwable error) {
+                cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+            }
+            backupManager = null;
+            listener = null;
+            service = null;
+            if (cleanupFailure != null) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            if (failure instanceof IOException io) {
+                throw io;
+            }
+            if (failure instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (failure instanceof Error error) {
+                throw error;
+            }
+            throw new IOException("Unable to initialize XinPlayerMonitor", failure);
+        }
+    }
+
+    private static Throwable appendCleanupFailure(Throwable current, Throwable next) {
+        if (current == null) {
+            return next;
+        }
+        current.addSuppressed(next);
+        return current;
     }
 
     @Override
     public void onDisable() {
-        Bot.INSTANCE.getPluginManager().events().unregisterAll(this);
-        Bot.INSTANCE.getPluginManager().commands().unregisterAll(this);
+        Throwable cleanupFailure = null;
+        try {
+            Bot.INSTANCE.getPluginManager().events().unregisterAll(this);
+        } catch (Throwable error) {
+            cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+        }
+        try {
+            Bot.INSTANCE.getPluginManager().commands().unregisterAll(this);
+        } catch (Throwable error) {
+            cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+        }
         if (backupManager != null) {
-            backupManager.stop();
-            backupManager = null;
+            try {
+                backupManager.stop();
+            } catch (Throwable error) {
+                cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+            } finally {
+                backupManager = null;
+            }
         }
         if (listener != null) {
-            listener.close();
-            listener = null;
+            try {
+                listener.close();
+            } catch (Throwable error) {
+                cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+            } finally {
+                listener = null;
+            }
         }
         if (service != null) {
-            service.close();
-            service = null;
+            try {
+                service.close();
+            } catch (Throwable error) {
+                cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+            } finally {
+                service = null;
+            }
         }
-        removeStatChatLogFilter();
+        try {
+            removeStatChatLogFilter();
+        } catch (Throwable error) {
+            cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+        }
+        if (cleanupFailure != null) {
+            logger.warn("XinPlayerMonitor disabled with one or more cleanup failures", cleanupFailure);
+        }
     }
 
-    private void installStatChatLogFilter(MonitorSettingsStore settings) {
+    private void installStatChatLogFilter(MonitorSettingsStore settings, PlayerMonitorListener listener) {
         if (!(LoggerFactory.getILoggerFactory() instanceof LoggerContext context)) {
             logger.warn("Unable to hide stat chat output: Logback is unavailable.");
             return;
         }
         loggerContext = context;
-        statChatLogFilter = new StatChatLogFilter(settings::statOutputHide);
+        statChatLogFilter = new StatChatLogFilter(settings::statOutputHide, listener::hasActiveStatCapture);
         statChatLogFilter.start();
         loggerContext.addTurboFilter(statChatLogFilter);
     }

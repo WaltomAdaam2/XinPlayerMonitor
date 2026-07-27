@@ -19,6 +19,9 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
@@ -589,6 +592,57 @@ class SQLitePlayerRecordStoreTest {
         }
     }
     @Test
+    void acceptedWritesAreDrainedWhenCloseRacesWithSubmitters() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-close-race");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.queueCapacity = 5_000;
+        settings.batchSize = 20;
+        settings.flushIntervalMs = 10;
+        settings.shutdownFlushTimeoutMs = 30_000;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        store.setWriteDelayForTesting(1L);
+        store.initialize();
+
+        AtomicInteger accepted = new AtomicInteger();
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch firstAccepted = new CountDownLatch(1);
+        List<Thread> submitters = new ArrayList<>();
+        for (int worker = 0; worker < 4; worker++) {
+            int workerId = worker;
+            Thread thread = new Thread(() -> {
+                try {
+                    start.await();
+                    for (int index = 0; index < 500; index++) {
+                        try {
+                            store.recordChat("CloseRace", workerId + "-" + index, index);
+                            accepted.incrementAndGet();
+                            firstAccepted.countDown();
+                        } catch (IOException closing) {
+                            return;
+                        }
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "sqlite-close-race-" + worker);
+            submitters.add(thread);
+            thread.start();
+        }
+        start.countDown();
+        assertTrue(firstAccepted.await(5, TimeUnit.SECONDS));
+        store.close();
+        for (Thread submitter : submitters) {
+            submitter.join(5_000L);
+            assertFalse(submitter.isAlive(), "submitter should stop after close begins");
+        }
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(accepted.get(), countRows(connection, "chat_messages"),
+                    "every event accepted before close must be committed");
+        }
+    }
+
+    @Test
     void badStatEventIsReportedByFlushWithoutDiscardingOtherEvents() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-batch-failure");
         MonitorSettings.Database settings = new MonitorSettings.Database();
@@ -607,6 +661,9 @@ class SQLitePlayerRecordStoreTest {
             IOException failure = assertThrows(IOException.class, store::flush);
             assertTrue(failure.getMessage().contains("events before this flush failed"));
             store.flush(); // the acknowledged non-terminal failure must not poison later flushes
+            assertTrue(store.listPlayerNames().contains("Good"));
+            assertFalse(store.listPlayerNames().contains("bad"),
+                    "rolled-back player names must not leak into the in-memory index");
         } finally {
             store.close();
         }

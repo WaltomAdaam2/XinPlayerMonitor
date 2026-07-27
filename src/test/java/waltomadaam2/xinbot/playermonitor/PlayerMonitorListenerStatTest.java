@@ -94,6 +94,33 @@ class PlayerMonitorListenerStatTest {
     }
 
     @Test
+    void closeWaitsForCapturedStatPersistence() throws Exception {
+        listener.setGameActiveForTesting(true);
+        listener.markOnlineForTesting("CloseStat");
+        listener.markPendingStatDispatchForTesting("CloseStat");
+        listener.onSendCommand(new SendCommandEvent("stat CloseStat"));
+
+        String statText = String.join("\n",
+                "§b玩家名称: CloseStat",
+                "§b加入游戏: 1 次",
+                "§b死亡计数: 2 次",
+                "§b击杀计数: 3 人",
+                "§e游戏时长: 4秒",
+                "§b优先队列: 已过期",
+                "§b特殊权限: ✅",
+                "----------------------");
+        listener.onSystemChat(new SystemChatMessageEvent(Component.text(statText), false));
+
+        listener.close();
+        listener = null;
+        service.flush();
+
+        assertTrue(service.findRecord("CloseStat")
+                .map(record -> !record.statSnapshots.isEmpty())
+                .orElse(false), "captured stat must be persisted before listener shutdown returns");
+    }
+
+    @Test
     void sendFailureIsCountedAndGivesUpAtLimitWithoutAffectingOtherPlayers() {
         listener.setGameActiveForTesting(true);
         listener.markOnlineForTesting("Alice");

@@ -54,8 +54,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     };
     private volatile Predicate<String> statWriteFailure = ignored -> false;
     private volatile long writeDelayMillisForTesting;
-    private volatile boolean accepting;
-    private volatile boolean initialized;
+    private final Object lifecycleLock = new Object();
+    private final Object failedEventsFileLock = new Object();
+    private volatile LifecycleState lifecycleState = LifecycleState.NEW;
     private volatile IOException terminalFailure;
     private Thread writerThread;
 
@@ -89,8 +90,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     @Override
     public synchronized void initialize() throws IOException {
-        if (initialized) {
-            return;
+        synchronized (lifecycleLock) {
+            if (lifecycleState == LifecycleState.RUNNING) {
+                return;
+            }
+            if (lifecycleState == LifecycleState.CLOSING) {
+                throw new IOException("SQLite storage is currently closing");
+            }
+            if (lifecycleState == LifecycleState.FAILED) {
+                throw new IOException("SQLite storage is in a failed state", terminalFailure);
+            }
+            lifecycleState = LifecycleState.NEW;
         }
         Files.createDirectories(directory);
         if (databasePath.getParent() != null) {
@@ -115,32 +125,61 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("initialize SQLite storage", error);
         }
-        accepting = true;
-        writerThread = new Thread(this::writerLoop, "XinPlayerMonitor-sqlite-writer");
-        writerThread.setDaemon(true);
-        writerThread.start();
-        initialized = true;
+        synchronized (lifecycleLock) {
+            terminalFailure = null;
+            lifecycleState = LifecycleState.RUNNING;
+            writerThread = new Thread(this::writerLoop, "XinPlayerMonitor-sqlite-writer");
+            writerThread.setDaemon(true);
+            writerThread.start();
+        }
     }
 
     @Override
     public void close() {
-        accepting = false;
-        Thread thread = writerThread;
-        if (thread != null) {
+        Thread thread;
+        synchronized (lifecycleLock) {
+            if (lifecycleState == LifecycleState.NEW || lifecycleState == LifecycleState.CLOSED) {
+                lifecycleState = LifecycleState.CLOSED;
+                return;
+            }
+            if (lifecycleState == LifecycleState.RUNNING) {
+                lifecycleState = LifecycleState.CLOSING;
+            }
+            thread = writerThread;
+        }
+
+        if (thread != null && thread != Thread.currentThread()) {
+            long timeout = Math.max(1000L, databaseSettings.shutdownFlushTimeoutMs);
             try {
-                thread.join(databaseSettings.shutdownFlushTimeoutMs);
+                thread.join(timeout);
                 if (thread.isAlive()) {
-                    warn("SQLite writer did not stop within " + databaseSettings.shutdownFlushTimeoutMs
-                            + " ms; pending events=" + queue.size());
+                    warn("SQLite writer did not stop within " + timeout
+                            + " ms; pending events=" + queue.size() + "; interrupting writer");
                     thread.interrupt();
+                    thread.join(Math.min(5000L, timeout));
+                }
+                if (thread.isAlive()) {
+                    IOException failure = new IOException("SQLite writer remained alive after shutdown timeout");
+                    terminalFailure = failure;
+                    synchronized (lifecycleLock) {
+                        lifecycleState = LifecycleState.FAILED;
+                    }
+                    warn("SEVERE: " + failure.getMessage() + "; pending events=" + queue.size());
                 }
             } catch (InterruptedException error) {
                 Thread.currentThread().interrupt();
                 warn("Interrupted while waiting for SQLite writer shutdown; pending events=" + queue.size());
             }
         }
-        writerThread = null;
-        initialized = false;
+
+        synchronized (lifecycleLock) {
+            if (writerThread == thread && (thread == null || !thread.isAlive())) {
+                writerThread = null;
+                if (lifecycleState != LifecycleState.FAILED) {
+                    lifecycleState = LifecycleState.CLOSED;
+                }
+            }
+        }
         IOException fatal = terminalFailure;
         FailureRecord failure = pendingFailures.peek();
         if (fatal != null) {
@@ -355,17 +394,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
-    private static int countRows(Connection connection, String table) throws SQLException {
+    private static long countRows(Connection connection, String table) throws SQLException {
         try (Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
-            return resultSet.next() ? resultSet.getInt(1) : 0;
+            return resultSet.next() ? resultSet.getLong(1) : 0L;
         }
     }
 
-    private static int countOpenSessions(Connection connection) throws SQLException {
+    private static long countOpenSessions(Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM sessions WHERE logout_at IS NULL")) {
-            return resultSet.next() ? resultSet.getInt(1) : 0;
+            return resultSet.next() ? resultSet.getLong(1) : 0L;
         }
     }
     @Override
@@ -392,7 +431,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     @Override
     public void flush() throws IOException {
-        if (!initialized) {
+        LifecycleState state = lifecycleState;
+        if (state == LifecycleState.NEW || state == LifecycleState.CLOSED) {
             return;
         }
         submit(new FlushEvent());
@@ -433,29 +473,30 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private void submit(DatabaseEvent event) throws IOException {
-        IOException fatal = terminalFailure;
-        if (fatal != null) {
-            throw new IOException("SQLite writer is in a terminal failed state", fatal);
-        }
-        if (!accepting && !(event instanceof FlushEvent)) {
-            throw new IOException("SQLite storage is not accepting new events");
-        }
-        if (!initialized && !(event instanceof FlushEvent)) {
-            throw new IOException("SQLite storage has not been initialized");
-        }
-        WriteTask task = new WriteTask(nextSequence.incrementAndGet(), event);
-        try {
-            if (!queue.offer(task, Math.max(1000L, databaseSettings.flushIntervalMs), TimeUnit.MILLISECONDS)) {
-                IOException error = new IOException("SQLite write queue is full; event=" + event.operation());
-                warn("SEVERE: " + error.getMessage());
-                throw error;
+        Objects.requireNonNull(event, "event");
+        WriteTask task;
+        synchronized (lifecycleLock) {
+            IOException fatal = terminalFailure;
+            if (fatal != null || lifecycleState == LifecycleState.FAILED) {
+                throw new IOException("SQLite writer is in a terminal failed state", fatal);
             }
-            if (event instanceof FlushEvent) {
-                await(task);
+            if (lifecycleState != LifecycleState.RUNNING) {
+                throw new IOException("SQLite storage is not accepting events; state=" + lifecycleState);
             }
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while queueing SQLite event " + event.operation(), error);
+            task = new WriteTask(nextSequence.incrementAndGet(), event);
+            try {
+                if (!queue.offer(task, Math.max(1000L, databaseSettings.flushIntervalMs), TimeUnit.MILLISECONDS)) {
+                    IOException error = new IOException("SQLite write queue is full; event=" + event.operation());
+                    warn("SEVERE: " + error.getMessage());
+                    throw error;
+                }
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while queueing SQLite event " + event.operation(), error);
+            }
+        }
+        if (event instanceof FlushEvent) {
+            await(task);
         }
     }
 
@@ -478,39 +519,54 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private void writerLoop() {
+        List<WriteTask> inFlight = new ArrayList<>();
         try (Connection connection = openConnection(); WriterSql sql = new WriterSql(connection)) {
-            while (accepting || !queue.isEmpty()) {
+            while (lifecycleState == LifecycleState.RUNNING || !queue.isEmpty()) {
                 WriteTask first = queue.poll(databaseSettings.flushIntervalMs, TimeUnit.MILLISECONDS);
                 if (first == null) {
                     continue;
                 }
-                List<WriteTask> batch = new ArrayList<>(databaseSettings.batchSize);
-                batch.add(first);
+                inFlight = new ArrayList<>(databaseSettings.batchSize);
+                inFlight.add(first);
                 delayWriteForTesting();
-                queue.drainTo(batch, databaseSettings.batchSize - 1);
-                processBatch(connection, sql, batch);
+                queue.drainTo(inFlight, databaseSettings.batchSize - 1);
+                processBatch(connection, sql, inFlight);
+                inFlight.clear();
             }
             SQLiteSchema.checkpoint(connection);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             IOException io = new IOException("SQLite writer interrupted", error);
-            terminalFailure = io;
-            accepting = false;
-            failAllPending(io);
+            failInFlight(inFlight, io);
+            enterTerminalFailure(io);
         } catch (SQLException error) {
             IOException io = SQLiteSchema.toIo("run SQLite writer", error);
-            terminalFailure = io;
-            accepting = false;
+            failInFlight(inFlight, io);
             warn("SEVERE: SQLite writer stopped: " + io.getMessage());
-            failAllPending(io);
+            enterTerminalFailure(io);
         } catch (RuntimeException error) {
             IOException io = new IOException("SQLite writer stopped unexpectedly", error);
-            terminalFailure = io;
-            accepting = false;
+            failInFlight(inFlight, io);
             warn("SEVERE: SQLite writer stopped: " + error.getMessage());
-            failAllPending(io);
+            enterTerminalFailure(io);
+        } finally {
+            synchronized (lifecycleLock) {
+                if (Thread.currentThread() == writerThread && lifecycleState == LifecycleState.CLOSING) {
+                    lifecycleState = LifecycleState.CLOSED;
+                }
+                lifecycleLock.notifyAll();
+            }
         }
     }
+
+    private void failInFlight(List<WriteTask> inFlight, IOException error) {
+        for (WriteTask task : inFlight) {
+            if (!task.completed.isDone()) {
+                failUnprocessedTask(task, error);
+            }
+        }
+    }
+
     private void delayWriteForTesting() throws InterruptedException {
         long delay = writeDelayMillisForTesting;
         if (delay > 0L) {
@@ -535,7 +591,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                         IOException fatal = terminalFailure == null
                                 ? new IOException("SQLite writer entered a failed state") : terminalFailure;
                         for (int remaining = index + 1; remaining < batch.size(); remaining++) {
-                            batch.get(remaining).completed.completeExceptionally(fatal);
+                            failUnprocessedTask(batch.get(remaining), fatal);
                         }
                         break;
                     }
@@ -590,6 +646,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private void completeCommitted(WriteTask task) {
+        rememberCommittedPlayer(task.event);
         if (task.event instanceof FlushEvent) {
             FailureRecord first = null;
             int failureCount = 0;
@@ -616,6 +673,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         task.completed.complete(null);
     }
 
+
+    private void rememberCommittedPlayer(DatabaseEvent event) {
+        if (event instanceof LoginEvent login) {
+            rememberPlayerName(login.playerName());
+        } else if (event instanceof ChatEvent chat) {
+            rememberPlayerName(chat.playerName());
+        } else if (event instanceof StatEvent stat) {
+            rememberPlayerName(stat.playerName());
+        }
+    }
+
     private void completeFailed(WriteTask task, Exception error) {
         IOException io;
         if (error instanceof IOException existing) {
@@ -635,11 +703,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         task.completed.completeExceptionally(io);
 
         if (error instanceof SQLException sqlError && isTerminalSqliteFailure(sqlError)) {
-            terminalFailure = io;
-            accepting = false;
             warn("SEVERE: SQLite writer entered terminal failed state; pending events will be rejected: "
                     + io.getMessage());
-            failAllPending(io);
+            enterTerminalFailure(io);
         }
     }
 
@@ -655,24 +721,45 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private void persistFailedEvent(WriteTask task, IOException error) {
+        if (task.event instanceof FlushEvent) {
+            return;
+        }
         FailedEventRecord record = new FailedEventRecord(
                 task.sequence, System.currentTimeMillis(), task.event.operation(),
                 task.event.playerNameForLog(), error.getMessage(), gson.toJson(task.event));
-        try {
-            Files.createDirectories(directory);
-            Files.writeString(failedEventsPath, gson.toJson(record) + System.lineSeparator(),
-                    StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
-        } catch (IOException persistError) {
-            warn("SEVERE: Unable to persist failed SQLite event sequence=" + task.sequence
-                    + " to " + failedEventsPath + ": " + persistError.getMessage());
+        synchronized (failedEventsFileLock) {
+            try {
+                Files.createDirectories(directory);
+                Files.writeString(failedEventsPath, gson.toJson(record) + System.lineSeparator(),
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+            } catch (IOException persistError) {
+                warn("SEVERE: Unable to persist failed SQLite event sequence=" + task.sequence
+                        + " to " + failedEventsPath + ": " + persistError.getMessage());
+            }
         }
+    }
+
+    private void enterTerminalFailure(IOException error) {
+        terminalFailure = error;
+        synchronized (lifecycleLock) {
+            lifecycleState = LifecycleState.FAILED;
+        }
+        failAllPending(error);
     }
 
     private void failAllPending(IOException error) {
         WriteTask task;
         while ((task = queue.poll()) != null) {
-            task.completed.completeExceptionally(error);
+            failUnprocessedTask(task, error);
         }
+    }
+
+    private void failUnprocessedTask(WriteTask task, IOException error) {
+        if (!(task.event instanceof FlushEvent)) {
+            pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), error));
+            persistFailedEvent(task, error);
+        }
+        task.completed.completeExceptionally(error);
     }
 
     private void writeLogin(WriterSql sql, String playerName, long now) throws SQLException {
@@ -690,7 +777,6 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         sql.updatePlayerCurrent.setLong(4, now);
         sql.updatePlayerCurrent.setLong(5, playerId);
         sql.updatePlayerCurrent.executeUpdate();
-        rememberPlayerName(playerName);
     }
 
     private void writeLogout(WriterSql sql, String playerName, long now) throws SQLException {
@@ -722,7 +808,6 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         sql.updatePlayerLastSeen.setLong(2, now);
         sql.updatePlayerLastSeen.setLong(3, playerId);
         sql.updatePlayerLastSeen.executeUpdate();
-        rememberPlayerName(playerName);
     }
 
     private void writeStat(WriterSql sql, String playerName, StatSnapshot snapshot) throws SQLException {
@@ -737,7 +822,6 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         sql.updatePlayerStat.setLong(4, snapshot.capturedAt);
         sql.updatePlayerStat.setLong(5, playerId);
         sql.updatePlayerStat.executeUpdate();
-        rememberPlayerName(playerName);
     }
 
     private long ensurePlayer(WriterSql sql, String playerName, long timestamp) throws SQLException {
@@ -905,6 +989,14 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
     private void warn(String message) {
         warningSink.accept(message);
+    }
+
+    private enum LifecycleState {
+        NEW,
+        RUNNING,
+        CLOSING,
+        CLOSED,
+        FAILED
     }
 
     private interface DatabaseEvent {

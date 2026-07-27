@@ -17,6 +17,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -47,6 +48,9 @@ final class SQLiteBackupManager {
     private final ScheduledExecutorService scheduler;
     private final ReentrantLock backupLock = new ReentrantLock();
     private final AtomicBoolean running = new AtomicBoolean();
+    private final AtomicBoolean stopped = new AtomicBoolean();
+    private final AtomicLong scheduleGeneration = new AtomicLong();
+    private final Object scheduleLock = new Object();
     private volatile ScheduledFuture<?> nextBackupTask;
     private volatile int intervalHours;
 
@@ -65,27 +69,33 @@ final class SQLiteBackupManager {
         });
     }
 
-    /**
-     * Starts the backup scheduler with the given interval in hours.
-     * Safe to call multiple times; subsequent calls are ignored unless
-     * {@link #stop()} was called in between.
-     */
+    /** Starts this one-shot manager. A stopped manager cannot be restarted. */
     void start(int intervalHours) {
-        this.intervalHours = intervalHours;
+        if (stopped.get()) {
+            throw new IllegalStateException("Backup manager has been stopped and cannot be restarted");
+        }
+        this.intervalHours = requirePositiveInterval(intervalHours);
         if (!running.compareAndSet(false, true)) {
             return;
         }
+        long generation = scheduleGeneration.incrementAndGet();
         info("Automatic backup scheduler started (interval=" + intervalHours + " h)");
-        scheduleNext();
+        scheduleNext(generation);
     }
 
-    /** Stops the scheduler and cancels any pending backup. */
+    /** Stops the scheduler and permanently invalidates every old task generation. */
     void stop() {
+        if (!stopped.compareAndSet(false, true)) {
+            return;
+        }
         running.set(false);
-        ScheduledFuture<?> task = nextBackupTask;
-        if (task != null) {
-            task.cancel(false);
-            nextBackupTask = null;
+        scheduleGeneration.incrementAndGet();
+        synchronized (scheduleLock) {
+            ScheduledFuture<?> task = nextBackupTask;
+            if (task != null) {
+                task.cancel(false);
+                nextBackupTask = null;
+            }
         }
         // Let an already-running VACUUM INTO finish before the database service closes.
         scheduler.shutdown();
@@ -110,17 +120,20 @@ final class SQLiteBackupManager {
      * not been started.
      */
     void reschedule(int newIntervalHours) {
-        this.intervalHours = newIntervalHours;
-        if (!running.get()) {
+        this.intervalHours = requirePositiveInterval(newIntervalHours);
+        if (!running.get() || stopped.get()) {
             return;
         }
-        ScheduledFuture<?> task = nextBackupTask;
-        if (task != null) {
-            task.cancel(false);
-            nextBackupTask = null;
+        long generation = scheduleGeneration.incrementAndGet();
+        synchronized (scheduleLock) {
+            ScheduledFuture<?> task = nextBackupTask;
+            if (task != null) {
+                task.cancel(false);
+                nextBackupTask = null;
+            }
         }
         info("Backup interval changed to " + newIntervalHours + " h; rescheduling.");
-        scheduleNext();
+        scheduleNext(generation);
     }
 
     /**
@@ -129,6 +142,10 @@ final class SQLiteBackupManager {
      * backup succeeded.
      */
     boolean backupNow() {
+        if (stopped.get()) {
+            warn("Skipping backup: backup manager has already been stopped.");
+            return false;
+        }
         if (!backupLock.tryLock()) {
             warn("Skipping backup: another backup is already in progress.");
             return false;
@@ -146,14 +163,17 @@ final class SQLiteBackupManager {
      */
     long nextBackupTimeMillis() {
         long lastBackup = findLastSuccessfulBackupTime();
-        return lastBackup + TimeUnit.HOURS.toMillis(Math.max(1, intervalHours));
+        return lastBackup + TimeUnit.HOURS.toMillis(requirePositiveInterval(intervalHours));
     }
 
     // ------------------------------------------------------------------
     // Internal
     // ------------------------------------------------------------------
 
-    private void scheduleNext() {
+    private void scheduleNext(long generation) {
+        if (!isCurrentGeneration(generation)) {
+            return;
+        }
         long now = System.currentTimeMillis();
         long nextTime = nextBackupTimeMillis();
         long delayMillis = nextTime - now;
@@ -163,18 +183,25 @@ final class SQLiteBackupManager {
             info("Next automatic backup is overdue; scheduling in 1 minute.");
         }
 
-        nextBackupTask = scheduler.schedule(this::executeBackup, delayMillis, TimeUnit.MILLISECONDS);
+        synchronized (scheduleLock) {
+            if (!isCurrentGeneration(generation)) {
+                return;
+            }
+            nextBackupTask = scheduler.schedule(() -> executeBackup(generation), delayMillis, TimeUnit.MILLISECONDS);
+        }
         info("Next automatic backup at " + Instant.ofEpochMilli(now + delayMillis)
                 + " (in " + formatDuration(delayMillis) + ")");
     }
 
-    private void executeBackup() {
-        if (!running.get()) {
+    private void executeBackup(long generation) {
+        if (!isCurrentGeneration(generation)) {
             return;
         }
         if (!backupLock.tryLock()) {
             warn("Skipping automatic backup: previous backup still in progress.");
-            scheduleNext();
+            if (isCurrentGeneration(generation)) {
+                scheduleNext(generation);
+            }
             return;
         }
         try {
@@ -182,12 +209,20 @@ final class SQLiteBackupManager {
         } finally {
             backupLock.unlock();
         }
-        // Schedule the next backup regardless of outcome.
-        // A failed backup does not advance the last-success timestamp,
-        // so the next attempt will be recalculated from the last successful one.
-        if (running.get()) {
-            scheduleNext();
+        if (isCurrentGeneration(generation)) {
+            scheduleNext(generation);
         }
+    }
+
+    private boolean isCurrentGeneration(long generation) {
+        return running.get() && !stopped.get() && scheduleGeneration.get() == generation;
+    }
+
+    private static int requirePositiveInterval(int hours) {
+        if (hours <= 0) {
+            throw new IllegalArgumentException("Backup interval must be greater than zero");
+        }
+        return hours;
     }
 
     private boolean doBackup() {

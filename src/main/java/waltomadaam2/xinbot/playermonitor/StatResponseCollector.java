@@ -113,6 +113,10 @@ final class StatResponseCollector {
         resetActiveResponse();
     }
 
+    synchronized boolean hasPending() {
+        return activePlayer != null || !expectedPlayers.isEmpty();
+    }
+
     private void resetActiveResponse() {
         activeKey = null;
         activePlayer = null;
