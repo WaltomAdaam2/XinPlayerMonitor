@@ -210,11 +210,11 @@ class PlayerMonitorManagementCommandTest {
         String rendered = String.join("\\n", PlayerMonitorManagementCommand.databaseStatsLines(
                 new DatabaseStats(2, 3, 4, 5, 1)));
 
-        assertTrue(rendered.contains("Players: \u001B[38;5;215m2\u001B[0m"));
-        assertTrue(rendered.contains("Chat: \u001B[38;5;215m3\u001B[0m"));
-        assertTrue(rendered.contains("Sessions: \u001B[38;5;215m4\u001B[0m"));
-        assertTrue(rendered.contains("Stats: \u001B[38;5;215m5\u001B[0m"));
-        assertTrue(rendered.contains("Open sessions: \u001B[38;5;215m1\u001B[0m"));
+        assertTrue(rendered.contains("玩家数: \u001B[38;5;215m2\u001B[0m"));
+        assertTrue(rendered.contains("聊天记录: \u001B[38;5;215m3\u001B[0m"));
+        assertTrue(rendered.contains("登录会话: \u001B[38;5;215m4\u001B[0m"));
+        assertTrue(rendered.contains("玩家 Stat 信息记录: \u001B[38;5;215m5\u001B[0m"));
+        assertTrue(rendered.contains("未结束会话: \u001B[38;5;215m1\u001B[0m"));
     }
     private static void assertStyle(int rgb, AttributedStyle actual) {
         assertEquals(AttributedStyle.DEFAULT.foregroundRgb(rgb).getStyle(), actual.getStyle());

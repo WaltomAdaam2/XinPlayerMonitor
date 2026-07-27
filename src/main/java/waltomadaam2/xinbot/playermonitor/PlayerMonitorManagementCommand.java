@@ -750,11 +750,11 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     static List<String> databaseStatsLines(DatabaseStats stats) {
         return List.of(
-                "Players: " + gold(stats.players()),
-                "Chat: " + gold(stats.chats()),
-                "Sessions: " + gold(stats.sessions()),
-                "Stats: " + gold(stats.stats()),
-                "Open sessions: " + gold(stats.openSessions()));
+                "玩家数: " + gold(stats.players()),
+                "聊天记录: " + gold(stats.chats()),
+                "登录会话: " + gold(stats.sessions()),
+                "玩家 Stat 信息记录: " + gold(stats.stats()),
+                "未结束会话: " + gold(stats.openSessions()));
     }
 
     private static String gold(long value) {
