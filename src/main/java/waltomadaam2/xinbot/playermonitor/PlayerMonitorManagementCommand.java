@@ -753,7 +753,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 "Players: " + gold(stats.players()),
                 "Chat: " + gold(stats.chats()),
                 "Sessions: " + gold(stats.sessions()),
-                "Stats: " + gold(stats.stats()));
+                "Stats: " + gold(stats.stats()),
+                "Open sessions: " + gold(stats.openSessions()));
     }
 
     private static String gold(int value) {

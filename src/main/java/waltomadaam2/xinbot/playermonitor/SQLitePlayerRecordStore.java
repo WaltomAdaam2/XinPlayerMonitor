@@ -209,7 +209,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                     countRows(connection, "players"),
                     countRows(connection, "chat_messages"),
                     countRows(connection, "sessions"),
-                    countRows(connection, "stat_snapshots"));
+                    countRows(connection, "stat_snapshots"),
+                    countOpenSessions(connection));
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("read database stats", error);
         }
@@ -357,6 +358,13 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private static int countRows(Connection connection, String table) throws SQLException {
         try (Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
+            return resultSet.next() ? resultSet.getInt(1) : 0;
+        }
+    }
+
+    private static int countOpenSessions(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM sessions WHERE logout_at IS NULL")) {
             return resultSet.next() ? resultSet.getInt(1) : 0;
         }
     }

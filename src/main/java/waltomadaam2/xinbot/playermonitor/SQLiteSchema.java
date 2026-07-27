@@ -9,7 +9,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 final class SQLiteSchema {
-    static final int VERSION = 2;
+    static final int VERSION = 3;
 
     private SQLiteSchema() {
     }
@@ -69,6 +69,11 @@ final class SQLiteSchema {
             if (currentVersion < 2) {
                 migrateToV2(statement);
                 statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(2, 'Keep only the latest stat snapshot per player', "
+                        + System.currentTimeMillis() + ")");
+                currentVersion = 2;
+            }
+            if (currentVersion < 3) {
+                statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(3, 'Track replayed failed events', "
                         + System.currentTimeMillis() + ")");
             }
             connection.commit();
@@ -250,6 +255,12 @@ final class SQLiteSchema {
                     stats_count INTEGER NOT NULL DEFAULT 0,
                     completed_at INTEGER,
                     error_message TEXT
+                )
+                """);
+        statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS replayed_failed_events (
+                    event_id TEXT PRIMARY KEY,
+                    replayed_at INTEGER NOT NULL
                 )
                 """);
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_sessions_player_login ON sessions(player_id, login_at DESC)");

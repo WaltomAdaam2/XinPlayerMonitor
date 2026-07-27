@@ -52,11 +52,33 @@ class SQLitePlayerRecordStoreTest {
             assertEquals("1", pragma(statement, "PRAGMA foreign_keys"));
             try (ResultSet resultSet = statement.executeQuery("SELECT MAX(version) FROM schema_migrations")) {
                 assertTrue(resultSet.next());
-                assertEquals(2, resultSet.getInt(1));
+                assertEquals(3, resultSet.getInt(1));
             }
         }
     }
 
+
+    @Test
+    void keepsDataWhenReopeningSchemaV3Database() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-v3-reopen");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        store.recordChat("Steve", "keep me", 100L);
+        store.close();
+
+        SQLitePlayerRecordStore reopened = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        reopened.initialize();
+        try {
+            assertEquals(1, reopened.chatCount("Steve"));
+            try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+                assertEquals(3, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
+                assertEquals(1, countRows(connection, "chat_messages"));
+                assertEquals(0, countRows(connection, "replayed_failed_events"));
+            }
+        } finally {
+            reopened.close();
+        }
+    }
     @Test
     void rejectsUnsupportedFutureSchemaVersion() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
@@ -87,7 +109,7 @@ class SQLitePlayerRecordStoreTest {
         newer.deathCount = 9;
         try (Connection connection = openRaw(directory.resolve("xinpm.db")); Statement statement = connection.createStatement()) {
             statement.executeUpdate("DROP INDEX idx_stats_one_per_player");
-            statement.executeUpdate("DELETE FROM schema_migrations WHERE version = 2");
+            statement.executeUpdate("DELETE FROM schema_migrations WHERE version >= 2");
             statement.executeUpdate("INSERT INTO players(normalized_name, display_name, first_seen_at, last_seen_at, "
                     + "online, current_session_id, last_stat_at, created_at, updated_at) "
                     + "VALUES('statuser', 'StatUser', 100, 200, 0, NULL, 200, 100, 200)");
@@ -115,7 +137,7 @@ class SQLitePlayerRecordStoreTest {
         assertEquals(1, record.statSnapshots.size());
         assertEquals(9, record.statSnapshots.get(0).deathCount);
         try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
-            assertEquals(2, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
+            assertEquals(3, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
             assertEquals(1, countRows(connection, "stat_snapshots"));
             SQLiteSchema.verify(connection);
         }
@@ -624,6 +646,7 @@ class SQLitePlayerRecordStoreTest {
             assertEquals(1, stats.chats());
             assertEquals(2, stats.sessions());
             assertEquals(1, stats.stats());
+            assertEquals(1, stats.openSessions());
         } finally {
             store.close();
         }
