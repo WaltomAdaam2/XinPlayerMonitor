@@ -121,16 +121,22 @@ class PlayerMonitorListenerStatTest {
     }
 
     @Test
-    void sendFailureIsCountedAndGivesUpAtLimitWithoutAffectingOtherPlayers() {
+    void sendFailureIsCountedAndGivesUpAtLimitWithoutAffectingOtherPlayers() throws Exception {
         listener.setGameActiveForTesting(true);
         listener.markOnlineForTesting("Alice");
         listener.markOnlineForTesting("Bob");
 
         listener.handleStatSendFailureForTesting("Alice");
         assertEquals(1, listener.statAttemptsForTesting("Alice"));
+        waitUntil(() -> listener.isPendingStatDispatchForTesting("Alice"),
+                "Alice retry should be queued after the first send failure");
 
         listener.handleStatSendFailureForTesting("Alice");
+        waitUntil(() -> listener.isPendingStatDispatchForTesting("Alice"),
+                "Alice retry should be queued after the second send failure");
         listener.handleStatSendFailureForTesting("Alice");
+        waitUntil(() -> listener.isPendingStatDispatchForTesting("Alice"),
+                "Alice retry should be queued after the third send failure");
         listener.handleStatSendFailureForTesting("Alice");
         assertEquals(0, listener.statAttemptsForTesting("Alice"),
                 "state must be cleared once the max send count is reached");
