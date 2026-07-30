@@ -1,13 +1,17 @@
 package waltomadaam2.xinbot.playermonitor;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 import waltomadaam2.xinbot.playermonitor.model.ChatEntry;
 import waltomadaam2.xinbot.playermonitor.model.LoginSession;
 import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
 import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,12 +23,18 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -47,6 +57,12 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private final TreeSet<String> playerNames = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
     private final Object playerNamesLock = new Object();
     private final AtomicLong nextSequence = new AtomicLong();
+    private final AtomicLong lastCommittedAt = new AtomicLong();
+    private final AtomicLong lastFailureAt = new AtomicLong();
+    private final AtomicLong failedEventLines = new AtomicLong();
+    private final AtomicLong replayedFailedEvents = new AtomicLong();
+    private final AtomicLong malformedFailedEvents = new AtomicLong();
+    private volatile String lastFailureMessage = "";
     private final ConcurrentLinkedQueue<FailureRecord> pendingFailures = new ConcurrentLinkedQueue<>();
     private volatile Consumer<String> warningSink = ignored -> {
     };
@@ -116,12 +132,25 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             new SQLiteLegacyMigrator(directory, gson, warningSink,
                     databaseSettings.allowPartialLegacyMigration).migrateIfNeeded(connection);
             SQLiteSchema.verify(connection);
+            FailedReplaySummary replaySummary = replayFailedEvents(connection);
+            if (replaySummary.replayed() > 0) {
+                SQLiteSchema.verify(connection);
+            }
             loadPlayerNameIndex(connection);
+            failedEventLines.set(replaySummary.totalLines());
+            replayedFailedEvents.set(replaySummary.alreadyReplayed() + replaySummary.replayed());
+            malformedFailedEvents.set(replaySummary.malformed());
             info("XinPM SQLite database: " + databasePath.toAbsolutePath());
             info("Schema version: " + SQLiteSchema.schemaVersion(connection));
             info("Journal mode: " + SQLiteSchema.value(connection, "PRAGMA journal_mode"));
             info("Legacy migration status: " + legacyMigrationStatus(connection));
             info("Database writer batch size: " + databaseSettings.batchSize);
+            if (replaySummary.totalLines() > 0) {
+                info("Failed-event replay: replayed=" + replaySummary.replayed()
+                        + ", alreadyReplayed=" + replaySummary.alreadyReplayed()
+                        + ", malformed=" + replaySummary.malformed()
+                        + ", stillPending=" + replaySummary.pending());
+            }
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("initialize SQLite storage", error);
         }
@@ -235,6 +264,15 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     @Override
     public List<String> listPlayerNames() throws IOException {
         flush();
+        return playerNamesSnapshot();
+    }
+
+    @Override
+    public List<String> listPlayerNamesSnapshot() {
+        return playerNamesSnapshot();
+    }
+
+    private List<String> playerNamesSnapshot() {
         synchronized (playerNamesLock) {
             return List.copyOf(playerNames);
         }
@@ -256,6 +294,28 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     @Override
+    public DatabaseHealth databaseHealth() {
+        Thread thread = writerThread;
+        long failedLines = failedEventLines.get();
+        long replayed = replayedFailedEvents.get();
+        return new DatabaseHealth(
+                lifecycleState.name(),
+                thread != null && thread.isAlive(),
+                queue.size(),
+                queue.size() + queue.remainingCapacity(),
+                lastCommittedAt.get(),
+                lastFailureAt.get(),
+                lastFailureMessage,
+                failedLines,
+                replayed,
+                Math.max(0L, failedLines - replayed),
+                malformedFailedEvents.get(),
+                fileSize(databasePath),
+                fileSize(databasePath.resolveSibling(databasePath.getFileName() + "-wal")),
+                fileSize(databasePath.resolveSibling(databasePath.getFileName() + "-shm")));
+    }
+
+    @Override
     public Optional<PlayerRecord> findSummary(String playerName) throws IOException {
         validatePlayerName(playerName);
         flush();
@@ -271,6 +331,22 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             }
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("read player summary " + playerName, error);
+        }
+    }
+
+    @Override
+    public boolean playerExists(String playerName) throws IOException {
+        validatePlayerName(playerName);
+        flush();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT 1 FROM players WHERE normalized_name = ? LIMIT 1")) {
+            statement.setString(1, normalize(playerName));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("check player existence " + playerName, error);
         }
     }
 
@@ -430,6 +506,99 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     @Override
+    public Set<String> playersWithStatCapturedAtOrAfter(Collection<String> names, long cutoffAt) throws IOException {
+        Objects.requireNonNull(names, "names");
+        Set<String> normalizedNames = new HashSet<>();
+        for (String name : names) {
+            validatePlayerName(name);
+            normalizedNames.add(normalize(name));
+        }
+        if (normalizedNames.isEmpty()) {
+            return Set.of();
+        }
+        flush();
+        Set<String> matches = new HashSet<>();
+        List<String> allNames = List.copyOf(normalizedNames);
+        final int chunkSize = 400;
+        try (Connection connection = openConnection()) {
+            for (int start = 0; start < allNames.size(); start += chunkSize) {
+                List<String> chunk = allNames.subList(start, Math.min(allNames.size(), start + chunkSize));
+                String placeholders = String.join(",", java.util.Collections.nCopies(chunk.size(), "?"));
+                String sql = """
+                        SELECT p.normalized_name
+                        FROM stat_snapshots stats
+                        JOIN players p ON p.id = stats.player_id
+                        WHERE stats.timestamp >= ? AND p.normalized_name IN (%s)
+                        """.formatted(placeholders);
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    statement.setLong(1, cutoffAt);
+                    for (int index = 0; index < chunk.size(); index++) {
+                        statement.setString(index + 2, chunk.get(index));
+                    }
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        while (resultSet.next()) {
+                            matches.add(resultSet.getString(1));
+                        }
+                    }
+                }
+            }
+            return Set.copyOf(matches);
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("check batched stat cooldown", error);
+        }
+    }
+
+    @Override
+    public int recoverOpenSessions(long recoveredAt) throws IOException {
+        flush();
+        try (Connection connection = openConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                int openSessions;
+                try (Statement statement = connection.createStatement();
+                     ResultSet resultSet = statement.executeQuery(
+                             "SELECT COUNT(*) FROM sessions WHERE logout_at IS NULL")) {
+                    openSessions = resultSet.next() ? resultSet.getInt(1) : 0;
+                }
+                if (openSessions == 0) {
+                    connection.commit();
+                    return 0;
+                }
+                try (PreparedStatement closeSessions = connection.prepareStatement("""
+                        UPDATE sessions
+                        SET logout_at = CASE WHEN login_at > ? THEN login_at ELSE ? END
+                        WHERE logout_at IS NULL
+                        """);
+                     PreparedStatement markPlayersOffline = connection.prepareStatement("""
+                        UPDATE players
+                        SET online = 0,
+                            current_session_id = NULL,
+                            last_seen_at = MAX(last_seen_at, ?),
+                            updated_at = ?
+                        WHERE online = 1 OR current_session_id IS NOT NULL
+                        """)) {
+                    closeSessions.setLong(1, recoveredAt);
+                    closeSessions.setLong(2, recoveredAt);
+                    closeSessions.executeUpdate();
+                    markPlayersOffline.setLong(1, recoveredAt);
+                    markPlayersOffline.setLong(2, recoveredAt);
+                    markPlayersOffline.executeUpdate();
+                }
+                connection.commit();
+                lastCommittedAt.set(System.currentTimeMillis());
+                return openSessions;
+            } catch (SQLException error) {
+                SQLiteSchema.rollbackQuietly(connection);
+                throw error;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("recover stale open sessions", error);
+        }
+    }
+
+    @Override
     public void flush() throws IOException {
         LifecycleState state = lifecycleState;
         if (state == LifecycleState.NEW || state == LifecycleState.CLOSED) {
@@ -472,9 +641,166 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         return SQLiteSchema.open(databasePath, databaseSettings);
     }
 
+    private FailedReplaySummary replayFailedEvents(Connection connection) throws IOException {
+        if (!Files.exists(failedEventsPath)) {
+            return FailedReplaySummary.EMPTY;
+        }
+        long total = 0L;
+        long replayed = 0L;
+        long alreadyReplayed = 0L;
+        long malformed = 0L;
+        long pending = 0L;
+        try (BufferedReader reader = Files.newBufferedReader(failedEventsPath, StandardCharsets.UTF_8);
+             WriterSql sql = new WriterSql(connection);
+             PreparedStatement seen = connection.prepareStatement(
+                     "SELECT 1 FROM replayed_failed_events WHERE event_id = ? LIMIT 1");
+             PreparedStatement markReplayed = connection.prepareStatement(
+                     "INSERT INTO replayed_failed_events(event_id, replayed_at) VALUES(?, ?)")) {
+            String line;
+            long lineNumber = 0L;
+            while ((line = reader.readLine()) != null) {
+                lineNumber++;
+                if (line.isBlank()) {
+                    continue;
+                }
+                total++;
+                FailedEventRecord record;
+                try {
+                    record = gson.fromJson(line, FailedEventRecord.class);
+                    if (record == null || record.operation() == null || record.operation().isBlank()
+                            || record.eventJson() == null || record.eventJson().isBlank()) {
+                        throw new JsonParseException("missing operation or eventJson");
+                    }
+                } catch (RuntimeException error) {
+                    malformed++;
+                    pending++;
+                    warn("Malformed failed event at line " + lineNumber + ": " + error.getMessage());
+                    continue;
+                }
+
+                String eventId = failedEventId(record);
+                seen.setString(1, eventId);
+                try (ResultSet resultSet = seen.executeQuery()) {
+                    if (resultSet.next()) {
+                        alreadyReplayed++;
+                        continue;
+                    }
+                }
+
+                DatabaseEvent event;
+                try {
+                    event = failedDatabaseEvent(record);
+                } catch (IOException | RuntimeException error) {
+                    malformed++;
+                    pending++;
+                    warn("Unable to decode failed event at line " + lineNumber + ": " + error.getMessage());
+                    continue;
+                }
+
+                try {
+                    connection.setAutoCommit(false);
+                    applyEvent(sql, event);
+                    markReplayed.setString(1, eventId);
+                    markReplayed.setLong(2, System.currentTimeMillis());
+                    markReplayed.executeUpdate();
+                    connection.commit();
+                    rememberCommittedPlayer(event);
+                    lastCommittedAt.set(System.currentTimeMillis());
+                    replayed++;
+                } catch (Exception error) {
+                    SQLiteSchema.rollbackQuietly(connection);
+                    pending++;
+                    IOException io = error instanceof IOException existing
+                            ? existing
+                            : error instanceof SQLException sqlError
+                            ? SQLiteSchema.toIo("replay failed SQLite event", sqlError)
+                            : new IOException("replay failed SQLite event: " + error.getMessage(), error);
+                    markFailure(io);
+                    warn("Unable to replay failed event at line " + lineNumber
+                            + ", operation=" + record.operation() + ": " + io.getMessage());
+                } finally {
+                    try {
+                        connection.setAutoCommit(true);
+                    } catch (SQLException error) {
+                        throw SQLiteSchema.toIo("restore autocommit after failed-event replay", error);
+                    }
+                }
+            }
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("replay failed SQLite events", error);
+        }
+        return new FailedReplaySummary(total, replayed, alreadyReplayed, malformed, pending);
+    }
+
+    private DatabaseEvent failedDatabaseEvent(FailedEventRecord record) throws IOException {
+        JsonObject payload;
+        try {
+            payload = JsonParser.parseString(record.eventJson()).getAsJsonObject();
+        } catch (RuntimeException error) {
+            throw new IOException("invalid eventJson", error);
+        }
+        DatabaseEvent event = switch (record.operation()) {
+            case "login" -> new LoginEvent(requiredString(payload, "playerName"), requiredLong(payload, "timestamp"));
+            case "logout" -> new LogoutEvent(requiredString(payload, "playerName"), requiredLong(payload, "timestamp"));
+            case "chat" -> new ChatEvent(requiredString(payload, "playerName"),
+                    requiredString(payload, "message"), requiredLong(payload, "timestamp"));
+            case "stat" -> {
+                String playerName = requiredString(payload, "playerName");
+                if (!payload.has("snapshot") || payload.get("snapshot").isJsonNull()) {
+                    throw new IOException("stat event is missing snapshot");
+                }
+                StatSnapshot snapshot = gson.fromJson(payload.get("snapshot"), StatSnapshot.class);
+                if (snapshot == null) {
+                    throw new IOException("stat event snapshot is invalid");
+                }
+                yield new StatEvent(playerName, snapshot);
+            }
+            default -> throw new IOException("unsupported failed event operation: " + record.operation());
+        };
+        if (!(event instanceof FlushEvent)) {
+            validatePlayerName(event.playerNameForLog());
+        }
+        return event;
+    }
+
+    private static String requiredString(JsonObject object, String name) throws IOException {
+        if (!object.has(name) || object.get(name).isJsonNull()) {
+            throw new IOException("missing field: " + name);
+        }
+        try {
+            return object.get(name).getAsString();
+        } catch (RuntimeException error) {
+            throw new IOException("invalid string field: " + name, error);
+        }
+    }
+
+    private static long requiredLong(JsonObject object, String name) throws IOException {
+        if (!object.has(name) || object.get(name).isJsonNull()) {
+            throw new IOException("missing field: " + name);
+        }
+        try {
+            return object.get(name).getAsLong();
+        } catch (RuntimeException error) {
+            throw new IOException("invalid long field: " + name, error);
+        }
+    }
+
+    private static String failedEventId(FailedEventRecord record) {
+        String material = record.sequence() + "\n" + record.failedAt() + "\n"
+                + record.operation() + "\n" + Objects.toString(record.playerName(), "") + "\n"
+                + Objects.toString(record.error(), "") + "\n" + record.eventJson();
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(material.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
+    }
+
     private void submit(DatabaseEvent event) throws IOException {
         Objects.requireNonNull(event, "event");
         WriteTask task;
+        IOException queueFailure = null;
         synchronized (lifecycleLock) {
             IOException fatal = terminalFailure;
             if (fatal != null || lifecycleState == LifecycleState.FAILED) {
@@ -486,18 +812,33 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             task = new WriteTask(nextSequence.incrementAndGet(), event);
             try {
                 if (!queue.offer(task, Math.max(1000L, databaseSettings.flushIntervalMs), TimeUnit.MILLISECONDS)) {
-                    IOException error = new IOException("SQLite write queue is full; event=" + event.operation());
-                    warn("SEVERE: " + error.getMessage());
-                    throw error;
+                    queueFailure = new IOException("SQLite write queue is full; event=" + event.operation());
                 }
             } catch (InterruptedException error) {
                 Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while queueing SQLite event " + event.operation(), error);
+                queueFailure = new IOException("Interrupted while queueing SQLite event " + event.operation(), error);
             }
+        }
+        if (queueFailure != null) {
+            recordRejectedTask(task, queueFailure);
+            throw queueFailure;
         }
         if (event instanceof FlushEvent) {
             await(task);
         }
+    }
+
+    private void recordRejectedTask(WriteTask task, IOException error) {
+        markFailure(error);
+        if (!(task.event instanceof FlushEvent)) {
+            pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), error));
+            persistFailedEvent(task, error);
+        }
+        task.completed.completeExceptionally(error);
+        warn("SEVERE: SQLite event was not queued; sequence=" + task.sequence
+                + ", operation=" + task.event.operation()
+                + ", player=" + task.event.playerNameForLog()
+                + ", error=" + error.getMessage());
     }
 
     private void await(WriteTask task) throws IOException {
@@ -647,6 +988,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     private void completeCommitted(WriteTask task) {
         rememberCommittedPlayer(task.event);
+        if (!(task.event instanceof FlushEvent)) {
+            lastCommittedAt.set(System.currentTimeMillis());
+        }
         if (task.event instanceof FlushEvent) {
             FailureRecord first = null;
             int failureCount = 0;
@@ -693,6 +1037,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         } else {
             io = new IOException("write SQLite event " + task.event.operation() + " failed: " + error.getMessage(), error);
         }
+        markFailure(io);
         pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), io));
         persistFailedEvent(task, io);
         warn("SQLite event failed; sequence=" + task.sequence
@@ -732,11 +1077,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                 Files.createDirectories(directory);
                 Files.writeString(failedEventsPath, gson.toJson(record) + System.lineSeparator(),
                         StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+                failedEventLines.incrementAndGet();
             } catch (IOException persistError) {
                 warn("SEVERE: Unable to persist failed SQLite event sequence=" + task.sequence
                         + " to " + failedEventsPath + ": " + persistError.getMessage());
             }
         }
+    }
+
+    private void markFailure(IOException error) {
+        lastFailureAt.set(System.currentTimeMillis());
+        lastFailureMessage = error == null || error.getMessage() == null ? "unknown failure" : error.getMessage();
     }
 
     private void enterTerminalFailure(IOException error) {
@@ -755,6 +1106,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private void failUnprocessedTask(WriteTask task, IOException error) {
+        markFailure(error);
         if (!(task.event instanceof FlushEvent)) {
             pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), error));
             persistFailedEvent(task, error);
@@ -984,6 +1336,14 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
+    private static long fileSize(Path path) {
+        try {
+            return Files.exists(path) ? Files.size(path) : 0L;
+        } catch (IOException ignored) {
+            return -1L;
+        }
+    }
+
     private void info(String message) {
         infoSink.accept(message);
     }
@@ -1046,6 +1406,11 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     private record FailedEventRecord(long sequence, long failedAt, String operation, String playerName,
                                      String error, String eventJson) {
+    }
+
+    private record FailedReplaySummary(long totalLines, long replayed, long alreadyReplayed,
+                                       long malformed, long pending) {
+        private static final FailedReplaySummary EMPTY = new FailedReplaySummary(0L, 0L, 0L, 0L, 0L);
     }
 
     private record PlayerRow(long id, String displayName) {

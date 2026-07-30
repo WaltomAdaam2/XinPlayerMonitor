@@ -15,13 +15,15 @@ final class StatResponseCollector {
     private static final long REQUEST_TIMEOUT_MILLIS = 3_000L;
     private static final Pattern HEADER = Pattern.compile("^玩家名称\\s*[:：]\\s*(.+?)\\s*$");
     private static final Pattern SEPARATOR = Pattern.compile("-{10,}");
+    private static final Pattern STAT_FIELD = Pattern.compile(
+            "^(加入游戏|在线次数|死亡计数|击杀数|击杀计数|游戏时长|队伍|优先队列|特殊权限)\\s*[:：].*$");
 
     private final Map<String, Expectation> expectedPlayers = new LinkedHashMap<>();
     private final long requestTimeoutMillis;
     private String activeKey;
     private String activePlayer;
     private List<String> activeLines;
-    private boolean activeHasPermissions;
+    private boolean activeHasStatField;
 
     StatResponseCollector() {
         this(REQUEST_TIMEOUT_MILLIS);
@@ -54,17 +56,16 @@ final class StatResponseCollector {
                 activeKey = normalize(playerName);
                 activePlayer = playerName;
                 activeLines = new ArrayList<>();
-                activeHasPermissions = false;
+                activeHasStatField = false;
             }
             if (activePlayer == null || activeLines == null) {
                 continue;
             }
             activeLines.add(trimmed);
-            if (trimmed.startsWith("特殊权限")) {
-                activeHasPermissions = true;
-                continue;
+            if (STAT_FIELD.matcher(trimmed).matches()) {
+                activeHasStatField = true;
             }
-            if (activeHasPermissions && SEPARATOR.matcher(trimmed).matches()) {
+            if (activeHasStatField && SEPARATOR.matcher(trimmed).matches()) {
                 Optional<StatSnapshot> snapshot = StatParser.parse(activePlayer, activeLines, System.currentTimeMillis());
                 String completedKey = activeKey;
                 String completedPlayer = activePlayer;
@@ -121,7 +122,7 @@ final class StatResponseCollector {
         activeKey = null;
         activePlayer = null;
         activeLines = null;
-        activeHasPermissions = false;
+        activeHasStatField = false;
     }
 
     private String expectedName(String actualName) {

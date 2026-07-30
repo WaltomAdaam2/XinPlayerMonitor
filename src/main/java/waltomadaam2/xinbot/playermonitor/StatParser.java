@@ -19,7 +19,7 @@ final class StatParser {
 
     static Optional<StatSnapshot> parse(String expectedPlayerName, List<String> inputLines, long capturedAt) {
         List<String> lines = inputLines.stream()
-                .flatMap(line -> List.of(line.replace("\\r", "").split("\\n")).stream())
+                .flatMap(line -> List.of(line.replace("\r", "").split("\n")).stream())
                 .map(StatText::normalize)
                 .map(String::trim)
                 .filter(line -> !line.isEmpty())
@@ -39,23 +39,36 @@ final class StatParser {
 
         StatSnapshot snapshot = new StatSnapshot();
         snapshot.capturedAt = capturedAt;
+        boolean recognizedField = false;
         for (String line : lines) {
             if (line.startsWith("加入游戏")) {
                 snapshot.addedGameCount = firstInteger(line);
+                recognizedField = true;
+            } else if (line.startsWith("在线次数")) {
+                snapshot.onlineCount = firstInteger(line);
+                recognizedField = true;
             } else if (line.startsWith("死亡计数")) {
                 snapshot.deathCount = firstInteger(line);
+                recognizedField = true;
             } else if (line.startsWith("击杀数") || line.startsWith("击杀计数")) {
                 snapshot.killCount = firstInteger(line);
+                recognizedField = true;
             } else if (line.startsWith("游戏时长")) {
                 snapshot.playtimeSeconds = playtimeSeconds(valueAfterColon(line));
+                recognizedField = true;
             } else if (line.startsWith("优先队列")) {
                 snapshot.priorityQueue = valueAfterColon(line);
+                recognizedField = true;
+            } else if (line.startsWith("队伍")) {
+                snapshot.team = valueAfterColon(line);
+                recognizedField = true;
             } else if (line.startsWith("特殊权限")) {
                 snapshot.permissions = permissions(line);
                 snapshot.permissionsDisplay = valueAfterColon(line);
+                recognizedField = true;
             }
         }
-        return Optional.of(snapshot);
+        return recognizedField ? Optional.of(snapshot) : Optional.empty();
     }
 
     private static Integer firstInteger(String line) {
@@ -88,5 +101,4 @@ final class StatParser {
         int checks = (int) value.codePoints().filter(codePoint -> codePoint == 0x2705).count();
         return new PlayerPermissions(checks >= 1, checks >= 2, checks >= 3);
     }
-
 }

@@ -50,6 +50,7 @@ final class PlayerMonitorListener implements Listener {
     private volatile boolean closed;
     private volatile boolean reconnectPending;
     private volatile boolean rosterReconciling;
+    private boolean coldStartReconciled;
     private volatile boolean forceFreshRoster;
     private volatile long disconnectAt;
     private long reconnectGeneration;
@@ -200,17 +201,27 @@ final class PlayerMonitorListener implements Listener {
         long gameEntryAt = System.currentTimeMillis();
         boolean resumed = reconcileAfterReconnect(gameEntryAt);
         if (!resumed) {
+            boolean recoverStaleSessions;
             synchronized (connectionStateLock) {
                 if (closed || reconnectPending || rosterReconciling) {
                     return;
                 }
                 gameActive = true;
                 forceFreshRoster = false;
+                rosterReconciling = true;
+                recoverStaleSessions = !coldStartReconciled;
+                coldStartReconciled = true;
             }
             clearOnlinePlayers();
             clearStatTracking();
-            if (gameActive) {
-                recordFreshRoster(gameEntryAt);
+            try {
+                if (gameActive) {
+                    recordFreshRoster(gameEntryAt, recoverStaleSessions);
+                }
+            } finally {
+                synchronized (connectionStateLock) {
+                    rosterReconciling = false;
+                }
             }
         }
         log.info(resumed
@@ -266,7 +277,7 @@ final class PlayerMonitorListener implements Listener {
         }
         try {
             service.recordLogout(playerName, System.currentTimeMillis());
-            log.info("recorded logout for " + playerName);
+            log.info("queued logout for " + playerName);
         } catch (IOException error) {
             log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
@@ -277,8 +288,8 @@ final class PlayerMonitorListener implements Listener {
         if (!gameActive) {
             return;
         }
-        String message = EmojiFilter.removeEmojiExceptCheckMarks(event.getMessage());
-        if (message.isEmpty()) {
+        String message = event.getMessage();
+        if (message == null || message.isEmpty()) {
             return;
         }
         String playerName = nameOf(event.getSender());
@@ -324,8 +335,8 @@ final class PlayerMonitorListener implements Listener {
     private void persistCapturedStat(StatResponseCollector.CapturedStat captured) {
         try {
             service.recordStat(captured.playerName(), captured.snapshot());
-            log.info("recorded stat for " + captured.playerName());
-            logger.info("\u001B[94mRecorded stat for {}.\u001B[0m", captured.playerName());
+            log.info("queued stat write for " + captured.playerName());
+            logger.info("\u001B[94mQueued stat write for {}.\u001B[0m", captured.playerName());
         } catch (IOException error) {
             log.warn("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
         } finally {
@@ -424,11 +435,23 @@ final class PlayerMonitorListener implements Listener {
         }
     }
 
-    private void recordFreshRoster(long gameEntryAt) {
+    private void recordFreshRoster(long gameEntryAt, boolean recoverStaleSessions) {
         Set<String> currentPlayers = Bot.INSTANCE.players.values().stream()
                 .map(PlayerMonitorListener::nameOf)
                 .filter(name -> name != null && !name.isBlank())
                 .collect(java.util.stream.Collectors.toSet());
+        if (recoverStaleSessions) {
+            try {
+                int recovered = service.recoverOpenSessions(gameEntryAt);
+                if (recovered > 0) {
+                    log.warn("recovered " + recovered + " stale open session(s) from an earlier unclean shutdown");
+                    logger.warn("Recovered {} stale open session(s) before recording the current Game roster.", recovered);
+                }
+            } catch (IOException error) {
+                log.warn("failed to recover stale open sessions: " + error.getMessage());
+                logger.warn("Unable to recover stale open sessions before roster recording.", error);
+            }
+        }
         for (String playerName : currentPlayers) {
             onlinePlayers.put(normalize(playerName), playerName);
             recordLogin(playerName, gameEntryAt);
@@ -541,21 +564,38 @@ final class PlayerMonitorListener implements Listener {
     private void recordLogoutAt(String playerName, long timestamp) {
         try {
             service.recordLogout(playerName, timestamp);
-            log.info("recorded logout for " + playerName);
+            log.info("queued logout for " + playerName);
         } catch (IOException error) {
             log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
     }
 
     private StatScanResult queueStatScan(Collection<GameProfile> profiles, boolean applyCooldown, int priority) {
+        List<String> playerNames = profiles.stream()
+                .map(PlayerMonitorListener::nameOf)
+                .filter(name -> name != null && !name.isBlank())
+                .toList();
+        long now = System.currentTimeMillis();
+        for (String playerName : playerNames) {
+            if (onlinePlayers.put(normalize(playerName), playerName) == null) {
+                recordLogin(playerName, now);
+            }
+        }
+
+        Set<String> cooldownPlayers = Set.of();
+        if (applyCooldown && settings.statCooldownHours() > 0 && !playerNames.isEmpty()) {
+            long cutoffAt = now - TimeUnit.HOURS.toMillis(settings.statCooldownHours());
+            try {
+                cooldownPlayers = service.playersWithStatCapturedAtOrAfter(playerNames, cutoffAt);
+            } catch (IOException error) {
+                log.warn("failed to check batched stat cooldown: " + error.getMessage());
+            }
+        }
+
         int queued = 0;
         int cooldownSkipped = 0;
-        for (GameProfile profile : profiles) {
-            String playerName = nameOf(profile);
-            if (onlinePlayers.put(normalize(playerName), playerName) == null) {
-                recordLogin(playerName, System.currentTimeMillis());
-            }
-            if (applyCooldown && isAutomaticStatCooldownActive(playerName)) {
+        for (String playerName : playerNames) {
+            if (cooldownPlayers.contains(normalize(playerName))) {
                 cooldownSkipped++;
                 continue;
             }
@@ -655,7 +695,7 @@ final class PlayerMonitorListener implements Listener {
 
     private boolean isBrandNewPlayer(String playerName) {
         try {
-            return service.findRecord(playerName).isEmpty();
+            return !service.playerExists(playerName);
         } catch (IOException error) {
             log.warn("failed to check whether player is new " + playerName + ": " + error.getMessage());
             return false;
@@ -739,7 +779,7 @@ final class PlayerMonitorListener implements Listener {
     private void recordLogin(String playerName, long now) {
         try {
             service.recordLogin(playerName, now);
-            log.info("recorded login for " + playerName);
+            log.info("queued login for " + playerName);
         } catch (IOException error) {
             log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }

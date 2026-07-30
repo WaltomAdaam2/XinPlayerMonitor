@@ -6,6 +6,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,6 +33,7 @@ final class StatQueue {
         return thread;
     });
     private final AtomicBoolean draining = new AtomicBoolean();
+    private final AtomicBoolean closed = new AtomicBoolean();
     private final BooleanSupplier gameActive;
     private final Predicate<String> online;
     private final LongSupplier intervalMillis;
@@ -58,9 +60,15 @@ final class StatQueue {
     }
 
     boolean enqueue(String playerName, int priority) {
+        if (closed.get()) {
+            return false;
+        }
         String key = normalize(playerName);
         AtomicBoolean added = new AtomicBoolean();
         pendingByKey.compute(key, (ignored, existing) -> {
+            if (closed.get()) {
+                return existing;
+            }
             if (existing != null && existing.priority() >= priority) {
                 return existing;
             }
@@ -72,12 +80,18 @@ final class StatQueue {
             added.set(true);
             return replacement;
         });
-        startDrainIfNeeded();
+        if (added.get()) {
+            startDrainIfNeeded();
+        }
         return added.get();
     }
 
     boolean contains(String playerName) {
         return pendingByKey.containsKey(normalize(playerName));
+    }
+
+    int size() {
+        return pendingByKey.size();
     }
 
     Set<String> pendingKeysSnapshot() {
@@ -93,21 +107,33 @@ final class StatQueue {
     }
 
     void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
         clear();
         executor.shutdownNow();
     }
 
     private void startDrainIfNeeded() {
-        if (draining.compareAndSet(false, true)) {
+        if (closed.get() || !draining.compareAndSet(false, true)) {
+            return;
+        }
+        try {
             executor.execute(this::drain);
+        } catch (RejectedExecutionException error) {
+            draining.set(false);
         }
     }
 
     private void drain() {
+        if (closed.get()) {
+            draining.set(false);
+            return;
+        }
         QueuedPlayer item = nextCurrentItem();
         if (item == null) {
             draining.set(false);
-            if (!pending.isEmpty()) {
+            if (!closed.get() && !pending.isEmpty()) {
                 startDrainIfNeeded();
             }
             return;
@@ -120,13 +146,21 @@ final class StatQueue {
         } catch (RuntimeException error) {
             sendFailed.accept(item.playerName());
         } finally {
+            if (closed.get()) {
+                draining.set(false);
+                return;
+            }
             long delay;
             try {
                 delay = Math.max(1L, intervalMillis.getAsLong());
             } catch (RuntimeException ignored) {
                 delay = 1L;
             }
-            executor.schedule(this::drain, delay, TimeUnit.MILLISECONDS);
+            try {
+                executor.schedule(this::drain, delay, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException error) {
+                draining.set(false);
+            }
         }
     }
 
