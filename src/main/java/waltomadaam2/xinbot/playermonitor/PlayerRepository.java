@@ -7,8 +7,12 @@ import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -16,6 +20,7 @@ interface PlayerRepository extends AutoCloseable {
     void initialize() throws IOException;
 
     void setWarningSink(Consumer<String> warningSink);
+
     default void setInfoSink(Consumer<String> infoSink) {
     }
 
@@ -25,9 +30,11 @@ interface PlayerRepository extends AutoCloseable {
     default void setStatWriteFailureForTesting(Predicate<String> statWriteFailure) {
     }
 
+    /** Legacy JSON-store hooks. The SQLite backend intentionally does not cache player history. */
     default void trimCachedHistoryToConfiguredLimit() {
     }
 
+    /** Legacy JSON-store hooks. The SQLite backend intentionally does not cache player history. */
     default void evictIdleRecords() {
     }
 
@@ -39,12 +46,22 @@ interface PlayerRepository extends AutoCloseable {
 
     void recordStat(String playerName, StatSnapshot snapshot) throws IOException;
 
+    /**
+     * Legacy full-history read. Production command paths should prefer summary and paged query methods.
+     */
     PlayerRecord read(String playerName) throws IOException;
 
+    /**
+     * Legacy full-history lookup. Production command paths should prefer summary and paged query methods.
+     */
     Optional<PlayerRecord> find(String playerName) throws IOException;
 
     default Optional<PlayerRecord> findSummary(String playerName) throws IOException {
         return find(playerName);
+    }
+
+    default boolean playerExists(String playerName) throws IOException {
+        return findSummary(playerName).isPresent();
     }
 
     default Optional<StatSnapshot> latestStat(String playerName) throws IOException {
@@ -89,8 +106,20 @@ interface PlayerRepository extends AutoCloseable {
 
     List<String> listPlayerNames() throws IOException;
 
+    /**
+     * Non-blocking best-effort name snapshot for tab completion. Implementations may omit not-yet-committed names.
+     */
+    default List<String> listPlayerNamesSnapshot() throws IOException {
+        return listPlayerNames();
+    }
+
     default DatabaseStats databaseStats() throws IOException {
         return new DatabaseStats(listPlayerNames().size(), 0, 0, 0, 0);
+    }
+
+    default DatabaseHealth databaseHealth() throws IOException {
+        return new DatabaseHealth("UNKNOWN", false, 0, 0, 0L, 0L, "",
+                0L, 0L, 0L, 0L, 0L, 0L, 0L);
     }
 
     default boolean hasStatCapturedAtOrAfter(String playerName, long cutoffAt) throws IOException {
@@ -104,6 +133,27 @@ interface PlayerRepository extends AutoCloseable {
             }
         }
         return false;
+    }
+
+    default Set<String> playersWithStatCapturedAtOrAfter(Collection<String> playerNames, long cutoffAt)
+            throws IOException {
+        Set<String> result = new HashSet<>();
+        for (String playerName : playerNames) {
+            if (hasStatCapturedAtOrAfter(playerName, cutoffAt)) {
+                result.add(playerName.toLowerCase(Locale.ROOT));
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    /**
+     * Closes sessions left open by an earlier unclean shutdown. The caller should then record the current roster
+     * as a fresh set of sessions.
+     *
+     * @return number of stale open sessions closed
+     */
+    default int recoverOpenSessions(long recoveredAt) throws IOException {
+        return 0;
     }
 
     default void flush() throws IOException {

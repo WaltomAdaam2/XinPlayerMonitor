@@ -69,8 +69,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             "display-timezone",
             "recentlogin-count",
             "chat-count",
-            "cache-idle",
-            "max-cached-history",
             "backup-interval");
 
     private static final List<String> TIMEZONE_VALUES = MonitorSettingsStore.SUPPORTED_TIMEZONES;
@@ -114,12 +112,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             }
             return;
         }
-        if ("db-stat".equalsIgnoreCase(args[0])) {
+        if ("status".equalsIgnoreCase(args[0]) || "db-stat".equalsIgnoreCase(args[0])) {
             if (args.length == 1) {
-                databaseStats();
+                status();
             } else {
                 help();
             }
+            return;
+        }
+        if ("backup".equalsIgnoreCase(args[0])) {
+            backup(args);
             return;
         }
         player(args);
@@ -128,7 +130,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
         if (args == null || args.length == 0) {
-            return List.of("setting", "scan-stat", "db-stat", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
         }
         if ("setting".equalsIgnoreCase(args[0])) {
             return completeSetting(args);
@@ -136,8 +138,11 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         if ("scan-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
             return List.of();
         }
-        if ("db-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
+        if (("status".equalsIgnoreCase(args[0]) || "db-stat".equalsIgnoreCase(args[0])) && args.length > 1) {
             return List.of();
+        }
+        if ("backup".equalsIgnoreCase(args[0])) {
+            return completeBackup(args);
         }
         if (args.length == 1) {
             return completePlayerNames(args[0]);
@@ -173,14 +178,18 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         String value = lower(args[index]);
         if (index == 0) {
-            if ("setting".equals(value) || "scan-stat".equals(value) || "db-stat".equals(value)) {
+            if ("setting".equals(value) || "scan-stat".equals(value) || "status".equals(value)
+                    || "db-stat".equals(value) || "backup".equals(value)) {
                 return ROOT_COMMAND_STYLE;
             }
             return PLAYER_STYLE;
         }
         String root = lower(args[0]);
-        if ("scan-stat".equals(root) || "db-stat".equals(root)) {
+        if ("scan-stat".equals(root) || "status".equals(root) || "db-stat".equals(root)) {
             return AttributedStyle.DEFAULT;
+        }
+        if ("backup".equals(root)) {
+            return index == 1 ? PLAYER_ACTION_STYLE : AttributedStyle.DEFAULT;
         }
         if ("setting".equals(root)) {
             if (index == 1 && SETTING_ITEMS.contains(value)) {
@@ -218,9 +227,14 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
                     + ROOT_COMMAND + "scan-stat" + RESET;
         }
-        if (usage.equals("Usage: playermonitor db-stat")) {
+        if (usage.equals("Usage: playermonitor status")) {
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
-                    + ROOT_COMMAND + "db-stat" + RESET;
+                    + ROOT_COMMAND + "status" + RESET;
+        }
+        if (usage.startsWith("Usage: playermonitor backup")) {
+            String remainder = usage.substring("Usage: playermonitor backup".length());
+            return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                    + ROOT_COMMAND + "backup" + RESET + PLAYER_ACTION + remainder + RESET;
         }
         if (usage.startsWith("Usage: playermonitor " + PLAYER_PLACEHOLDER)) {
             return colorPlayerUsage(usage);
@@ -313,18 +327,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     settings.setChatCount(parsed);
                     print("聊天记录默认显示数量已设置为 " + parsed + "，已立即生效。");
                 }
-                case "cache-idle" -> {
-                    int parsed = parseInt(value, MINUTE_PLACEHOLDER);
-                    settings.setCacheIdleMinutes(parsed);
-                    service.applyCacheSettingsNow();
-                    print("缓存空闲释放时间已设置为 " + parsed + " 分钟，已立即生效。");
-                }
-                case "max-cached-history" -> {
-                    int parsed = parseInt(value, COUNT_PLACEHOLDER);
-                    settings.setMaxCachedHistory(parsed);
-                    service.applyCacheSettingsNow();
-                    print("每类最大内存历史缓存已设置为 " + parsed + " 条，已立即生效。");
-                }
+                case "cache-idle", "max-cached-history" ->
+                        print("该设置仅用于旧版内存存储，SQLite 后端不使用它，未修改设置。");
                 case "backup-interval" -> {
                     int parsed = parseBackupInterval(value);
                     settings.setBackupInterval(parsed);
@@ -440,10 +444,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             List<String> candidates = switch (lower(args[1])) {
                 case "scan-on-entry", "stat-enabled", "stat-output-hide", "scan-on-join",
                         "prioritize-join-stat" -> BOOLEAN_VALUES;
-                case "disconnect-timeout", "cache-idle" -> List.of(MINUTE_PLACEHOLDER);
+                case "disconnect-timeout" -> List.of(MINUTE_PLACEHOLDER);
                 case "stat-send-interval", "stat-timeout" -> List.of(MS_PLACEHOLDER);
                 case "stat-cooldown", "backup-interval" -> List.of(HOUR_PLACEHOLDER);
-                case "stat-attempts", "max-cached-history" -> List.of(COUNT_PLACEHOLDER);
+                case "stat-attempts" -> List.of(COUNT_PLACEHOLDER);
                 case "display-timezone" -> TIMEZONE_VALUES;
                 case "recentlogin-count" -> List.of(Integer.toString(settings.recentLoginCount()));
                 case "chat-count" -> List.of(Integer.toString(settings.chatCount()));
@@ -454,13 +458,38 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return List.of();
     }
 
+    private List<String> completeBackup(String[] args) {
+        List<String> actions = List.of("now", "status", "list", "verify");
+        if (args.length == 1) {
+            return actions;
+        }
+        if (args.length == 2) {
+            return matching(args[1], actions);
+        }
+        if (args.length == 3 && "verify".equalsIgnoreCase(args[1])) {
+            SQLiteBackupManager manager = backupManager;
+            if (manager == null) {
+                return List.of();
+            }
+            try {
+                return matching(args[2], manager.listBackups().stream()
+                        .map(SQLiteBackupManager.BackupFileInfo::filename)
+                        .toList());
+            } catch (IOException error) {
+                logger.warn("Unable to complete backup filename", error);
+                return List.of();
+            }
+        }
+        return List.of();
+    }
+
     private List<String> completePlayerNames(String input) {
         if (input == null || input.isEmpty()) {
-            return List.of("setting", "scan-stat", "db-stat", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
         }
         try {
             TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-            names.addAll(service.listPlayerNames());
+            names.addAll(service.listPlayerNamesSnapshot());
             names.addAll(listener.onlinePlayerNames());
             String prefix = input.toLowerCase(Locale.ROOT);
             List<String> matches = new ArrayList<>();
@@ -470,8 +499,11 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             if ("scan-stat".startsWith(prefix)) {
                 matches.add("scan-stat");
             }
-            if ("db-stat".startsWith(prefix)) {
-                matches.add("db-stat");
+            if ("status".startsWith(prefix)) {
+                matches.add("status");
+            }
+            if ("backup".startsWith(prefix)) {
+                matches.add("backup");
             }
             names.stream()
                     .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
@@ -499,8 +531,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         lines.add("显示时区: " + current.displayTimezone);
         lines.add("近期登录默认数量: " + current.recentLoginCount);
         lines.add("聊天默认数量: " + current.chatCount);
-        lines.add("缓存空闲释放: " + current.cacheIdleMinutes + " min");
-        lines.add("每类最大内存历史: " + current.maxCachedHistory);
         lines.add("自动备份间隔: " + current.backupInterval + " h");
         if (settings.hasDeferredStatSettings()) {
             lines.add("状态: Stat 设置已保存，等待当前请求完成后生效");
@@ -517,14 +547,175 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print("已将 " + queued + " 名在线玩家加入 Stat 扫描队列。");
     }
 
-    private void databaseStats() {
+    private void status() {
+        List<String> lines = new ArrayList<>();
+        try {
+            DatabaseHealth health = service.databaseHealth();
+            String condition;
+            double queueUsage = health.queueCapacity() <= 0
+                    ? 0.0
+                    : (double) health.queueSize() / (double) health.queueCapacity();
+            if ("FAILED".equals(health.writerState()) || !health.writerAlive()) {
+                condition = "ERROR";
+            } else if (health.pendingFailedEvents() > 0 || queueUsage >= 0.80) {
+                condition = "DEGRADED";
+            } else {
+                condition = "HEALTHY";
+            }
+            lines.add("健康状态: " + condition);
+            lines.add("Writer 状态: " + health.writerState() + " / alive=" + health.writerAlive());
+            lines.add("写入队列: " + health.queueSize() + " / " + health.queueCapacity());
+            lines.add("最近提交: " + optionalTime(health.lastCommittedAt()));
+            lines.add("最近失败: " + optionalTime(health.lastFailureAt()));
+            if (health.lastFailureAt() > 0 && health.lastFailureMessage() != null
+                    && !health.lastFailureMessage().isBlank()) {
+                lines.add("失败原因: " + health.lastFailureMessage());
+            }
+            lines.add("失败事件: pending=" + health.pendingFailedEvents()
+                    + ", replayed=" + health.replayedFailedEvents()
+                    + ", malformed=" + health.malformedFailedEvents()
+                    + ", file-lines=" + health.failedEventLines());
+            lines.add("数据库文件: db=" + humanBytes(health.databaseBytes())
+                    + ", wal=" + humanBytes(health.walBytes())
+                    + ", shm=" + humanBytes(health.shmBytes()));
+        } catch (IOException error) {
+            lines.add("数据库健康信息: 无法读取 - " + error.getMessage());
+        }
+
         try {
             DatabaseStats stats = service.databaseStats();
-            report("Database overview", databaseStatsLines(stats));
+            lines.addAll(databaseStatsLines(stats));
         } catch (IOException error) {
-            print("Unable to read database stats: " + error.getMessage());
+            lines.add("数据库记录统计: 无法读取 - " + error.getMessage());
+        }
+
+        SQLiteBackupManager manager = backupManager;
+        if (manager == null) {
+            lines.add("备份状态: unavailable");
+        } else {
+            try {
+                SQLiteBackupManager.BackupStatus backup = manager.status();
+                lines.add("备份调度: running=" + backup.schedulerRunning()
+                        + ", in-progress=" + backup.backupInProgress()
+                        + ", interval=" + backup.intervalHours() + " h");
+                lines.add("备份数量: " + backup.backupCount());
+                lines.add("最近备份: " + (backup.lastBackupAt() <= 0
+                        ? "无" : backup.lastBackupFile() + " @ " + format(backup.lastBackupAt())));
+                lines.add("下次备份: " + optionalTime(backup.nextBackupAt()));
+            } catch (IOException error) {
+                lines.add("备份状态: 无法读取 - " + error.getMessage());
+            }
+        }
+        report("PlayerMonitor status", lines);
+    }
+
+    private void backup(String[] args) {
+        if (args.length < 2) {
+            backupHelp();
+            return;
+        }
+        SQLiteBackupManager manager = backupManager;
+        if (manager == null) {
+            print("备份管理器不可用。");
+            return;
+        }
+        String action = lower(args[1]);
+        switch (action) {
+            case "now" -> {
+                if (args.length != 2) {
+                    backupHelp();
+                    return;
+                }
+                print("正在创建并校验数据库备份...");
+                if (!manager.backupNow()) {
+                    print("数据库备份失败或已有备份正在执行，请查看日志。");
+                    return;
+                }
+                try {
+                    SQLiteBackupManager.BackupStatus backup = manager.status();
+                    print("数据库备份完成: " + backup.lastBackupFile());
+                } catch (IOException error) {
+                    print("数据库备份已完成，但无法读取备份状态: " + error.getMessage());
+                }
+            }
+            case "status" -> {
+                if (args.length != 2) {
+                    backupHelp();
+                    return;
+                }
+                backupStatus(manager);
+            }
+            case "list" -> {
+                if (args.length != 2) {
+                    backupHelp();
+                    return;
+                }
+                backupList(manager);
+            }
+            case "verify" -> {
+                if (args.length != 3) {
+                    backupHelp();
+                    return;
+                }
+                SQLiteBackupManager.BackupVerification result = manager.verify(args[2]);
+                report("Backup verification", List.of(
+                        "文件: " + result.filename(),
+                        "结果: " + (result.valid() ? "VALID" : "INVALID"),
+                        "大小: " + humanBytes(result.sizeBytes()),
+                        "详情: " + result.detail()));
+            }
+            default -> backupHelp();
         }
     }
+
+    private void backupStatus(SQLiteBackupManager manager) {
+        try {
+            SQLiteBackupManager.BackupStatus backup = manager.status();
+            report("Backup status", List.of(
+                    "调度器运行: " + backup.schedulerRunning(),
+                    "备份进行中: " + backup.backupInProgress(),
+                    "自动备份间隔: " + backup.intervalHours() + " h",
+                    "备份数量: " + backup.backupCount(),
+                    "最近备份: " + (backup.lastBackupAt() <= 0
+                            ? "无" : backup.lastBackupFile() + " @ " + format(backup.lastBackupAt())),
+                    "下次备份: " + optionalTime(backup.nextBackupAt())));
+        } catch (IOException error) {
+            print("无法读取备份状态: " + error.getMessage());
+        }
+    }
+
+    private void backupList(SQLiteBackupManager manager) {
+        try {
+            List<SQLiteBackupManager.BackupFileInfo> backups = manager.listBackups();
+            if (backups.isEmpty()) {
+                report("Backup list", List.of("暂无备份文件"));
+                return;
+            }
+            List<String> lines = new ArrayList<>();
+            lines.add("备份总数: " + backups.size());
+            int shown = Math.min(20, backups.size());
+            for (int index = 0; index < shown; index++) {
+                SQLiteBackupManager.BackupFileInfo backup = backups.get(index);
+                lines.add("#" + (index + 1) + ": " + backup.filename()
+                        + " | " + format(backup.timestamp())
+                        + " | " + humanBytes(backup.sizeBytes()));
+            }
+            if (backups.size() > shown) {
+                lines.add("其余备份: " + (backups.size() - shown) + " 个未显示");
+            }
+            report("Backup list", lines);
+        } catch (IOException error) {
+            print("无法列出备份文件: " + error.getMessage());
+        }
+    }
+
+    private void backupHelp() {
+        print(colorUsage("Usage: playermonitor backup now"));
+        print(colorUsage("Usage: playermonitor backup status"));
+        print(colorUsage("Usage: playermonitor backup list"));
+        print(colorUsage("Usage: playermonitor backup verify <filename>"));
+    }
+
     private void stat(String playerName, Optional<StatSnapshot> snapshotOptional) {
         if (snapshotOptional.isEmpty()) {
             print("暂无 stat 记录: " + playerName);
@@ -641,7 +832,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private void help() {
         print(colorUsage("Usage: playermonitor setting <option> <value>"));
         print(colorUsage("Usage: playermonitor scan-stat"));
-        print(colorUsage("Usage: playermonitor db-stat"));
+        print(colorUsage("Usage: playermonitor status"));
+        print(colorUsage("Usage: playermonitor backup [now|status|list|verify <filename>]"));
         playerHelp();
     }
 
@@ -664,7 +856,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return switch (setting) {
             case "scan-on-entry", "stat-enabled", "stat-output-hide", "scan-on-join",
                     "prioritize-join-stat" -> TRUE_FALSE_PLACEHOLDER;
-            case "disconnect-timeout", "cache-idle" -> MINUTE_PLACEHOLDER;
+            case "disconnect-timeout" -> MINUTE_PLACEHOLDER;
             case "stat-send-interval", "stat-timeout" -> MS_PLACEHOLDER;
             case "stat-cooldown", "backup-interval" -> HOUR_PLACEHOLDER;
             case "display-timezone" -> TIMEZONE_PLACEHOLDER;
@@ -732,6 +924,27 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private String format(long timestamp) {
         return TIME_FORMAT.withZone(settings.displayZoneId()).format(Instant.ofEpochMilli(timestamp));
+    }
+
+    private String optionalTime(long timestamp) {
+        return timestamp <= 0L ? "无" : format(timestamp);
+    }
+
+    private static String humanBytes(long bytes) {
+        if (bytes < 0L) {
+            return "unknown";
+        }
+        if (bytes < 1024L) {
+            return bytes + " B";
+        }
+        double value = bytes;
+        String[] units = {"KiB", "MiB", "GiB", "TiB"};
+        int unit = -1;
+        do {
+            value /= 1024.0;
+            unit++;
+        } while (value >= 1024.0 && unit < units.length - 1);
+        return String.format(Locale.ROOT, "%.1f %s", value, units[unit]);
     }
 
     private static String highlightTimestamps(String line) {

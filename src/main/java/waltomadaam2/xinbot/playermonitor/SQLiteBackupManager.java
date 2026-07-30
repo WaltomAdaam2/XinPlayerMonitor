@@ -2,6 +2,7 @@ package waltomadaam2.xinbot.playermonitor;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -12,6 +13,8 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -25,7 +28,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * Manages automatic SQLite database backups.
+ * Manages automatic and manual SQLite database backups.
  * <p>
  * Uses {@code VACUUM INTO} for WAL-safe backups, validates each backup with
  * {@code PRAGMA integrity_check}, and persists the schedule by scanning existing
@@ -52,6 +55,7 @@ final class SQLiteBackupManager {
     private final AtomicLong scheduleGeneration = new AtomicLong();
     private final Object scheduleLock = new Object();
     private volatile ScheduledFuture<?> nextBackupTask;
+    private volatile long scheduledBackupAtMillis;
     private volatile int intervalHours;
 
     SQLiteBackupManager(Path dataDirectory, Path databasePath,
@@ -90,6 +94,7 @@ final class SQLiteBackupManager {
         }
         running.set(false);
         scheduleGeneration.incrementAndGet();
+        scheduledBackupAtMillis = 0L;
         synchronized (scheduleLock) {
             ScheduledFuture<?> task = nextBackupTask;
             if (task != null) {
@@ -114,11 +119,7 @@ final class SQLiteBackupManager {
         }
     }
 
-    /**
-     * Recalculates the next backup time based on a new interval, cancelling the
-     * currently scheduled task if one exists. Has no effect if the scheduler has
-     * not been started.
-     */
+    /** Recalculates the next backup time after the interval changes. */
     void reschedule(int newIntervalHours) {
         this.intervalHours = requirePositiveInterval(newIntervalHours);
         if (!running.get() || stopped.get()) {
@@ -136,11 +137,7 @@ final class SQLiteBackupManager {
         scheduleNext(generation);
     }
 
-    /**
-     * Synchronously executes one backup cycle. Intended for testing and
-     * for the very first backup on a fresh install. Returns true if the
-     * backup succeeded.
-     */
+    /** Synchronously executes one manual backup cycle. */
     boolean backupNow() {
         if (stopped.get()) {
             warn("Skipping backup: backup manager has already been stopped.");
@@ -157,18 +154,108 @@ final class SQLiteBackupManager {
         }
     }
 
-    /**
-     * Returns the epoch-millis of the next scheduled backup, calculated from the
-     * last successful backup time plus the current interval.
-     */
+    /** Returns the next schedule anchor used by the automatic scheduler. */
     long nextBackupTimeMillis() {
         long lastBackup = findLastSuccessfulBackupTime();
         return lastBackup + TimeUnit.HOURS.toMillis(requirePositiveInterval(intervalHours));
     }
 
-    // ------------------------------------------------------------------
-    // Internal
-    // ------------------------------------------------------------------
+    BackupStatus status() throws IOException {
+        List<BackupFileInfo> backups = listBackups();
+        BackupFileInfo latest = backups.isEmpty() ? null : backups.get(0);
+        long next = scheduledBackupAtMillis;
+        if (next <= 0L && running.get() && intervalHours > 0) {
+            next = nextBackupTimeMillis();
+        }
+        return new BackupStatus(
+                running.get() && !stopped.get(),
+                stopped.get(),
+                backupLock.isLocked(),
+                intervalHours,
+                latest == null ? 0L : latest.timestamp(),
+                latest == null ? "" : latest.filename(),
+                next,
+                backups.size());
+    }
+
+    List<BackupFileInfo> listBackups() throws IOException {
+        if (!Files.exists(dataDirectory)) {
+            return List.of();
+        }
+        try (Stream<Path> files = Files.list(dataDirectory)) {
+            return files
+                    .filter(Files::isRegularFile)
+                    .filter(path -> !Files.isSymbolicLink(path))
+                    .map(path -> backupInfo(path))
+                    .filter(java.util.Objects::nonNull)
+                    .sorted(Comparator.comparingLong(BackupFileInfo::timestamp).reversed()
+                            .thenComparing(BackupFileInfo::filename))
+                    .toList();
+        }
+    }
+
+    BackupVerification verify(String filename) {
+        if (filename == null || filename.isBlank()) {
+            return new BackupVerification("", false, 0L, "Backup filename is required");
+        }
+        String trimmed = filename.trim();
+        Path supplied;
+        try {
+            supplied = Path.of(trimmed);
+        } catch (InvalidPathException error) {
+            return new BackupVerification(trimmed, false, 0L, "Invalid backup filename");
+        }
+        if (!supplied.getFileName().toString().equals(trimmed) || !BACKUP_FILE_PATTERN.matcher(trimmed).matches()) {
+            return new BackupVerification(trimmed, false, 0L, "Invalid backup filename");
+        }
+        Path root = dataDirectory.toAbsolutePath().normalize();
+        Path backup = root.resolve(trimmed).normalize();
+        if (!root.equals(backup.getParent())) {
+            return new BackupVerification(trimmed, false, 0L, "Backup path escapes the data directory");
+        }
+        if (!Files.isRegularFile(backup)) {
+            return new BackupVerification(trimmed, false, 0L, "Backup file does not exist");
+        }
+        if (Files.isSymbolicLink(backup)) {
+            return new BackupVerification(trimmed, false, 0L, "Symbolic-link backups are not allowed");
+        }
+        try {
+            Path realRoot = root.toRealPath();
+            Path realBackup = backup.toRealPath();
+            if (!realRoot.equals(realBackup.getParent())) {
+                return new BackupVerification(trimmed, false, 0L, "Backup path escapes the data directory");
+            }
+        } catch (IOException error) {
+            return new BackupVerification(trimmed, false, 0L,
+                    "Unable to resolve backup path: " + error.getMessage());
+        }
+        long size;
+        try {
+            size = Files.size(backup);
+        } catch (IOException error) {
+            return new BackupVerification(trimmed, false, 0L, "Unable to read backup size: " + error.getMessage());
+        }
+        try (Connection connection = openBackupConnection(backup);
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("PRAGMA integrity_check")) {
+            String result = resultSet.next() ? resultSet.getString(1) : "";
+            if (!"ok".equalsIgnoreCase(result)) {
+                return new BackupVerification(trimmed, false, size, "integrity_check: " + result);
+            }
+        } catch (SQLException error) {
+            return new BackupVerification(trimmed, false, size, "Unable to open backup: " + error.getMessage());
+        }
+        try (Connection connection = openBackupConnection(backup);
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("PRAGMA foreign_key_check")) {
+            if (resultSet.next()) {
+                return new BackupVerification(trimmed, false, size, "foreign_key_check reported violations");
+            }
+        } catch (SQLException error) {
+            return new BackupVerification(trimmed, false, size, "Unable to run foreign_key_check: " + error.getMessage());
+        }
+        return new BackupVerification(trimmed, true, size, "ok");
+    }
 
     private void scheduleNext(long generation) {
         if (!isCurrentGeneration(generation)) {
@@ -183,13 +270,15 @@ final class SQLiteBackupManager {
             info("Next automatic backup is overdue; scheduling in 1 minute.");
         }
 
+        long scheduledAt = now + delayMillis;
         synchronized (scheduleLock) {
             if (!isCurrentGeneration(generation)) {
                 return;
             }
+            scheduledBackupAtMillis = scheduledAt;
             nextBackupTask = scheduler.schedule(() -> executeBackup(generation), delayMillis, TimeUnit.MILLISECONDS);
         }
-        info("Next automatic backup at " + Instant.ofEpochMilli(now + delayMillis)
+        info("Next automatic backup at " + Instant.ofEpochMilli(scheduledAt)
                 + " (in " + formatDuration(delayMillis) + ")");
     }
 
@@ -226,11 +315,10 @@ final class SQLiteBackupManager {
     }
 
     private boolean doBackup() {
-        // Flush failures must abort the backup rather than being logged and ignored.
         try {
             flusher.run();
         } catch (RuntimeException error) {
-            warn("Automatic backup aborted: flush failed: " + error.getMessage());
+            warn("Database backup aborted: flush failed: " + error.getMessage());
             return false;
         }
 
@@ -240,9 +328,6 @@ final class SQLiteBackupManager {
 
         try {
             Files.deleteIfExists(temp);
-
-            // VACUUM INTO reads the complete committed database, including WAL content.
-            // A forced TRUNCATE checkpoint is unnecessary and can create avoidable lock contention.
             try (Connection connection = openMainConnection();
                  Statement statement = connection.createStatement()) {
                 String escapedPath = temp.toAbsolutePath().toString().replace("'", "''");
@@ -261,16 +346,15 @@ final class SQLiteBackupManager {
             Files.move(temp, target);
             targetCreatedByThisRun = true;
             cleanupWalFilesFor(target);
-            info("Automatic backup completed: " + target.getFileName());
+            info("Database backup completed: " + target.getFileName());
             return true;
         } catch (Exception error) {
-            warn("Automatic backup failed: " + error.getMessage());
+            warn("Database backup failed: " + error.getMessage());
             try {
                 Files.deleteIfExists(temp);
             } catch (IOException ignored) {
                 // best effort cleanup
             }
-            // Never delete a pre-existing backup after a same-second filename collision.
             if (targetCreatedByThisRun) {
                 try {
                     Files.deleteIfExists(target);
@@ -295,23 +379,27 @@ final class SQLiteBackupManager {
         throw new IllegalStateException("Unable to allocate a unique backup filename");
     }
 
-    /**
-     * Scans the data directory for existing backup files and returns the
-     * most recent backup's epoch-millis. If no backups exist, returns the
-     * current time so the interval counts from now.
-     */
     private long findLastSuccessfulBackupTime() {
-        try (Stream<Path> files = Files.list(dataDirectory)) {
-            return files
-                    .map(path -> path.getFileName().toString())
-                    .filter(name -> name.startsWith(BACKUP_PREFIX) && name.endsWith(BACKUP_SUFFIX))
-                    .map(this::parseBackupTimestamp)
-                    .filter(ts -> ts > 0L)
-                    .max(Long::compare)
-                    .orElse(System.currentTimeMillis());
+        try {
+            List<BackupFileInfo> backups = listBackups();
+            return backups.isEmpty() ? System.currentTimeMillis() : backups.get(0).timestamp();
         } catch (IOException error) {
             warn("Unable to scan backup directory: " + error.getMessage());
             return System.currentTimeMillis();
+        }
+    }
+
+    private BackupFileInfo backupInfo(Path path) {
+        String filename = path.getFileName().toString();
+        long timestamp = parseBackupTimestamp(filename);
+        if (timestamp <= 0L) {
+            return null;
+        }
+        try {
+            return new BackupFileInfo(filename, timestamp, Files.size(path));
+        } catch (IOException error) {
+            warn("Unable to read backup file size for " + filename + ": " + error.getMessage());
+            return new BackupFileInfo(filename, timestamp, -1L);
         }
     }
 
@@ -338,13 +426,15 @@ final class SQLiteBackupManager {
     }
 
     private Connection openBackupConnection(Path path) throws SQLException {
-        return DriverManager.getConnection("jdbc:sqlite:" + path.toAbsolutePath());
+        Connection connection = DriverManager.getConnection("jdbc:sqlite:" + path.toAbsolutePath());
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("PRAGMA query_only = ON");
+        }
+        return connection;
     }
 
     private void cleanupWalFilesFor(Path backupPath) {
         String name = backupPath.getFileName().toString();
-        // VACUUM INTO creates a standalone DB; WAL/SHM should not exist,
-        // but clean them up if they do.
         try {
             Files.deleteIfExists(backupPath.resolveSibling(name + "-wal"));
             Files.deleteIfExists(backupPath.resolveSibling(name + "-shm"));
@@ -369,5 +459,16 @@ final class SQLiteBackupManager {
 
     private void warn(String message) {
         warningSink.accept(message);
+    }
+
+    record BackupFileInfo(String filename, long timestamp, long sizeBytes) {
+    }
+
+    record BackupStatus(boolean schedulerRunning, boolean stopped, boolean backupInProgress,
+                        int intervalHours, long lastBackupAt, String lastBackupFile,
+                        long nextBackupAt, int backupCount) {
+    }
+
+    record BackupVerification(String filename, boolean valid, long sizeBytes, String detail) {
     }
 }

@@ -7,9 +7,11 @@ import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -76,15 +78,23 @@ public final class PlayerMonitorService {
         store.recordStat(playerName, snapshot);
     }
 
+    /** @deprecated Prefer summary and bounded query methods. */
+    @Deprecated
     public PlayerRecord getRecord(String playerName) throws IOException {
         return store.read(playerName);
     }
 
+    /** @deprecated Prefer findRecordSummary and bounded query methods. */
+    @Deprecated
     public Optional<PlayerRecord> findRecord(String playerName) throws IOException {
         return store.find(playerName);
     }
     public Optional<PlayerRecord> findRecordSummary(String playerName) throws IOException {
         return store.findSummary(playerName);
+    }
+
+    public boolean playerExists(String playerName) throws IOException {
+        return store.playerExists(playerName);
     }
 
     public Optional<StatSnapshot> latestStat(String playerName) throws IOException {
@@ -115,6 +125,15 @@ public final class PlayerMonitorService {
         return store.hasStatCapturedAtOrAfter(playerName, cutoffAt);
     }
 
+    public Set<String> playersWithStatCapturedAtOrAfter(Collection<String> playerNames, long cutoffAt)
+            throws IOException {
+        return store.playersWithStatCapturedAtOrAfter(playerNames, cutoffAt);
+    }
+
+    public int recoverOpenSessions(long recoveredAt) throws IOException {
+        return store.recoverOpenSessions(recoveredAt);
+    }
+
     public Optional<LoginSession> latestLogin(PlayerRecord record) {
         return record.loginSessions.stream()
                 .max(Comparator.comparingLong(session -> session.loginAt));
@@ -134,8 +153,16 @@ public final class PlayerMonitorService {
         return store.listPlayerNames();
     }
 
+    public List<String> listPlayerNamesSnapshot() throws IOException {
+        return store.listPlayerNamesSnapshot();
+    }
+
     public DatabaseStats databaseStats() throws IOException {
         return store.databaseStats();
+    }
+
+    public DatabaseHealth databaseHealth() throws IOException {
+        return store.databaseHealth();
     }
 
     public void backupTo(Path target) throws IOException {
