@@ -19,6 +19,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -484,11 +485,132 @@ class SQLitePlayerRecordStoreTest {
                     () -> store.recordChat("Queue", "third", 102L));
             assertTrue(error.getMessage().contains("SQLite write queue is full"));
             assertTrue(warnings.stream().anyMatch(line -> line.contains("SQLite write queue is full")));
+            Path failedEvents = directory.resolve("failed-events.jsonl");
+            assertTrue(Files.exists(failedEvents), "queue rejection must be persisted for replay");
+            assertTrue(Files.readString(failedEvents, StandardCharsets.UTF_8).contains("third"),
+                    "the rejected event payload must be present in failed-events.jsonl");
+            DatabaseHealth health = store.databaseHealth();
+            assertTrue(health.failedEventLines() >= 1L);
+            assertTrue(health.pendingFailedEvents() >= 1L);
         } finally {
             store.setWriteDelayForTesting(0L);
             store.close();
         }
     }
+
+    @Test
+    void failedEventsReplayExactlyOnceAndKeepOriginalDeadLetterFile() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-failed-replay");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        SQLitePlayerRecordStore failing = new SQLitePlayerRecordStore(directory, settings);
+        failing.setStatWriteFailureForTesting(name -> name.equals("replayme"));
+        failing.initialize();
+        StatSnapshot snapshot = new StatSnapshot();
+        snapshot.capturedAt = 1234L;
+        snapshot.deathCount = 9;
+        try {
+            failing.recordStat("ReplayMe", snapshot);
+            assertThrows(IOException.class, failing::flush);
+        } finally {
+            failing.close();
+        }
+
+        Path failedEvents = directory.resolve("failed-events.jsonl");
+        assertTrue(Files.exists(failedEvents));
+        String originalDeadLetter = Files.readString(failedEvents, StandardCharsets.UTF_8);
+        assertTrue(originalDeadLetter.contains("ReplayMe"));
+
+        SQLitePlayerRecordStore replayed = new SQLitePlayerRecordStore(directory, settings);
+        replayed.initialize();
+        try {
+            assertTrue(replayed.latestStat("ReplayMe").isPresent());
+            DatabaseHealth health = replayed.databaseHealth();
+            assertEquals(1L, health.replayedFailedEvents());
+            assertEquals(0L, health.pendingFailedEvents());
+        } finally {
+            replayed.close();
+        }
+        assertEquals(originalDeadLetter, Files.readString(failedEvents, StandardCharsets.UTF_8),
+                "successful replay must retain the original append-only failed-events file");
+
+        SQLitePlayerRecordStore reopened = new SQLitePlayerRecordStore(directory, settings);
+        reopened.initialize();
+        try {
+            assertTrue(reopened.latestStat("ReplayMe").isPresent(),
+                    "restarting again must retain the replayed stat");
+            try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+                assertEquals(1, countRows(connection, "replayed_failed_events"));
+                assertEquals(1, countRows(connection, "stat_snapshots"));
+            }
+        } finally {
+            reopened.close();
+        }
+    }
+
+    @Test
+    void recoversEveryStaleOpenSessionBeforeFreshRosterIsRecorded() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-open-session-recovery");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        try {
+            store.recordLogin("StillHere", 100L);
+            store.recordLogin("AlreadyGone", 200L);
+            store.flush();
+
+            assertEquals(2, store.recoverOpenSessions(1_000L));
+            DatabaseStats recovered = store.databaseStats();
+            assertEquals(0, recovered.openSessions());
+
+            store.recordLogin("StillHere", 1_000L);
+            store.flush();
+            DatabaseStats afterFreshRoster = store.databaseStats();
+            assertEquals(1, afterFreshRoster.openSessions());
+            assertEquals(3, afterFreshRoster.sessions());
+        } finally {
+            store.close();
+        }
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"));
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(
+                     "SELECT login_at, logout_at FROM sessions ORDER BY login_at")) {
+            assertTrue(resultSet.next());
+            assertEquals(100L, resultSet.getLong("login_at"));
+            assertEquals(1_000L, resultSet.getLong("logout_at"));
+            assertTrue(resultSet.next());
+            assertEquals(200L, resultSet.getLong("login_at"));
+            assertEquals(1_000L, resultSet.getLong("logout_at"));
+            assertTrue(resultSet.next());
+            assertEquals(1_000L, resultSet.getLong("login_at"));
+            assertEquals(0L, resultSet.getLong("logout_at"));
+            assertTrue(resultSet.wasNull());
+        }
+    }
+
+    @Test
+    void batchedStatCooldownLookupNormalizesNamesAndUsesOneResultSet() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-batched-stat-cooldown");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        try {
+            StatSnapshot recent = new StatSnapshot();
+            recent.capturedAt = 2_000L;
+            store.recordStat("Alice", recent);
+            StatSnapshot old = new StatSnapshot();
+            old.capturedAt = 500L;
+            store.recordStat("Bob", old);
+
+            Set<String> matches = store.playersWithStatCapturedAtOrAfter(
+                    List.of("ALICE", "bob", "Missing", "alice"), 1_000L);
+
+            assertEquals(Set.of("alice"), matches);
+            assertTrue(store.playerExists("aLiCe"));
+            assertFalse(store.playerExists("Missing"));
+        } finally {
+            store.close();
+        }
+    }
+
     @Test
     void stressWritesOneHundredThousandChatsAndInterleavedSessions() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-stress");

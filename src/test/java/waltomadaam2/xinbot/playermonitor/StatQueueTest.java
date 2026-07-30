@@ -6,8 +6,10 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StatQueueTest {
@@ -54,6 +56,41 @@ class StatQueueTest {
             releaseFirst.countDown();
             queue.close();
         }
+    }
+
+    @Test
+    void closeIsIdempotentAndRejectsNewWorkWithoutRescheduling() throws Exception {
+        CountDownLatch senderStarted = new CountDownLatch(1);
+        CountDownLatch releaseSender = new CountDownLatch(1);
+        AtomicInteger sends = new AtomicInteger();
+        StatQueue queue = new StatQueue(
+                () -> true,
+                ignored -> true,
+                () -> 1L,
+                command -> {
+                    sends.incrementAndGet();
+                    senderStarted.countDown();
+                    try {
+                        releaseSender.await(2, TimeUnit.SECONDS);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                },
+                ignored -> {
+                },
+                ignored -> {
+                });
+
+        queue.enqueue("Closing", StatQueue.PRIORITY_MANUAL);
+        assertTrue(senderStarted.await(2, TimeUnit.SECONDS));
+        queue.close();
+        queue.close();
+        releaseSender.countDown();
+
+        assertFalse(queue.enqueue("AfterClose", StatQueue.PRIORITY_MANUAL));
+        Thread.sleep(25L);
+        assertEquals(1, sends.get());
+        assertEquals(0, queue.size());
     }
 
     @Test

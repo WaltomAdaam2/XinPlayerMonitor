@@ -40,6 +40,21 @@ class StatResponseCollectorTest {
     }
 
     @Test
+    void acceptsAClosingSeparatorWithoutTheOptionalPermissionsField() {
+        StatResponseCollector collector = new StatResponseCollector();
+        collector.expect("NoPermissions");
+
+        collector.accept("§b玩家名称: NoPermissions");
+        collector.accept("§b队伍: Builders\n§b死亡计数: 12 次\n§b在线次数: 33 次");
+        StatResponseCollector.CapturedStat captured = collector.accept("----------------------").orElseThrow();
+
+        assertEquals("NoPermissions", captured.playerName());
+        assertEquals(12, captured.snapshot().deathCount);
+        assertEquals(33, captured.snapshot().onlineCount);
+        assertEquals("Builders", captured.snapshot().team);
+    }
+
+    @Test
     void timeoutClearsActivePartialResponseState() throws Exception {
         StatResponseCollector collector = new StatResponseCollector(1L);
         collector.expect("Alice");

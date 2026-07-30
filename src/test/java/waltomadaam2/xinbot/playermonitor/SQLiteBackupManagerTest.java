@@ -447,6 +447,50 @@ class SQLiteBackupManagerTest {
         }
     }
 
+
+    @Test
+    void statusListAndVerifyExposeManualBackupOperations() throws Exception {
+        Path dataDir = temporaryDirectory.resolve("playermonitor-management");
+        Files.createDirectories(dataDir);
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(dataDir, new MonitorSettings.Database());
+        store.initialize();
+        store.recordChat("BackupUser", "persisted", 100L);
+        store.flush();
+        store.close();
+
+        SQLiteBackupManager manager = createBackupManager(dataDir, dataDir.resolve("xinpm.db"), () -> {
+        });
+        manager.start(168);
+        assertTrue(manager.backupNow());
+
+        SQLiteBackupManager.BackupStatus status = manager.status();
+        assertTrue(status.schedulerRunning());
+        assertEquals(168, status.intervalHours());
+        assertEquals(1, status.backupCount());
+        assertTrue(status.lastBackupAt() > 0L);
+        assertTrue(status.nextBackupAt() > 0L);
+
+        List<SQLiteBackupManager.BackupFileInfo> backups = manager.listBackups();
+        assertEquals(1, backups.size());
+        SQLiteBackupManager.BackupVerification verification = manager.verify(backups.get(0).filename());
+        assertTrue(verification.valid());
+        assertEquals("ok", verification.detail());
+        assertTrue(verification.sizeBytes() > 0L);
+    }
+
+    @Test
+    void verifyRejectsPathTraversalAndNonBackupNames() throws Exception {
+        Path dataDir = temporaryDirectory.resolve("playermonitor-safe-verify");
+        Files.createDirectories(dataDir);
+        SQLiteBackupManager manager = createBackupManager(dataDir, dataDir.resolve("xinpm.db"), () -> {
+        });
+
+        assertFalse(manager.verify("../xinpm-auto-backup-20260729-120000.db").valid());
+        assertFalse(manager.verify("xinpm.db").valid());
+        assertFalse(manager.verify("\u0000").valid());
+        assertFalse(manager.verify("xinpm-auto-backup-20260729-120000.db").valid());
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------

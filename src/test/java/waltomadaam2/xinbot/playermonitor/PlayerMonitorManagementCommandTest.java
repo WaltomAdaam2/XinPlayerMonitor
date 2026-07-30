@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerMonitorManagementCommandTest {
@@ -199,10 +200,30 @@ class PlayerMonitorManagementCommandTest {
 
 
     @Test
-    void dbStatRootCommandUsesLavenderAndNoTrailingArguments() {
-        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"db-stat"}, 0));
+    void statusAndBackupCommandsUseExpectedStylesAndRejectInvalidTrailingArguments() {
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"status"}, 0));
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 0));
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 1));
         assertEquals(AttributedStyle.DEFAULT.getStyle(),
-                PlayerMonitorManagementCommand.styleForArgument(new String[]{"db-stat", "extra"}, 1).getStyle());
+                PlayerMonitorManagementCommand.styleForArgument(new String[]{"status", "extra"}, 1).getStyle());
+        assertEquals(AttributedStyle.DEFAULT.getStyle(),
+                PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now", "extra"}, 2).getStyle());
+        // Compatibility alias remains accepted but is intentionally omitted from normal completions/help.
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"db-stat"}, 0));
+    }
+
+    @Test
+    void rootAndBackupTabCompletionUseNestedBackupSyntax() throws Exception {
+        PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                null, null, null, NOPLogger.NOP_LOGGER);
+        List<String> roots = command.onTabComplete(null, "playermonitor", new String[]{""});
+        assertTrue(roots.contains("status"));
+        assertTrue(roots.contains("backup"));
+        assertFalse(roots.contains("db-stat"));
+        assertEquals(List.of("now", "status", "list", "verify"),
+                command.onTabComplete(null, "playermonitor", new String[]{"backup", ""}));
+        assertEquals(List.of(),
+                command.onTabComplete(null, "playermonitor", new String[]{"backup", "now", ""}));
     }
 
     @Test

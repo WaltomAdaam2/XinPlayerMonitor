@@ -86,6 +86,18 @@ class PlayerMonitorListenerReconnectTest {
     }
 
     @Test
+    void staleSessionRecoveryRunsOnlyOnFirstColdGameEntry() throws Exception {
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        service.recordLogin("CurrentSession", 100L);
+        service.flush();
+
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+
+        assertEquals(1, service.getRecord("CurrentSession").loginSessions.size());
+        assertNull(service.getRecord("CurrentSession").loginSessions.get(0).logoutAt);
+    }
+
+    @Test
     void timeoutClosesOldSessionsAndLateReconnectStartsNewSessions() throws Exception {
         GameProfile player = profile("Player");
         listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));

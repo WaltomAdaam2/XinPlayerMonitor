@@ -21,6 +21,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -70,6 +71,19 @@ class PlayerMonitorListenerChatLogTest {
 
         assertFalse(Files.exists(logFile),
                 "successful INFO-level player activity must not create a file log");
+    }
+
+    @Test
+    void storesTheExactRawChatMessageWithoutEmojiOrWhitespaceNormalization() throws Exception {
+        GameProfile profile = profile("RawChatter");
+        String raw = "  hello  ✅ → 😀  world  ";
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        listener.onPublicChat(new PublicChatEvent(profile, raw));
+
+        var chats = service.recentChats("RawChatter", 10);
+        assertEquals(1, chats.size());
+        assertEquals(raw, chats.get(0).message);
     }
 
     @Test
