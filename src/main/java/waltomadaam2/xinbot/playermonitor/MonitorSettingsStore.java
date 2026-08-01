@@ -240,6 +240,10 @@ final class MonitorSettingsStore {
         return settings.backupInterval;
     }
 
+    synchronized int backupMaxCount() {
+        return settings.backupMaxCount;
+    }
+
     synchronized MonitorSettings.Database database() {
         return settings.database == null ? new MonitorSettings.Database() : settings.database.copy();
     }
@@ -326,6 +330,11 @@ final class MonitorSettingsStore {
             throw new IllegalArgumentException("Backup interval must be greater than 0 hours");
         }
         updateSetting(updated -> updated.backupInterval = value);
+    }
+
+    synchronized void setBackupMaxCount(int value) throws IOException {
+        validatePositive(value, "Backup max count must be greater than 0");
+        updateSetting(updated -> updated.backupMaxCount = value);
     }
 
     private void updateStatSetting(Consumer<MonitorSettings> update) throws IOException {
@@ -444,6 +453,11 @@ final class MonitorSettingsStore {
             warningSink.accept("Invalid backupInterval=" + value.backupInterval
                     + "; using default " + MonitorSettings.DEFAULT_BACKUP_INTERVAL_HOURS + ".");
             value.backupInterval = MonitorSettings.DEFAULT_BACKUP_INTERVAL_HOURS;
+        }
+        if (value.backupMaxCount <= 0) {
+            warningSink.accept("Invalid backupMaxCount=" + value.backupMaxCount
+                    + "; using default " + MonitorSettings.DEFAULT_BACKUP_MAX_COUNT + ".");
+            value.backupMaxCount = MonitorSettings.DEFAULT_BACKUP_MAX_COUNT;
         }
         value.displayTimezone = canonicalTimezone(value.displayTimezone);
         normalizeDatabaseSettings(value);

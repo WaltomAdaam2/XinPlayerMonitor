@@ -104,6 +104,14 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             setting(args);
             return;
         }
+        if ("setting-status".equalsIgnoreCase(args[0])) {
+            if (args.length == 1) {
+                showSettings();
+            } else {
+                help();
+            }
+            return;
+        }
         if ("scan-stat".equalsIgnoreCase(args[0])) {
             if (args.length == 1) {
                 scan();
@@ -130,10 +138,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
         if (args == null || args.length == 0) {
-            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
+            return List.of("setting", "setting-status", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
         }
         if ("setting".equalsIgnoreCase(args[0])) {
             return completeSetting(args);
+        }
+        if ("setting-status".equalsIgnoreCase(args[0]) && args.length > 1) {
+            return List.of();
         }
         if ("scan-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
             return List.of();
@@ -178,14 +189,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         String value = lower(args[index]);
         if (index == 0) {
-            if ("setting".equals(value) || "scan-stat".equals(value) || "status".equals(value)
+            if ("setting".equals(value) || "setting-status".equals(value)
+                    || "scan-stat".equals(value) || "status".equals(value)
                     || "db-stat".equals(value) || "backup".equals(value)) {
                 return ROOT_COMMAND_STYLE;
             }
             return PLAYER_STYLE;
         }
         String root = lower(args[0]);
-        if ("scan-stat".equals(root) || "status".equals(root) || "db-stat".equals(root)) {
+        if ("setting-status".equals(root) || "scan-stat".equals(root)
+                || "status".equals(root) || "db-stat".equals(root)) {
             return AttributedStyle.DEFAULT;
         }
         if ("backup".equals(root)) {
@@ -223,6 +236,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     + SETTING_NAME + settingName + RESET
                     + (remainder.isEmpty() ? "" : " " + SETTING_VALUE + remainder + RESET);
         }
+        if (usage.equals("Usage: playermonitor setting-status")) {
+            return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
+                    + ROOT_COMMAND + "setting-status" + RESET;
+        }
         if (usage.equals("Usage: playermonitor scan-stat")) {
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
                     + ROOT_COMMAND + "scan-stat" + RESET;
@@ -256,7 +273,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void setting(String[] args) {
         if (args.length == 1) {
-            showSettings();
+            settingHelp();
             return;
         }
         if (args.length != 3) {
@@ -459,12 +476,15 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private List<String> completeBackup(String[] args) {
-        List<String> actions = List.of("now", "status", "list", "verify");
+        List<String> actions = List.of("now", "status", "list", "verify", "limit");
         if (args.length == 1) {
             return actions;
         }
         if (args.length == 2) {
             return matching(args[1], actions);
+        }
+        if (args.length == 3 && "limit".equalsIgnoreCase(args[1])) {
+            return matching(args[2], List.of(Integer.toString(settings.backupMaxCount())));
         }
         if (args.length == 3 && "verify".equalsIgnoreCase(args[1])) {
             SQLiteBackupManager manager = backupManager;
@@ -485,7 +505,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private List<String> completePlayerNames(String input) {
         if (input == null || input.isEmpty()) {
-            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
+            return List.of("setting", "setting-status", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
         }
         try {
             TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -495,6 +515,9 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             List<String> matches = new ArrayList<>();
             if ("setting".startsWith(prefix)) {
                 matches.add("setting");
+            }
+            if ("setting-status".startsWith(prefix)) {
+                matches.add("setting-status");
             }
             if ("scan-stat".startsWith(prefix)) {
                 matches.add("scan-stat");
@@ -517,25 +540,35 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void showSettings() {
         MonitorSettings current = settings.get();
-        List<String> lines = new ArrayList<>();
-        lines.add("进入 Game 自动扫描: " + state(current.scanOnEntry));
-        lines.add("断线确认时间: " + current.disconnectTimeoutMinutes + " min");
-        lines.add("Stat 自动扫描总开关: " + state(current.statEnabled));
-        lines.add("Stat 发送间隔: " + current.statSendIntervalMillis + " ms");
-        lines.add("Stat 输出隐藏: " + state(current.statOutputHide));
-        lines.add("自动 Stat 冷却: " + current.statCooldownHours + " h");
-        lines.add("Stat 响应超时: " + current.statTimeoutMillis + " ms");
-        lines.add("Stat 最大尝试次数: " + current.statAttempts);
-        lines.add("玩家加入自动扫描: " + state(current.scanOnJoin));
-        lines.add("新加入玩家优先扫描: " + state(current.prioritizeJoinStat));
-        lines.add("显示时区: " + current.displayTimezone);
-        lines.add("近期登录默认数量: " + current.recentLoginCount);
-        lines.add("聊天默认数量: " + current.chatCount);
-        lines.add("自动备份间隔: " + current.backupInterval + " h");
+        List<String> lines = new ArrayList<>(settingStatusLines(current));
         if (settings.hasDeferredStatSettings()) {
             lines.add("状态: Stat 设置已保存，等待当前请求完成后生效");
         }
         report("PlayerMonitor 设置", lines);
+    }
+
+    static List<String> settingUsageLines() {
+        return SETTING_ITEMS.stream()
+                .map(item -> "Usage: playermonitor setting " + item + " " + placeholderFor(item))
+                .toList();
+    }
+
+    static List<String> settingStatusLines(MonitorSettings current) {
+        return List.of(
+                "进入 Game 自动扫描: " + state(current.scanOnEntry),
+                "断线确认时间: " + current.disconnectTimeoutMinutes + " min",
+                "Stat 自动扫描总开关: " + state(current.statEnabled),
+                "Stat 发送间隔: " + current.statSendIntervalMillis + " ms",
+                "Stat 输出隐藏: " + state(current.statOutputHide),
+                "自动 Stat 冷却: " + current.statCooldownHours + " h",
+                "Stat 响应超时: " + current.statTimeoutMillis + " ms",
+                "Stat 最大尝试次数: " + current.statAttempts,
+                "玩家加入自动扫描: " + state(current.scanOnJoin),
+                "新加入玩家优先扫描: " + state(current.prioritizeJoinStat),
+                "显示时区: " + current.displayTimezone,
+                "近期登录默认数量: " + current.recentLoginCount,
+                "聊天默认数量: " + current.chatCount,
+                "自动备份间隔: " + current.backupInterval + " h");
     }
 
     private void scan() {
@@ -549,6 +582,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void status() {
         List<String> lines = new ArrayList<>();
+        PlayerMonitorListener.StatScanStatus scan = listener.statScanStatus();
+        lines.add("Stat 扫描: game=" + scan.gameActive()
+                + ", online=" + scan.onlinePlayers()
+                + ", queued=" + scan.queued()
+                + ", pending=" + scan.pendingDispatches()
+                + ", active=" + scan.activeCycles()
+                + ", waiting-response=" + scan.waitingResponse());
         try {
             DatabaseHealth health = service.databaseHealth();
             String condition;
@@ -598,7 +638,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 lines.add("备份调度: running=" + backup.schedulerRunning()
                         + ", in-progress=" + backup.backupInProgress()
                         + ", interval=" + backup.intervalHours() + " h");
-                lines.add("备份数量: " + backup.backupCount());
+                lines.add("备份数量: " + backup.backupCount() + " / " + backup.maxBackupCount());
                 lines.add("最近备份: " + (backup.lastBackupAt() <= 0
                         ? "无" : backup.lastBackupFile() + " @ " + format(backup.lastBackupAt())));
                 lines.add("下次备份: " + optionalTime(backup.nextBackupAt()));
@@ -652,6 +692,21 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 }
                 backupList(manager);
             }
+            case "limit" -> {
+                if (args.length != 3) {
+                    backupHelp();
+                    return;
+                }
+                try {
+                    int parsed = parsePositiveInt(args[2], COUNT_PLACEHOLDER);
+                    settings.setBackupMaxCount(parsed);
+                    print("数据库备份最多保留 " + parsed + " 个，将在下一次成功备份后应用。");
+                } catch (NumberFormatException error) {
+                    print("请输入有效的整数值。");
+                } catch (IllegalArgumentException | IOException error) {
+                    print("无法保存备份保留数量: " + error.getMessage());
+                }
+            }
             case "verify" -> {
                 if (args.length != 3) {
                     backupHelp();
@@ -676,6 +731,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     "备份进行中: " + backup.backupInProgress(),
                     "自动备份间隔: " + backup.intervalHours() + " h",
                     "备份数量: " + backup.backupCount(),
+                    "最多保留: " + backup.maxBackupCount(),
                     "最近备份: " + (backup.lastBackupAt() <= 0
                             ? "无" : backup.lastBackupFile() + " @ " + format(backup.lastBackupAt())),
                     "下次备份: " + optionalTime(backup.nextBackupAt())));
@@ -714,6 +770,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(colorUsage("Usage: playermonitor backup status"));
         print(colorUsage("Usage: playermonitor backup list"));
         print(colorUsage("Usage: playermonitor backup verify <filename>"));
+        print(colorUsage("Usage: playermonitor backup limit <count>"));
     }
 
     private void stat(String playerName, Optional<StatSnapshot> snapshotOptional) {
@@ -831,15 +888,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void help() {
         print(colorUsage("Usage: playermonitor setting <option> <value>"));
+        print(colorUsage("Usage: playermonitor setting-status"));
         print(colorUsage("Usage: playermonitor scan-stat"));
         print(colorUsage("Usage: playermonitor status"));
-        print(colorUsage("Usage: playermonitor backup [now|status|list|verify <filename>]"));
+        print(colorUsage("Usage: playermonitor backup [now|status|list|verify <filename>|limit <count>]"));
         playerHelp();
     }
 
     private void settingHelp() {
-        for (String item : SETTING_ITEMS) {
-            print(colorUsage("Usage: playermonitor setting " + item + " " + placeholderFor(item)));
+        for (String usage : settingUsageLines()) {
+            print(colorUsage(usage));
         }
     }
 

@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.function.IntSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -48,6 +49,7 @@ final class SQLiteBackupManager {
     private final Consumer<String> warningSink;
     private final Consumer<String> infoSink;
     private final Runnable flusher;
+    private final IntSupplier maxBackupCount;
     private final ScheduledExecutorService scheduler;
     private final ReentrantLock backupLock = new ReentrantLock();
     private final AtomicBoolean running = new AtomicBoolean();
@@ -60,12 +62,13 @@ final class SQLiteBackupManager {
 
     SQLiteBackupManager(Path dataDirectory, Path databasePath,
                         Consumer<String> warningSink, Consumer<String> infoSink,
-                        Runnable flusher) {
+                        Runnable flusher, IntSupplier maxBackupCount) {
         this.dataDirectory = dataDirectory;
         this.databasePath = databasePath;
         this.warningSink = warningSink;
         this.infoSink = infoSink;
         this.flusher = flusher;
+        this.maxBackupCount = maxBackupCount;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "XinPlayerMonitor-backup");
             thread.setDaemon(true);
@@ -175,7 +178,8 @@ final class SQLiteBackupManager {
                 latest == null ? 0L : latest.timestamp(),
                 latest == null ? "" : latest.filename(),
                 next,
-                backups.size());
+                backups.size(),
+                maxBackupCount.getAsInt());
     }
 
     List<BackupFileInfo> listBackups() throws IOException {
@@ -346,6 +350,7 @@ final class SQLiteBackupManager {
             Files.move(temp, target);
             targetCreatedByThisRun = true;
             cleanupWalFilesFor(target);
+            pruneOldBackups();
             info("Database backup completed: " + target.getFileName());
             return true;
         } catch (Exception error) {
@@ -364,6 +369,26 @@ final class SQLiteBackupManager {
             }
             cleanupWalFilesFor(temp);
             return false;
+        }
+    }
+
+    private void pruneOldBackups() {
+        try {
+            List<BackupFileInfo> backups = listBackups();
+            int keep = Math.max(1, maxBackupCount.getAsInt());
+            for (int index = keep; index < backups.size(); index++) {
+                BackupFileInfo backup = backups.get(index);
+                Path path = dataDirectory.resolve(backup.filename());
+                try {
+                    Files.deleteIfExists(path);
+                    cleanupWalFilesFor(path);
+                    info("Deleted old database backup: " + backup.filename());
+                } catch (IOException error) {
+                    warn("Unable to delete old database backup " + backup.filename() + ": " + error.getMessage());
+                }
+            }
+        } catch (IOException error) {
+            warn("Unable to enforce backup retention: " + error.getMessage());
         }
     }
 
@@ -466,7 +491,7 @@ final class SQLiteBackupManager {
 
     record BackupStatus(boolean schedulerRunning, boolean stopped, boolean backupInProgress,
                         int intervalHours, long lastBackupAt, String lastBackupFile,
-                        long nextBackupAt, int backupCount) {
+                        long nextBackupAt, int backupCount, int maxBackupCount) {
     }
 
     record BackupVerification(String filename, boolean valid, long sizeBytes, String detail) {

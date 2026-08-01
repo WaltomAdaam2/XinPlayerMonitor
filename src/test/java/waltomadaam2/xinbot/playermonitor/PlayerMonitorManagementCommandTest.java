@@ -202,6 +202,7 @@ class PlayerMonitorManagementCommandTest {
     @Test
     void statusAndBackupCommandsUseExpectedStylesAndRejectInvalidTrailingArguments() {
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"status"}, 0));
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"setting-status"}, 0));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 0));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 1));
         assertEquals(AttributedStyle.DEFAULT.getStyle(),
@@ -218,12 +219,56 @@ class PlayerMonitorManagementCommandTest {
                 null, null, null, NOPLogger.NOP_LOGGER);
         List<String> roots = command.onTabComplete(null, "playermonitor", new String[]{""});
         assertTrue(roots.contains("status"));
+        assertTrue(roots.contains("setting-status"));
         assertTrue(roots.contains("backup"));
         assertFalse(roots.contains("db-stat"));
-        assertEquals(List.of("now", "status", "list", "verify"),
+        assertEquals(List.of("now", "status", "list", "verify", "limit"),
                 command.onTabComplete(null, "playermonitor", new String[]{"backup", ""}));
         assertEquals(List.of(),
                 command.onTabComplete(null, "playermonitor", new String[]{"backup", "now", ""}));
+    }
+
+    @Test
+    void settingAndSettingStatusExposeRequestedLines() {
+        assertEquals(List.of(
+                "Usage: playermonitor setting scan-on-entry <true|false>",
+                "Usage: playermonitor setting disconnect-timeout <minute>",
+                "Usage: playermonitor setting stat-enabled <true|false>",
+                "Usage: playermonitor setting stat-send-interval <ms>",
+                "Usage: playermonitor setting stat-output-hide <true|false>",
+                "Usage: playermonitor setting stat-cooldown <hour>",
+                "Usage: playermonitor setting stat-timeout <ms>",
+                "Usage: playermonitor setting stat-attempts <count>",
+                "Usage: playermonitor setting scan-on-join <true|false>",
+                "Usage: playermonitor setting prioritize-join-stat <true|false>",
+                "Usage: playermonitor setting display-timezone <timezone>",
+                "Usage: playermonitor setting recentlogin-count <count>",
+                "Usage: playermonitor setting chat-count <count>",
+                "Usage: playermonitor setting backup-interval <hour>"),
+                PlayerMonitorManagementCommand.settingUsageLines());
+
+        MonitorSettings current = new MonitorSettings();
+        current.scanOnEntry = false;
+        current.disconnectTimeoutMinutes = 30;
+        current.statSendIntervalMillis = 100;
+        current.statCooldownHours = 12;
+        current.displayTimezone = "UTC+08:00";
+        assertEquals(List.of(
+                "进入 Game 自动扫描: false",
+                "断线确认时间: 30 min",
+                "Stat 自动扫描总开关: true",
+                "Stat 发送间隔: 100 ms",
+                "Stat 输出隐藏: true",
+                "自动 Stat 冷却: 12 h",
+                "Stat 响应超时: 3000 ms",
+                "Stat 最大尝试次数: 4",
+                "玩家加入自动扫描: true",
+                "新加入玩家优先扫描: true",
+                "显示时区: UTC+08:00",
+                "近期登录默认数量: 15",
+                "聊天默认数量: 10",
+                "自动备份间隔: 168 h"),
+                PlayerMonitorManagementCommand.settingStatusLines(current));
     }
 
     @Test

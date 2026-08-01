@@ -44,6 +44,7 @@ XinBot 控制台中直接输入指令，不需要 `/`。
 ```text
 playermonitor
 playermonitor setting
+playermonitor setting-status
 ```
 
 ### 手动扫描在线玩家 Stat
@@ -62,6 +63,7 @@ playermonitor status
 
 输出包括：
 
+- Stat 扫描状态、在线人数、排队数、待发送数和活动周期数；
 - 总体健康状态；
 - SQLite writer 生命周期和线程状态；
 - 写入队列当前长度与容量；
@@ -80,6 +82,7 @@ playermonitor backup now
 playermonitor backup status
 playermonitor backup list
 playermonitor backup verify <filename>
+playermonitor backup limit <count>
 ```
 
 说明：
@@ -88,6 +91,7 @@ playermonitor backup verify <filename>
 - `backup status`：显示调度器、备份进行状态、间隔、最近备份和下次备份；
 - `backup list`：按时间从新到旧列出备份，最多显示 20 个；
 - `backup verify`：只允许验证数据目录中的合法 `xinpm-auto-backup-YYYYMMDD-HHMMSS.db` 文件，并执行 `integrity_check` 和 `foreign_key_check`。
+- `backup limit`：设置最多保留的数据库备份数量，默认 `5`；下一次成功备份后删除最旧的超额备份。
 
 ### 查询玩家
 
@@ -110,7 +114,7 @@ playermonitor Steve chat 20
 
 ## 可修改设置
 
-设置修改后会立即写入 `playermonitor/settings.json`。
+`playermonitor setting` 列出全部设置用法，`playermonitor setting-status` 显示当前值。设置修改后会立即写入 `playermonitor/settings.json`。
 
 | 设置 | 说明 | 默认值与范围 |
 |---|---|---|
@@ -177,7 +181,7 @@ playermonitor/
 
 不要在插件运行时删除、移动或替换 `xinpm.db`、`xinpm.db-wal` 或 `xinpm.db-shm`。
 
-当前版本不会自动删除旧备份。请根据磁盘空间自行归档或清理，并至少保留最近一份已经通过 `backup verify` 的备份。
+当前版本默认最多保留 `5` 个备份；可通过 `playermonitor backup limit <count>` 修改。只有在新备份成功并通过完整性检查后，才会删除最旧的超额备份。
 
 ## SQLite 写入与失败恢复
 
@@ -255,6 +259,7 @@ playermonitor setting backup-interval <hour>
 3. 执行 `PRAGMA integrity_check`；
 4. 校验通过后移动为正式备份文件；
 5. 使用 UTC 时间生成文件名。
+6. 删除超出保留上限的最旧备份。
 
 同一时间只允许一个备份任务执行。
 

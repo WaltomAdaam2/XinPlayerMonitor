@@ -242,6 +242,21 @@ class MonitorSettingsStoreTest {
     }
 
     @Test
+    void backupMaxCountDefaultsToFiveAndPersists() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-backup-count");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+
+        assertEquals(5, settings.backupMaxCount());
+        settings.setBackupMaxCount(3);
+
+        MonitorSettingsStore loaded = new MonitorSettingsStore(directory);
+        loaded.initialize();
+        assertEquals(3, loaded.backupMaxCount());
+        assertThrows(IllegalArgumentException.class, () -> loaded.setBackupMaxCount(0));
+    }
+
+    @Test
     void defaultBackupIntervalIs168() throws Exception {
         MonitorSettingsStore settings = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         settings.initialize();

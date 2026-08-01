@@ -13,6 +13,7 @@ final class MonitorSettings {
     static final int DEFAULT_CACHE_IDLE_MINUTES = 30;
     static final int DEFAULT_MAX_CACHED_HISTORY = 200;
     static final int DEFAULT_BACKUP_INTERVAL_HOURS = 168;
+    static final int DEFAULT_BACKUP_MAX_COUNT = 5;
 
     static final class Database {
         static final String DEFAULT_PATH = "xinpm.db";
@@ -72,6 +73,7 @@ final class MonitorSettings {
     int cacheIdleMinutes = DEFAULT_CACHE_IDLE_MINUTES;
     int maxCachedHistory = DEFAULT_MAX_CACHED_HISTORY;
     int backupInterval = DEFAULT_BACKUP_INTERVAL_HOURS;
+    int backupMaxCount = DEFAULT_BACKUP_MAX_COUNT;
     Database database = new Database();
 
     MonitorSettings copy() {
@@ -92,6 +94,7 @@ final class MonitorSettings {
         copy.cacheIdleMinutes = cacheIdleMinutes;
         copy.maxCachedHistory = maxCachedHistory;
         copy.backupInterval = backupInterval;
+        copy.backupMaxCount = backupMaxCount;
         copy.database = database == null ? new Database() : database.copy();
         return copy;
     }

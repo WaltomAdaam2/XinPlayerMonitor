@@ -491,6 +491,26 @@ class SQLiteBackupManagerTest {
         assertFalse(manager.verify("xinpm-auto-backup-20260729-120000.db").valid());
     }
 
+    @Test
+    void successfulBackupKeepsOnlyFiveNewestFiles() throws Exception {
+        Path dataDir = temporaryDirectory.resolve("playermonitor-retention");
+        Files.createDirectories(dataDir);
+        Path database = dataDir.resolve("xinpm.db");
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + database.toAbsolutePath());
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE sample(value TEXT)");
+        }
+        SQLiteBackupManager manager = createBackupManager(dataDir, database, () -> {
+        });
+
+        for (int index = 0; index < 6; index++) {
+            assertTrue(manager.backupNow());
+        }
+
+        assertEquals(5, manager.listBackups().size());
+        assertEquals(5, manager.status().maxBackupCount());
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
@@ -499,7 +519,7 @@ class SQLiteBackupManagerTest {
         List<String> warnings = new ArrayList<>();
         List<String> infos = new ArrayList<>();
         SQLiteBackupManager manager = new SQLiteBackupManager(
-                dataDir, dbPath, warnings::add, infos::add, flusher);
+                dataDir, dbPath, warnings::add, infos::add, flusher, () -> 5);
         managers.add(manager);
         return manager;
     }

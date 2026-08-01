@@ -58,6 +58,22 @@ class PlayerMonitorListenerStatTest {
     }
 
     @Test
+    void statScanStatusSummarizesRuntimeState() {
+        listener.setGameActiveForTesting(true);
+        listener.markOnlineForTesting("Alice");
+        listener.markPendingStatDispatchForTesting("Bob");
+
+        PlayerMonitorListener.StatScanStatus status = listener.statScanStatus();
+
+        assertTrue(status.gameActive());
+        assertEquals(1, status.onlinePlayers());
+        assertEquals(0, status.queued());
+        assertEquals(1, status.pendingDispatches());
+        assertEquals(0, status.activeCycles());
+        assertFalse(status.waitingResponse());
+    }
+
+    @Test
     void successfulStatResponseClearsRetryStateEndToEnd() throws Exception {
         GameProfile profile = profile("Alice");
         listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));

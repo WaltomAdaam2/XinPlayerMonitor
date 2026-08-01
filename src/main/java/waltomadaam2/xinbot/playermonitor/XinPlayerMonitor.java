@@ -83,7 +83,7 @@ public final class XinPlayerMonitor implements Plugin {
                         } catch (IOException error) {
                             throw new IllegalStateException("Backup pre-flush failed", error);
                         }
-                    });
+                    }, settings::backupMaxCount);
             this.backupManager = createdBackupManager;
             command.setBackupManager(createdBackupManager);
             createdBackupManager.start(settings.backupInterval());
@@ -91,7 +91,7 @@ public final class XinPlayerMonitor implements Plugin {
             commandMayBeRegistered = true;
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[0], "Query player monitoring data and configure stat scanning",
-                            "playermonitor setting|scan-stat|status|backup|<player> [stat|latestlogin|recentlogin|chat]"),
+                            "playermonitor setting|setting-status|scan-stat|status|backup|<player> [stat|latestlogin|recentlogin|chat]"),
                     command,
                     this);
             log.info("plugin enabled");

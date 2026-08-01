@@ -380,6 +380,11 @@ final class PlayerMonitorListener implements Listener {
         return result.queued();
     }
 
+    StatScanStatus statScanStatus() {
+        return new StatScanStatus(gameActive, onlinePlayers.size(), statQueue.size(),
+                pendingStatDispatches.size(), activeStatCycles.size(), statResponses.hasPending());
+    }
+
     List<String> onlinePlayerNames() {
         if (!gameActive) {
             return List.of();
@@ -783,6 +788,10 @@ final class PlayerMonitorListener implements Listener {
         } catch (IOException error) {
             log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
+    }
+
+    record StatScanStatus(boolean gameActive, int onlinePlayers, int queued,
+                          int pendingDispatches, int activeCycles, boolean waitingResponse) {
     }
 
     private record StatScanResult(int queued, int cooldownSkipped) {
