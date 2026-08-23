@@ -12,7 +12,7 @@ final class StatParser {
     private static final Pattern HEADER = Pattern.compile("^玩家名称\\s*[:：]\\s*(.+?)\\s*$");
     private static final Pattern INTEGER = Pattern.compile("(\\d+)");
     private static final Pattern PLAYTIME = Pattern.compile(
-            "(?:(\\d+)天)?(?:(\\d+)时)?(?:(\\d+)分)?(?:(\\d+)秒)?");
+            "^(?:(\\d+)天)?(?:(\\d+)(?:小时|时))?(?:(\\d+)分)?(?:(\\d+)秒)?$");
 
     private StatParser() {
     }
@@ -83,7 +83,7 @@ final class StatParser {
 
     private static Long playtimeSeconds(String value) {
         Matcher matcher = PLAYTIME.matcher(value);
-        if (!matcher.find() || matcher.group().isEmpty()) {
+        if (!matcher.matches() || matcher.group().isEmpty()) {
             return null;
         }
         return seconds(matcher.group(1), 86_400L)
@@ -98,7 +98,20 @@ final class StatParser {
 
     private static PlayerPermissions permissions(String line) {
         String value = valueAfterColon(line);
-        int checks = (int) value.codePoints().filter(codePoint -> codePoint == 0x2705).count();
+        String[] parts = value.split("[|丨]");
+        if (parts.length >= 3) {
+            return new PlayerPermissions(permissionEnabled(parts[0]),
+                    permissionEnabled(parts[1]), permissionEnabled(parts[2]));
+        }
+        int checks = (int) value.codePoints()
+                .filter(codePoint -> codePoint == 0x2705 || codePoint == '√' || codePoint == '✓')
+                .count();
         return new PlayerPermissions(checks >= 1, checks >= 2, checks >= 3);
+    }
+
+    private static boolean permissionEnabled(String value) {
+        return value.indexOf('√') >= 0
+                || value.indexOf('✓') >= 0
+                || value.codePoints().anyMatch(codePoint -> codePoint == 0x2705);
     }
 }

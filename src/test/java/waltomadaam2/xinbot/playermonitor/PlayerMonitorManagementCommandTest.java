@@ -202,7 +202,6 @@ class PlayerMonitorManagementCommandTest {
     @Test
     void statusAndBackupCommandsUseExpectedStylesAndRejectInvalidTrailingArguments() {
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"status"}, 0));
-        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"setting-status"}, 0));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 0));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 1));
         assertEquals(AttributedStyle.DEFAULT.getStyle(),
@@ -219,7 +218,8 @@ class PlayerMonitorManagementCommandTest {
                 null, null, null, NOPLogger.NOP_LOGGER);
         List<String> roots = command.onTabComplete(null, "playermonitor", new String[]{""});
         assertTrue(roots.contains("status"));
-        assertTrue(roots.contains("setting-status"));
+        assertTrue(roots.contains("setting"));
+        assertFalse(roots.contains("setting-status"));
         assertTrue(roots.contains("backup"));
         assertFalse(roots.contains("db-stat"));
         assertEquals(List.of("now", "status", "list", "verify", "limit"),
@@ -229,7 +229,7 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
-    void settingAndSettingStatusExposeRequestedLines() {
+    void settingUsageAndSettingStatusExposeRequestedLines() {
         assertEquals(List.of(
                 "Usage: playermonitor setting scan-on-entry <true|false>",
                 "Usage: playermonitor setting disconnect-timeout <minute>",
@@ -272,6 +272,28 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
+    void barePlayerCommandUsesOverviewInsteadOfFullHistory() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-player-overview");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        LimitedQueryRepository repository = new LimitedQueryRepository();
+        PlayerMonitorService service = new PlayerMonitorService(repository);
+        service.initialize();
+        PlayerMonitorListener listener = new PlayerMonitorListener(
+                service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    service, settings, listener, NOPLogger.NOP_LOGGER);
+            command.onCommand(null, "playermonitor", new String[]{"Steve"});
+            assertEquals(1, repository.overviewCalls);
+            assertEquals(0, repository.fullFindCalls);
+        } finally {
+            listener.close();
+            service.close();
+        }
+    }
+
+    @Test
     void databaseStatsLinesUseGoldNumbers() {
         String rendered = String.join("\\n", PlayerMonitorManagementCommand.databaseStatsLines(
                 new DatabaseStats(2, 3, 4, 5, 1)));
@@ -294,6 +316,7 @@ class PlayerMonitorManagementCommandTest {
         int recentChatLimit;
         int chatCountCalls;
         int fullFindCalls;
+        int overviewCalls;
 
         @Override
         public void initialize() {
@@ -345,6 +368,19 @@ class PlayerMonitorManagementCommandTest {
         public int chatCount(String playerName) {
             chatCountCalls++;
             return 123;
+        }
+
+        @Override
+        public Optional<PlayerOverview> playerOverview(String playerName, long now) {
+            overviewCalls++;
+            StatSnapshot snapshot = new StatSnapshot();
+            snapshot.capturedAt = now;
+            snapshot.killCount = 1;
+            snapshot.deathCount = 2;
+            snapshot.playtimeSeconds = 3600L;
+            snapshot.addedGameCount = 3;
+            return Optional.of(new PlayerOverview("Steve", 100L, 4L,
+                    200L, 300L, 100L, 3_600_000L, snapshot));
         }
 
         @Override

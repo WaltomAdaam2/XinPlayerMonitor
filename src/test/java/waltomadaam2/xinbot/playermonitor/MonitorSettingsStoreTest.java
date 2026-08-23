@@ -242,12 +242,12 @@ class MonitorSettingsStoreTest {
     }
 
     @Test
-    void backupMaxCountDefaultsToFiveAndPersists() throws Exception {
+    void backupMaxCountDefaultsToThreeAndPersists() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-backup-count");
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
         settings.initialize();
 
-        assertEquals(5, settings.backupMaxCount());
+        assertEquals(3, settings.backupMaxCount());
         settings.setBackupMaxCount(3);
 
         MonitorSettingsStore loaded = new MonitorSettingsStore(directory);

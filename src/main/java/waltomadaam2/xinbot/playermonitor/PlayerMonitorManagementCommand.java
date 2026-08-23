@@ -104,14 +104,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             setting(args);
             return;
         }
-        if ("setting-status".equalsIgnoreCase(args[0])) {
-            if (args.length == 1) {
-                showSettings();
-            } else {
-                help();
-            }
-            return;
-        }
         if ("scan-stat".equalsIgnoreCase(args[0])) {
             if (args.length == 1) {
                 scan();
@@ -138,13 +130,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
         if (args == null || args.length == 0) {
-            return List.of("setting", "setting-status", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
         }
         if ("setting".equalsIgnoreCase(args[0])) {
             return completeSetting(args);
-        }
-        if ("setting-status".equalsIgnoreCase(args[0]) && args.length > 1) {
-            return List.of();
         }
         if ("scan-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
             return List.of();
@@ -189,7 +178,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         String value = lower(args[index]);
         if (index == 0) {
-            if ("setting".equals(value) || "setting-status".equals(value)
+            if ("setting".equals(value)
                     || "scan-stat".equals(value) || "status".equals(value)
                     || "db-stat".equals(value) || "backup".equals(value)) {
                 return ROOT_COMMAND_STYLE;
@@ -197,7 +186,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return PLAYER_STYLE;
         }
         String root = lower(args[0]);
-        if ("setting-status".equals(root) || "scan-stat".equals(root)
+        if ("scan-stat".equals(root)
                 || "status".equals(root) || "db-stat".equals(root)) {
             return AttributedStyle.DEFAULT;
         }
@@ -236,10 +225,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     + SETTING_NAME + settingName + RESET
                     + (remainder.isEmpty() ? "" : " " + SETTING_VALUE + remainder + RESET);
         }
-        if (usage.equals("Usage: playermonitor setting-status")) {
-            return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
-                    + ROOT_COMMAND + "setting-status" + RESET;
-        }
         if (usage.equals("Usage: playermonitor scan-stat")) {
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
                     + ROOT_COMMAND + "scan-stat" + RESET;
@@ -273,7 +258,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void setting(String[] args) {
         if (args.length == 1) {
-            settingHelp();
+            showSettings();
             return;
         }
         if (args.length != 3) {
@@ -416,7 +401,11 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             print("请输入准确的玩家名。");
             return;
         }
-        if (args.length < 2 || args.length > 3) {
+        if (args.length == 1) {
+            playerData(playerName);
+            return;
+        }
+        if (args.length > 3) {
             playerHelp();
             return;
         }
@@ -445,6 +434,47 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             }
         } catch (NumberFormatException error) {
             print("显示数量必须是 5–50 之间的整数。");
+        } catch (IOException error) {
+            print("无法读取玩家记录: " + error.getMessage());
+        }
+    }
+
+    private void playerData(String playerName) {
+        try {
+            Optional<PlayerOverview> overviewOptional = service.playerOverview(playerName, System.currentTimeMillis());
+            if (overviewOptional.isEmpty()) {
+                print("未找到玩家档案: " + playerName);
+                return;
+            }
+            PlayerOverview overview = overviewOptional.get();
+            StatSnapshot snapshot = overview.latestStat();
+            PlayerPermissions permissions = snapshot == null || snapshot.permissions == null
+                    ? new PlayerPermissions() : snapshot.permissions;
+            Integer kills = snapshot == null ? null : snapshot.killCount;
+            Integer deaths = snapshot == null ? null
+                    : snapshot.deathCount != null ? snapshot.deathCount : snapshot.onlineCount;
+            String priority = snapshot == null ? null : snapshot.priorityQueue;
+            print(SectionFormatter.header("Player Data"));
+            print("玩家：" + overview.playerName());
+            print("> 发言次数：" + overview.chatCount() + "次");
+            print("> 击杀数：" + value(kills) + "人");
+            print("> 死亡次数：" + value(deaths) + "次");
+            print("> KD比：" + kd(kills, deaths));
+            print("");
+            print("[首次记录]： " + format(overview.firstSeenAt()));
+            print("[最近上线]： " + optionalTime(overview.latestLoginAt()));
+            print("[最近下线]： " + (overview.latestLogoutAt() == null ? "在线中" : format(overview.latestLogoutAt())));
+            print("[最近游玩时长]： " + durationMillis(overview.latestSessionDurationMillis()));
+            print("");
+            print("绿色名字/聊天字体：" + yesNo(permissions.greenText));
+            print("RunMax权限：" + yesNo(permissions.runMax));
+            print("Dupe物刷权限：" + yesNo(permissions.dupe));
+            print("优先列队：" + value(priority));
+            print("");
+            print("- 总游玩时长：" + hours(snapshot == null ? null : snapshot.playtimeSeconds));
+            print("- 近30天游玩时长：" + hoursFromMillis(overview.playtimeLast30DaysMillis()));
+            print("- 加入游戏次数：" + value(snapshot == null ? null : snapshot.addedGameCount) + "次");
+            print(SectionFormatter.divider("Player Data"));
         } catch (IOException error) {
             print("无法读取玩家记录: " + error.getMessage());
         }
@@ -505,7 +535,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private List<String> completePlayerNames(String input) {
         if (input == null || input.isEmpty()) {
-            return List.of("setting", "setting-status", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
         }
         try {
             TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -515,9 +545,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             List<String> matches = new ArrayList<>();
             if ("setting".startsWith(prefix)) {
                 matches.add("setting");
-            }
-            if ("setting-status".startsWith(prefix)) {
-                matches.add("setting-status");
             }
             if ("scan-stat".startsWith(prefix)) {
                 matches.add("scan-stat");
@@ -583,38 +610,69 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private void status() {
         List<String> lines = new ArrayList<>();
         PlayerMonitorListener.StatScanStatus scan = listener.statScanStatus();
-        lines.add("Stat 扫描: game=" + scan.gameActive()
-                + ", online=" + scan.onlinePlayers()
+        lines.add("Game Active: " + scan.gameActive());
+        lines.add("Reconnect Pending: " + scan.reconnectPending());
+        lines.add("Roster Reconciling: " + scan.rosterReconciling());
+        lines.add("Force Fresh Roster: " + scan.forceFreshRoster());
+        lines.add("Reconnect Generation: " + scan.reconnectGeneration());
+        lines.add("Last Disconnect: " + optionalTime(scan.lastDisconnectAt()));
+        lines.add("Bot Roster: " + scan.botRoster());
+        lines.add("Monitor Roster: " + scan.monitorRoster());
+        lines.add("Roster Drift: missing=" + scan.missingFromMonitor()
+                + ", extra=" + scan.extraInMonitor());
+        lines.add("Stat 扫描: online=" + scan.onlinePlayers()
                 + ", queued=" + scan.queued()
                 + ", pending=" + scan.pendingDispatches()
                 + ", active=" + scan.activeCycles()
                 + ", waiting-response=" + scan.waitingResponse());
+        lines.add("Chat Pipeline:");
+        lines.add("  system received:   " + scan.systemChatReceived());
+        lines.add("  public parsed:     " + scan.publicChatParsed());
+        lines.add("  monitor accepted:  " + scan.chatAcceptedByPlayerMonitor());
+        lines.add("  rejected:          " + scan.chatRejected());
+        lines.add("  parse failed:      " + scan.chatParseFailed());
+        lines.add("  db failed:         " + scan.chatDbFailed());
         try {
             DatabaseHealth health = service.databaseHealth();
+            lines.add("  db committed:      " + health.chatCommitted());
             String condition;
             double queueUsage = health.queueCapacity() <= 0
                     ? 0.0
                     : (double) health.queueSize() / (double) health.queueCapacity();
-            if ("FAILED".equals(health.writerState()) || !health.writerAlive()) {
+            if ("FAILED".equals(health.writerState()) || !health.writerAlive() || health.writerStalled()) {
                 condition = "ERROR";
-            } else if (health.pendingFailedEvents() > 0 || queueUsage >= 0.80) {
+            } else if (health.pendingFailedEvents() > 0 || health.writerRecovering() || queueUsage >= 0.80) {
                 condition = "DEGRADED";
             } else {
                 condition = "HEALTHY";
             }
             lines.add("健康状态: " + condition);
-            lines.add("Writer 状态: " + health.writerState() + " / alive=" + health.writerAlive());
-            lines.add("写入队列: " + health.queueSize() + " / " + health.queueCapacity());
+            lines.add("Writer 状态: " + health.writerState()
+                    + " / alive=" + health.writerAlive()
+                    + " / recovering=" + health.writerRecovering()
+                    + " / stalled=" + health.writerStalled());
+            lines.add("SQLite queue: " + health.queueSize() + " / " + health.queueCapacity());
+            lines.add("Peak queue: " + health.queueHighWaterMark());
+            lines.add("Queue growth: 1m=" + signed(health.queueDelta1m())
+                    + ", 5m=" + signed(health.queueDelta5m()));
             lines.add("最近提交: " + optionalTime(health.lastCommittedAt()));
+            lines.add("最近Chat写入: " + optionalTime(health.lastChatCommittedAt()));
+            lines.add("最近Session写入: " + optionalTime(health.lastSessionCommittedAt()));
+            lines.add("最近Stat写入: " + optionalTime(health.lastStatCommittedAt()));
             lines.add("最近失败: " + optionalTime(health.lastFailureAt()));
             if (health.lastFailureAt() > 0 && health.lastFailureMessage() != null
                     && !health.lastFailureMessage().isBlank()) {
                 lines.add("失败原因: " + health.lastFailureMessage());
             }
+            lines.add("Chat 写入: db committed=" + health.chatCommitted()
+                    + ", db failed=" + health.chatDbFailed()
+                    + ", queue rejected=" + health.chatQueueRejected());
+            lines.add("Writer recoveries: " + health.writerRecoveryCount());
             lines.add("失败事件: pending=" + health.pendingFailedEvents()
                     + ", replayed=" + health.replayedFailedEvents()
                     + ", malformed=" + health.malformedFailedEvents()
-                    + ", file-lines=" + health.failedEventLines());
+                    + ", file-lines=" + health.failedEventLines()
+                    + ", persist-failed=" + health.failedEventPersistFailures());
             lines.add("数据库文件: db=" + humanBytes(health.databaseBytes())
                     + ", wal=" + humanBytes(health.walBytes())
                     + ", shm=" + humanBytes(health.shmBytes()));
@@ -623,7 +681,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
 
         try {
-            DatabaseStats stats = service.databaseStats();
+            DatabaseStats stats = service.databaseStatsSnapshot();
             lines.addAll(databaseStatsLines(stats));
         } catch (IOException error) {
             lines.add("数据库记录统计: 无法读取 - " + error.getMessage());
@@ -888,7 +946,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void help() {
         print(colorUsage("Usage: playermonitor setting <option> <value>"));
-        print(colorUsage("Usage: playermonitor setting-status"));
         print(colorUsage("Usage: playermonitor scan-stat"));
         print(colorUsage("Usage: playermonitor status"));
         print(colorUsage("Usage: playermonitor backup [now|status|list|verify <filename>|limit <count>]"));
@@ -988,6 +1045,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return timestamp <= 0L ? "无" : format(timestamp);
     }
 
+    private String optionalTime(Long timestamp) {
+        return timestamp == null || timestamp <= 0L ? "无" : format(timestamp);
+    }
+
     private static String humanBytes(long bytes) {
         if (bytes < 0L) {
             return "unknown";
@@ -1005,6 +1066,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         return String.format(Locale.ROOT, "%.1f %s", value, units[unit]);
     }
 
+    private static String signed(int value) {
+        return value >= 0 ? "+" + value : Integer.toString(value);
+    }
+
     private static String highlightTimestamps(String line) {
         Matcher matcher = TIMESTAMP.matcher(line);
         StringBuffer output = new StringBuffer();
@@ -1017,6 +1082,32 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private static String value(Object value) {
         return value == null ? "未知" : value.toString();
+    }
+
+    private static String yesNo(boolean value) {
+        return value ? "有" : "无";
+    }
+
+    private static String kd(Integer kills, Integer deaths) {
+        if (kills == null || deaths == null) {
+            return "未知";
+        }
+        if (deaths == 0) {
+            return kills == 0 ? "0.000" : "∞";
+        }
+        return String.format(Locale.ROOT, "%.3f", (double) kills / (double) deaths);
+    }
+
+    private static String hours(Long seconds) {
+        return seconds == null ? "未知" : String.format(Locale.ROOT, "%.2f小时", seconds / 3600.0);
+    }
+
+    private static String hoursFromMillis(long millis) {
+        return String.format(Locale.ROOT, "%.2f小时", millis / 3_600_000.0);
+    }
+
+    private static String durationMillis(Long millis) {
+        return millis == null ? "未知" : duration(Duration.ofMillis(millis).getSeconds());
     }
 
     static List<String> databaseStatsLines(DatabaseStats stats) {

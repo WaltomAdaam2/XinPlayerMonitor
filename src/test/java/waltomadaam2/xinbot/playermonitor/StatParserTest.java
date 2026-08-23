@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StatParserTest {
@@ -29,5 +30,20 @@ class StatParserTest {
         assertTrue(snapshot.permissions.greenText);
         assertTrue(snapshot.permissions.runMax);
         assertTrue(snapshot.permissions.dupe);
+    }
+
+    @Test
+    void parsesFullHourWordAndMixedPermissionSlots() {
+        StatSnapshot snapshot = StatParser.parse("WaltomAdaam", List.of(
+                "§b玩家名称: WaltomAdaam",
+                "§b击杀计数: 485 人",
+                "§b死亡计数: 468 次",
+                "§e游戏时长: 396小时35分9秒",
+                "§b特殊权限: 🎨√丨👟√丨🎒×"), 123L).orElseThrow();
+
+        assertEquals(1_427_709L, snapshot.playtimeSeconds);
+        assertTrue(snapshot.permissions.greenText);
+        assertTrue(snapshot.permissions.runMax);
+        assertFalse(snapshot.permissions.dupe);
     }
 }
