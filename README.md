@@ -2,7 +2,7 @@
 
 XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人进入 `Game` 状态后，插件会记录玩家登录、登出、公共聊天和 Stat，并将数据持续写入 SQLite。
 
-当前版本：**v1.5.1**
+当前版本：**v1.5.2**
 
 ## 主要功能
 
@@ -28,7 +28,7 @@ XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人�
 
 1. 停止 XinBot。
 2. 备份完整的 `playermonitor/` 目录。
-3. 将 `XinPlayerMonitor-v1.5.1.jar` 放入 XinBot 插件目录并替换旧版本。
+3. 将 `XinPlayerMonitor-v1.5.2.jar` 放入 XinBot 插件目录并替换旧版本。
 4. 启动 XinBot。
 5. 执行 `playermonitor status` 检查数据库、writer、失败事件和备份状态。
 6. 执行 `playermonitor backup now` 创建一份升级后的人工备份。
@@ -44,7 +44,6 @@ XinBot 控制台中直接输入指令，不需要 `/`。
 ```text
 playermonitor
 playermonitor setting
-playermonitor setting-status
 ```
 
 ### 手动扫描在线玩家 Stat
@@ -63,11 +62,14 @@ playermonitor status
 
 输出包括：
 
+- Game Active、Reconnect Pending、Roster Reconciling、Reconnect Generation 和最近断线时间；
+- Bot roster 与 PlayerMonitor roster 数量及漂移；
+- Chat pipeline 计数，包括 system received、public parsed、monitor accepted、db committed、db failed、parse failed；
 - Stat 扫描状态、在线人数、排队数、待发送数和活动周期数；
 - 总体健康状态；
-- SQLite writer 生命周期和线程状态；
-- 写入队列当前长度与容量；
-- 最近一次成功提交和最近一次失败；
+- SQLite writer 生命周期、线程状态、恢复中/卡住状态；
+- 写入队列当前长度、容量、峰值和 1m/5m 增长；
+- 最近一次成功提交、最近 Chat/Session/Stat 写入和最近一次失败；
 - `failed-events.jsonl` 总行数、已重放、待处理和损坏数量；
 - 主数据库、WAL 和 SHM 文件大小；
 - 玩家、聊天、会话、Stat 和未结束会话数量；
@@ -91,7 +93,7 @@ playermonitor backup limit <count>
 - `backup status`：显示调度器、备份进行状态、间隔、最近备份和下次备份；
 - `backup list`：按时间从新到旧列出备份，最多显示 20 个；
 - `backup verify`：只允许验证数据目录中的合法 `xinpm-auto-backup-YYYYMMDD-HHMMSS.db` 文件，并执行 `integrity_check` 和 `foreign_key_check`。
-- `backup limit`：设置最多保留的数据库备份数量，默认 `5`；下一次成功备份后删除最旧的超额备份。
+- `backup limit`：设置最多保留的数据库备份数量，默认 `3`；下一次成功备份后删除最旧的超额备份。
 
 ### 查询玩家
 
@@ -105,6 +107,7 @@ playermonitor <玩家名> chat [count]
 示例：
 
 ```text
+playermonitor Steve
 playermonitor Steve stat
 playermonitor Steve recentlogin 10
 playermonitor Steve chat 20
@@ -114,7 +117,7 @@ playermonitor Steve chat 20
 
 ## 可修改设置
 
-`playermonitor setting` 列出全部设置用法，`playermonitor setting-status` 显示当前值。设置修改后会立即写入 `playermonitor/settings.json`。
+`playermonitor setting` 显示当前设置；`playermonitor setting <option> <value>` 修改设置。设置修改后会立即写入 `playermonitor/settings.json`。
 
 | 设置 | 说明 | 默认值与范围 |
 |---|---|---|
@@ -181,7 +184,7 @@ playermonitor/
 
 不要在插件运行时删除、移动或替换 `xinpm.db`、`xinpm.db-wal` 或 `xinpm.db-shm`。
 
-当前版本默认最多保留 `5` 个备份；可通过 `playermonitor backup limit <count>` 修改。只有在新备份成功并通过完整性检查后，才会删除最旧的超额备份。
+当前版本默认最多保留 `3` 个备份；可通过 `playermonitor backup limit <count>` 修改。只有在新备份成功并通过完整性检查后，才会删除最旧的超额备份。
 
 ## SQLite 写入与失败恢复
 
@@ -200,7 +203,9 @@ playermonitor/
 
 - 所有正常写入通过有界队列交给单独的 SQLite writer；
 - writer 按批次事务提交；
-- 队列满或排队线程被中断时，事件不会只写日志后消失，而会追加到 `failed-events.jsonl`；
+- 队列满、writer 进入 FAILED 或排队被拒绝时，事件不会只写日志后消失，而会追加到 `failed-events.jsonl`；
+- writer 会对可恢复的 SQLite 连接错误执行 rollback、关闭旧连接、backoff 并重开连接；`CORRUPT`、`NOTADB`、`FULL` 才进入 terminal FAILED；
+- watchdog 会告警 writer 卡住、队列长期积压和 chat 队列拒绝；
 - `flush()` 会报告此前尚未确认的写入失败；
 - 关闭时停止接收新事件，并尝试排空已经接受的事件。
 
@@ -312,7 +317,7 @@ mvn clean test package
 生成文件：
 
 ```text
-target/XinPlayerMonitor-v1.5.1.jar
+target/XinPlayerMonitor-v1.5.2.jar
 ```
 
 升级发布前至少验证：
