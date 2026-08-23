@@ -11,6 +11,8 @@ import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -53,6 +55,8 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 final class SQLitePlayerRecordStore implements PlayerRepository {
+    private static final long MIN_WRITER_RECOVERY_WINDOW_MILLIS = TimeUnit.MINUTES.toMillis(5);
+    private static final long MAX_WRITER_RECOVERY_BACKOFF_MILLIS = TimeUnit.SECONDS.toMillis(5);
     private final Path directory;
     private final Path databasePath;
     private final Path failedEventsPath;
@@ -1104,11 +1108,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private void writerLoop() {
         List<WriteTask> inFlight = new ArrayList<>();
         long recoveryBackoffMillis = 100L;
+        long recoveryStartedAt = 0L;
+        long lastRecoveryWarningAt = 0L;
         try {
             while (lifecycleState == LifecycleState.RUNNING || !queue.isEmpty() || !inFlight.isEmpty()) {
                 try (Connection connection = openConnection(); WriterSql sql = new WriterSql(connection)) {
-                    writerRecovering = false;
-                    recoveryBackoffMillis = 100L;
+                    if (writerRecovering && inFlight.isEmpty()) {
+                        finishWriterRecovery(recoveryStartedAt);
+                        recoveryBackoffMillis = 100L;
+                        recoveryStartedAt = 0L;
+                        lastRecoveryWarningAt = 0L;
+                    }
                     while (lifecycleState == LifecycleState.RUNNING || !queue.isEmpty() || !inFlight.isEmpty()) {
                         if (inFlight.isEmpty()) {
                             WriteTask first = queue.poll(databaseSettings.flushIntervalMs, TimeUnit.MILLISECONDS);
@@ -1122,6 +1132,12 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                         }
                         delayWriteForTesting();
                         processBatch(connection, sql, inFlight);
+                        if (writerRecovering) {
+                            finishWriterRecovery(recoveryStartedAt);
+                        }
+                        recoveryBackoffMillis = 100L;
+                        recoveryStartedAt = 0L;
+                        lastRecoveryWarningAt = 0L;
                         inFlight.clear();
                         inFlightCount.set(0);
                     }
@@ -1135,13 +1151,35 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                         break;
                     }
                     markFailure(io);
-                    writerRecovering = true;
-                    writerRecoveryCount.incrementAndGet();
-                    warn("SQLite writer recovered after connection error; pending batch=" + inFlight.size()
-                            + ", queue=" + queue.size()
-                            + ", error=" + io.getMessage());
+                    long now = System.currentTimeMillis();
+                    if (!writerRecovering || recoveryStartedAt == 0L) {
+                        writerRecovering = true;
+                        recoveryStartedAt = now;
+                    }
+                    long recoveryElapsed = Math.max(0L, now - recoveryStartedAt);
+                    if (recoveryElapsed >= writerRecoveryWindowMillis()) {
+                        IOException exhausted = new IOException(
+                                "SQLite writer recovery window exhausted after " + recoveryElapsed
+                                        + " ms; last error=" + io.getMessage(), io);
+                        failInFlight(inFlight, exhausted);
+                        warn("SEVERE: SQLite writer recovery exhausted; pending batch=" + inFlight.size()
+                                + ", queue=" + queue.size()
+                                + ", error=" + io.getMessage());
+                        enterTerminalFailure(exhausted);
+                        break;
+                    }
+                    if (lastRecoveryWarningAt == 0L
+                            || now - lastRecoveryWarningAt >= TimeUnit.SECONDS.toMillis(30)) {
+                        lastRecoveryWarningAt = now;
+                        warn("SQLite writer recovery attempt failed; pending batch=" + inFlight.size()
+                                + ", queue=" + queue.size()
+                                + ", retryInMs=" + recoveryBackoffMillis
+                                + ", elapsedMs=" + recoveryElapsed
+                                + ", error=" + io.getMessage());
+                    }
                     sleepBeforeRecovery(recoveryBackoffMillis);
-                    recoveryBackoffMillis = Math.min(TimeUnit.SECONDS.toMillis(5), recoveryBackoffMillis * 2L);
+                    recoveryBackoffMillis = Math.min(MAX_WRITER_RECOVERY_BACKOFF_MILLIS,
+                            recoveryBackoffMillis * 2L);
                 }
             }
         } catch (InterruptedException error) {
@@ -1168,6 +1206,24 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     private void sleepBeforeRecovery(long backoffMillis) throws InterruptedException {
         Thread.sleep(Math.max(100L, backoffMillis));
+    }
+
+    private long writerRecoveryWindowMillis() {
+        long busyBasedWindow = Math.max(1000L, databaseSettings.busyTimeoutMs) * 12L;
+        return Math.max(MIN_WRITER_RECOVERY_WINDOW_MILLIS, busyBasedWindow);
+    }
+
+    private void finishWriterRecovery(long recoveryStartedAt) {
+        if (!writerRecovering) {
+            return;
+        }
+        long elapsed = recoveryStartedAt <= 0L ? 0L : Math.max(0L, System.currentTimeMillis() - recoveryStartedAt);
+        writerRecovering = false;
+        writerStalled = false;
+        writerRecoveryCount.incrementAndGet();
+        lastWriterProgressAt.set(System.currentTimeMillis());
+        info("SQLite writer recovered; elapsedMs=" + elapsed
+                + ", queue=" + queue.size());
     }
 
     private void failInFlight(List<WriteTask> inFlight, IOException error) {
@@ -1375,8 +1431,15 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         synchronized (failedEventsFileLock) {
             try {
                 Files.createDirectories(directory);
-                Files.writeString(failedEventsPath, gson.toJson(record) + System.lineSeparator(),
-                        StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+                byte[] line = (gson.toJson(record) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
+                try (FileChannel channel = FileChannel.open(failedEventsPath,
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
+                    ByteBuffer buffer = ByteBuffer.wrap(line);
+                    while (buffer.hasRemaining()) {
+                        channel.write(buffer);
+                    }
+                    channel.force(true);
+                }
                 failedEventLines.incrementAndGet();
             } catch (IOException persistError) {
                 failedEventPersistFailures.incrementAndGet();

@@ -116,6 +116,31 @@ class PlayerMonitorListenerChatLogTest {
     }
 
     @Test
+    void fallbackAcceptsFormattedSenderAndPreservesUserWhitespace() throws Exception {
+        SystemChatMessageEvent event = new SystemChatMessageEvent(
+                Component.text("§8<§aColor_Name§f> §a  hello  world  "), false);
+
+        listener.beforeSystemChat(event);
+        listener.onSystemChat(event);
+
+        var chats = service.recentChats("Color_Name", 10);
+        assertEquals(1, chats.size());
+        assertEquals("  hello  world  ", chats.get(0).message);
+    }
+
+    @Test
+    void fallbackKeepsEmptyMessageInsteadOfSilentlyDroppingIt() throws Exception {
+        SystemChatMessageEvent event = new SystemChatMessageEvent(Component.text("<EmptyChat> "), false);
+
+        listener.beforeSystemChat(event);
+        listener.onSystemChat(event);
+
+        var chats = service.recentChats("EmptyChat", 10);
+        assertEquals(1, chats.size());
+        assertEquals("", chats.get(0).message);
+    }
+
+    @Test
     void fallbackDoesNotDuplicatePublicChatAlreadyGeneratedFromTheSameSystemMessage() throws Exception {
         GameProfile profile = profile("NoDuplicate");
         SystemChatMessageEvent event = new SystemChatMessageEvent(Component.text("<NoDuplicate> once"), false);

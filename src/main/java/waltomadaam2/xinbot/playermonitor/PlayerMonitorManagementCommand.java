@@ -451,9 +451,9 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             PlayerPermissions permissions = snapshot == null || snapshot.permissions == null
                     ? new PlayerPermissions() : snapshot.permissions;
             Integer kills = snapshot == null ? null : snapshot.killCount;
-            Integer deaths = snapshot == null ? null
-                    : snapshot.deathCount != null ? snapshot.deathCount : snapshot.onlineCount;
-            String priority = snapshot == null ? null : snapshot.priorityQueue;
+            Integer deaths = snapshot == null ? null : snapshot.deathCount;
+            String priority = snapshot == null ? null
+                    : snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
             print(SectionFormatter.header("Player Data"));
             print("玩家：" + overview.playerName());
             print("> 发言次数：" + overview.chatCount() + "次");
@@ -463,13 +463,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             print("");
             print("[首次记录]： " + format(overview.firstSeenAt()));
             print("[最近上线]： " + optionalTime(overview.latestLoginAt()));
-            print("[最近下线]： " + (overview.latestLogoutAt() == null ? "在线中" : format(overview.latestLogoutAt())));
+            print("[最近下线]： " + latestLogout(overview));
             print("[最近游玩时长]： " + durationMillis(overview.latestSessionDurationMillis()));
             print("");
             print("绿色名字/聊天字体：" + yesNo(permissions.greenText));
             print("RunMax权限：" + yesNo(permissions.runMax));
             print("Dupe物刷权限：" + yesNo(permissions.dupe));
-            print("优先列队：" + value(priority));
+            print("优先队列：" + value(priority));
             print("");
             print("- 总游玩时长：" + hours(snapshot == null ? null : snapshot.playtimeSeconds));
             print("- 近30天游玩时长：" + hoursFromMillis(overview.playtimeLast30DaysMillis()));
@@ -831,6 +831,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(colorUsage("Usage: playermonitor backup limit <count>"));
     }
 
+    private String latestLogout(PlayerOverview overview) {
+        if (overview.latestLoginAt() == null) {
+            return "无";
+        }
+        return overview.latestLogoutAt() == null ? "在线中" : format(overview.latestLogoutAt());
+    }
+
     private void stat(String playerName, Optional<StatSnapshot> snapshotOptional) {
         if (snapshotOptional.isEmpty()) {
             print("暂无 stat 记录: " + playerName);
@@ -838,7 +845,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         StatSnapshot snapshot = snapshotOptional.get();
         PlayerPermissions permissions = snapshot.permissions == null ? new PlayerPermissions() : snapshot.permissions;
-        Integer deaths = snapshot.deathCount != null ? snapshot.deathCount : snapshot.onlineCount;
+        Integer deaths = snapshot.deathCount;
         String priority = snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
         print(SectionFormatter.header("Player stat"));
         print(CYAN + "玩家名称: " + PLAYER_COLOR + playerName + RESET);

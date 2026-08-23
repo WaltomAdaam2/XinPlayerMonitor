@@ -198,6 +198,11 @@ public final class XinPlayerMonitor implements Plugin {
         }
         if (service != null) {
             try {
+                service.flush();
+            } catch (Throwable error) {
+                cleanupFailure = appendCleanupFailure(cleanupFailure, error);
+            }
+            try {
                 service.close();
             } catch (Throwable error) {
                 cleanupFailure = appendCleanupFailure(cleanupFailure, error);

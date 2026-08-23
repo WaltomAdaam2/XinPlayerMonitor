@@ -35,7 +35,10 @@ final class PlayerMonitorListener implements Listener {
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
     private static final long CONNECTION_WATCHDOG_PERIOD_MILLIS = TimeUnit.SECONDS.toMillis(30);
     private static final long CONNECTION_WATCHDOG_GRACE_MILLIS = TimeUnit.MINUTES.toMillis(1);
-    private static final Pattern PUBLIC_CHAT_TEXT = Pattern.compile("^<(?:§a)?([^§>]+)(?:§f)?>\\s*(.*)$");
+    private static final Pattern MINECRAFT_FORMAT_CODE = Pattern.compile("(?i)§[0-9a-fk-or]");
+    private static final Pattern PUBLIC_CHAT_TEXT = Pattern.compile(
+            "^(?:§[0-9a-fk-or])*\\s*<((?:(?:§[0-9a-fk-or])|[^>])+)>(.*)$",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private final PlayerMonitorService service;
     private final PluginLog log;
@@ -275,11 +278,12 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
-        boolean brandNew = isBrandNewPlayer(playerName);
+        boolean scanJoinStat = settings.statEnabled() && settings.scanOnJoin();
+        boolean brandNew = scanJoinStat && isBrandNewPlayer(playerName);
         if (onlinePlayers.put(normalize(playerName), playerName) == null) {
             recordLogin(playerName, System.currentTimeMillis());
         }
-        if (settings.statEnabled() && settings.scanOnJoin()) {
+        if (scanJoinStat) {
             enqueueAutomaticJoinStat(playerName, brandNew);
         }
     }
@@ -317,7 +321,7 @@ final class PlayerMonitorListener implements Listener {
             context.publicChatEventSeen = true;
         }
         String message = event.getMessage();
-        if (message == null || message.isEmpty()) {
+        if (message == null) {
             chatRejected.incrementAndGet();
             return;
         }
@@ -370,18 +374,24 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String text = event.getText();
-        if (text == null || text.isBlank() || text.indexOf('<') < 0 || text.indexOf('>') < 0) {
+        if (text == null || text.indexOf('<') < 0 || text.indexOf('>') < 0) {
             return;
         }
-        Matcher matcher = PUBLIC_CHAT_TEXT.matcher(text.strip());
+        Matcher matcher = PUBLIC_CHAT_TEXT.matcher(text);
         if (!matcher.matches()) {
             chatParseFailed.incrementAndGet();
             return;
         }
         publicChatParsed.incrementAndGet();
-        String playerName = matcher.group(1).trim();
+        String playerName = MINECRAFT_FORMAT_CODE.matcher(matcher.group(1)).replaceAll("").trim();
         String message = matcher.group(2);
-        if (playerName.isEmpty() || message.isEmpty()) {
+        if (message.startsWith(" ")) {
+            message = message.substring(1);
+        }
+        if (message.startsWith("§a")) {
+            message = message.substring(2);
+        }
+        if (playerName.isEmpty()) {
             chatRejected.incrementAndGet();
             return;
         }
@@ -592,9 +602,10 @@ final class PlayerMonitorListener implements Listener {
             for (String playerName : currentPlayers) {
                 onlinePlayers.put(normalize(playerName), playerName);
             }
+            boolean trackBrandNewPlayers = settings.statEnabled() && settings.scanOnJoin();
             for (String playerName : currentPlayers) {
                 if (!containsIgnoreCase(previousPlayers, playerName)) {
-                    boolean brandNew = isBrandNewPlayer(playerName);
+                    boolean brandNew = trackBrandNewPlayers && isBrandNewPlayer(playerName);
                     recordLogin(playerName, gameEntryAt);
                     reconnectedNewPlayers.add(playerName);
                     if (brandNew) {
