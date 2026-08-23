@@ -27,9 +27,15 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 final class PlayerMonitorListener implements Listener {
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
+    private static final long CONNECTION_WATCHDOG_PERIOD_MILLIS = TimeUnit.SECONDS.toMillis(30);
+    private static final long CONNECTION_WATCHDOG_GRACE_MILLIS = TimeUnit.MINUTES.toMillis(1);
+    private static final Pattern PUBLIC_CHAT_TEXT = Pattern.compile("^<(?:§a)?([^§>]+)(?:§f)?>\\s*(.*)$");
 
     private final PlayerMonitorService service;
     private final PluginLog log;
@@ -62,7 +68,17 @@ final class PlayerMonitorListener implements Listener {
     private final Set<String> disconnectedPlayers = ConcurrentHashMap.newKeySet();
     private final Set<String> reconnectedNewPlayers = ConcurrentHashMap.newKeySet();
     private final Set<String> reconnectedBrandNewPlayers = ConcurrentHashMap.newKeySet();
+    private final AtomicLong systemChatReceived = new AtomicLong();
+    private final AtomicLong publicChatParsed = new AtomicLong();
+    private final AtomicLong chatAcceptedByPlayerMonitor = new AtomicLong();
+    private final AtomicLong chatRejected = new AtomicLong();
+    private final AtomicLong chatParseFailed = new AtomicLong();
+    private final AtomicLong chatDbFailed = new AtomicLong();
+    private final ThreadLocal<SystemChatContext> systemChatContext = new ThreadLocal<>();
     private ScheduledFuture<?> disconnectFinalizer;
+    private ScheduledFuture<?> connectionWatchdog;
+    private volatile long stuckGameStateSince;
+    private volatile long lastRosterDriftWarningAt;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
         this.service = service;
@@ -83,6 +99,8 @@ final class PlayerMonitorListener implements Listener {
                 },
                 this::handleStatSendFailure);
         retryExecutor.scheduleWithFixedDelay(this::retryTimedOutStats, 100L, 100L, TimeUnit.MILLISECONDS);
+        connectionWatchdog = retryExecutor.scheduleWithFixedDelay(this::connectionWatchdog,
+                CONNECTION_WATCHDOG_PERIOD_MILLIS, CONNECTION_WATCHDOG_PERIOD_MILLIS, TimeUnit.MILLISECONDS);
     }
 
     void close() {
@@ -102,6 +120,10 @@ final class PlayerMonitorListener implements Listener {
             if (disconnectFinalizer != null) {
                 disconnectFinalizer.cancel(false);
                 disconnectFinalizer = null;
+            }
+            if (connectionWatchdog != null) {
+                connectionWatchdog.cancel(false);
+                connectionWatchdog = null;
             }
         }
         statQueue.close();
@@ -285,38 +307,90 @@ final class PlayerMonitorListener implements Listener {
 
     @EventHandler
     public void onPublicChat(PublicChatEvent event) {
-        if (!gameActive) {
+        if (closed) {
+            chatRejected.incrementAndGet();
             return;
+        }
+        publicChatParsed.incrementAndGet();
+        SystemChatContext context = systemChatContext.get();
+        if (context != null) {
+            context.publicChatEventSeen = true;
         }
         String message = event.getMessage();
         if (message == null || message.isEmpty()) {
+            chatRejected.incrementAndGet();
             return;
         }
         String playerName = nameOf(event.getSender());
+        chatAcceptedByPlayerMonitor.incrementAndGet();
         try {
             service.recordChat(playerName, message, System.currentTimeMillis());
         } catch (IOException error) {
+            chatDbFailed.incrementAndGet();
             log.warn("failed to record player " + playerName + ": " + error.getMessage());
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void beforeSystemChat(SystemChatMessageEvent event) {
+        systemChatReceived.incrementAndGet();
+        systemChatContext.set(new SystemChatContext());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onSystemChat(SystemChatMessageEvent event) {
-        if (!gameActive || !beginStatCallback()) {
+        try {
+            if (gameActive && beginStatCallback()) {
+                try {
+                    retryTimedOutStats();
+                    statResponses.accept(event.getText()).ifPresent(captured -> {
+                        statOutputSuppressionUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+                        String normalizedName = normalize(captured.playerName());
+                        statAttempts.remove(normalizedName);
+                        pendingStatDispatches.remove(normalizedName);
+                        finishStatCycle(captured.playerName());
+                        scheduleStatWrite(captured);
+                    });
+                } finally {
+                    endStatCallback();
+                }
+            }
+            recordFallbackPublicChat(event);
+        } finally {
+            systemChatContext.remove();
+        }
+    }
+
+    private void recordFallbackPublicChat(SystemChatMessageEvent event) {
+        SystemChatContext context = systemChatContext.get();
+        if (context != null && context.publicChatEventSeen) {
             return;
         }
+        if (closed || event.isOverlay()) {
+            return;
+        }
+        String text = event.getText();
+        if (text == null || text.isBlank() || text.indexOf('<') < 0 || text.indexOf('>') < 0) {
+            return;
+        }
+        Matcher matcher = PUBLIC_CHAT_TEXT.matcher(text.strip());
+        if (!matcher.matches()) {
+            chatParseFailed.incrementAndGet();
+            return;
+        }
+        publicChatParsed.incrementAndGet();
+        String playerName = matcher.group(1).trim();
+        String message = matcher.group(2);
+        if (playerName.isEmpty() || message.isEmpty()) {
+            chatRejected.incrementAndGet();
+            return;
+        }
+        chatAcceptedByPlayerMonitor.incrementAndGet();
         try {
-            retryTimedOutStats();
-            statResponses.accept(event.getText()).ifPresent(captured -> {
-                statOutputSuppressionUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
-                String normalizedName = normalize(captured.playerName());
-                statAttempts.remove(normalizedName);
-                pendingStatDispatches.remove(normalizedName);
-                finishStatCycle(captured.playerName());
-                scheduleStatWrite(captured);
-            });
-        } finally {
-            endStatCallback();
+            service.recordChat(playerName, message, System.currentTimeMillis());
+        } catch (IOException error) {
+            chatDbFailed.incrementAndGet();
+            log.warn("failed to record fallback chat for " + playerName + ": " + error.getMessage());
         }
     }
 
@@ -381,8 +455,13 @@ final class PlayerMonitorListener implements Listener {
     }
 
     StatScanStatus statScanStatus() {
-        return new StatScanStatus(gameActive, onlinePlayers.size(), statQueue.size(),
-                pendingStatDispatches.size(), activeStatCycles.size(), statResponses.hasPending());
+        RosterDrift drift = rosterDrift();
+        return new StatScanStatus(gameActive, reconnectPending, rosterReconciling, forceFreshRoster,
+                reconnectGeneration, disconnectAt, onlinePlayers.size(), statQueue.size(),
+                pendingStatDispatches.size(), activeStatCycles.size(), statResponses.hasPending(),
+                drift.botRoster(), drift.monitorRoster(), drift.missingFromMonitor(), drift.extraInMonitor(),
+                systemChatReceived.get(), publicChatParsed.get(), chatAcceptedByPlayerMonitor.get(),
+                chatRejected.get(), chatParseFailed.get(), chatDbFailed.get());
     }
 
     List<String> onlinePlayerNames() {
@@ -564,6 +643,97 @@ final class PlayerMonitorListener implements Listener {
         }
         log.warn("finalized disconnected sessions after timeout");
         logger.info("Finalized disconnected sessions after timeout.");
+    }
+
+    private void connectionWatchdog() {
+        connectionWatchdog(false);
+    }
+
+    private void connectionWatchdog(boolean ignoreBotRunningForTesting) {
+        if (closed) {
+            return;
+        }
+        if (Bot.INSTANCE.getServer() != Server.Game
+                || (!ignoreBotRunningForTesting && !Bot.INSTANCE.isRunning())) {
+            stuckGameStateSince = 0L;
+            return;
+        }
+        RosterDrift drift = rosterDrift();
+        long now = System.currentTimeMillis();
+        if ((drift.missingFromMonitor() > 0 || drift.extraInMonitor() > 0)
+                && now - lastRosterDriftWarningAt >= TimeUnit.MINUTES.toMillis(5)) {
+            lastRosterDriftWarningAt = now;
+            log.warn("Player roster drift detected: botRoster=" + drift.botRoster()
+                    + ", monitorRoster=" + drift.monitorRoster()
+                    + ", missing=" + drift.missingFromMonitor()
+                    + ", extra=" + drift.extraInMonitor());
+        }
+        if (gameActive && !reconnectPending && !rosterReconciling) {
+            stuckGameStateSince = 0L;
+            return;
+        }
+        if (stuckGameStateSince == 0L) {
+            stuckGameStateSince = now;
+            return;
+        }
+        if (now - stuckGameStateSince < CONNECTION_WATCHDOG_GRACE_MILLIS) {
+            return;
+        }
+        if (reconnectPending) {
+            if (reconcileAfterReconnect(now)) {
+                log.warn("connection watchdog recovered stuck reconnect state");
+            }
+        } else {
+            recoverStuckGameState(now);
+        }
+        stuckGameStateSince = 0L;
+    }
+
+    private void recoverStuckGameState(long now) {
+        synchronized (connectionStateLock) {
+            if (closed || reconnectPending) {
+                return;
+            }
+            reconnectGeneration++;
+            gameActive = true;
+            rosterReconciling = false;
+            forceFreshRoster = false;
+        }
+        syncMonitorRosterFromBot();
+        clearStatTracking();
+        log.warn("connection watchdog restored Game state from Bot roster at " + now);
+    }
+
+    private void syncMonitorRosterFromBot() {
+        onlinePlayers.clear();
+        for (GameProfile profile : Bot.INSTANCE.players.values()) {
+            String playerName = nameOf(profile);
+            if (playerName != null && !playerName.isBlank()) {
+                onlinePlayers.put(normalize(playerName), playerName);
+            }
+        }
+    }
+
+    private RosterDrift rosterDrift() {
+        Set<String> bot = Bot.INSTANCE.players.values().stream()
+                .map(PlayerMonitorListener::nameOf)
+                .filter(name -> name != null && !name.isBlank())
+                .map(PlayerMonitorListener::normalize)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> monitor = Set.copyOf(onlinePlayers.keySet());
+        int missing = 0;
+        for (String name : bot) {
+            if (!monitor.contains(name)) {
+                missing++;
+            }
+        }
+        int extra = 0;
+        for (String name : monitor) {
+            if (!bot.contains(name)) {
+                extra++;
+            }
+        }
+        return new RosterDrift(bot.size(), monitor.size(), missing, extra);
     }
 
     private void recordLogoutAt(String playerName, long timestamp) {
@@ -764,6 +934,11 @@ final class PlayerMonitorListener implements Listener {
         return activeStatCycles.contains(normalize(playerName));
     }
 
+    void runConnectionWatchdogForTesting() {
+        stuckGameStateSince = System.currentTimeMillis() - CONNECTION_WATCHDOG_GRACE_MILLIS;
+        connectionWatchdog(true);
+    }
+
     private static String nameOf(GameProfile profile) {
         return profile.getName();
     }
@@ -790,10 +965,22 @@ final class PlayerMonitorListener implements Listener {
         }
     }
 
-    record StatScanStatus(boolean gameActive, int onlinePlayers, int queued,
-                          int pendingDispatches, int activeCycles, boolean waitingResponse) {
+    record StatScanStatus(boolean gameActive, boolean reconnectPending, boolean rosterReconciling,
+                          boolean forceFreshRoster, long reconnectGeneration, long lastDisconnectAt,
+                          int onlinePlayers, int queued, int pendingDispatches, int activeCycles,
+                          boolean waitingResponse, int botRoster, int monitorRoster, int missingFromMonitor,
+                          int extraInMonitor, long systemChatReceived, long publicChatParsed,
+                          long chatAcceptedByPlayerMonitor, long chatRejected, long chatParseFailed,
+                          long chatDbFailed) {
     }
 
     private record StatScanResult(int queued, int cooldownSkipped) {
+    }
+
+    private record RosterDrift(int botRoster, int monitorRoster, int missingFromMonitor, int extraInMonitor) {
+    }
+
+    private static final class SystemChatContext {
+        private boolean publicChatEventSeen;
     }
 }

@@ -47,6 +47,7 @@ class PlayerMonitorListenerReconnectTest {
                 NOPLogger.NOP_LOGGER,
                 settings);
         Bot.INSTANCE.players.clear();
+        Bot.INSTANCE.setServer(Server.Game);
     }
 
     @AfterEach
@@ -58,6 +59,7 @@ class PlayerMonitorListenerReconnectTest {
             service.close();
         }
         Bot.INSTANCE.players.clear();
+        Bot.INSTANCE.setServer(Server.Login);
     }
 
     @Test
@@ -170,6 +172,25 @@ class PlayerMonitorListenerReconnectTest {
         assertTrue(original.isCancelled());
         long remaining = replacement.getDelay(TimeUnit.MILLISECONDS);
         assertTrue(remaining >= 0L && remaining <= TimeUnit.MINUTES.toMillis(1));
+    }
+
+    @Test
+    void watchdogRecoversStuckReconnectWithoutSplittingExistingSession() throws Exception {
+        GameProfile player = profile("WatchdogPlayer");
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onPlayerJoin(new PlayerJoinEvent(player));
+        long loginAt = service.getRecord("WatchdogPlayer").loginSessions.get(0).loginAt;
+
+        listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+        Bot.INSTANCE.players.put(player.getId(), player);
+        listener.runConnectionWatchdogForTesting();
+
+        PlayerMonitorListener.StatScanStatus status = listener.statScanStatus();
+        assertTrue(status.gameActive());
+        assertEquals(0, status.missingFromMonitor());
+        assertEquals(1, service.getRecord("WatchdogPlayer").loginSessions.size());
+        assertEquals(loginAt, service.getRecord("WatchdogPlayer").loginSessions.get(0).loginAt);
+        assertNull(service.getRecord("WatchdogPlayer").loginSessions.get(0).logoutAt);
     }
 
     private static GameProfile profile(String name) {

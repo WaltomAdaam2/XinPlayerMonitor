@@ -13,6 +13,7 @@ import xin.bbtt.mcbot.events.DisconnectEvent;
 import xin.bbtt.mcbot.events.PublicChatEvent;
 import xin.bbtt.mcbot.events.PlayerJoinEvent;
 import xin.bbtt.mcbot.events.ServerChangeEvent;
+import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -49,6 +50,7 @@ class PlayerMonitorListenerChatLogTest {
                 NOPLogger.NOP_LOGGER,
                 settings);
         Bot.INSTANCE.players.clear();
+        Bot.INSTANCE.setServer(Server.Game);
     }
 
     @AfterEach
@@ -60,6 +62,7 @@ class PlayerMonitorListenerChatLogTest {
             service.close();
         }
         Bot.INSTANCE.players.clear();
+        Bot.INSTANCE.setServer(Server.Login);
     }
 
     @Test
@@ -84,6 +87,59 @@ class PlayerMonitorListenerChatLogTest {
         var chats = service.recentChats("RawChatter", 10);
         assertEquals(1, chats.size());
         assertEquals(raw, chats.get(0).message);
+    }
+
+    @Test
+    void recordsPublicChatEvenDuringReconnectWindow() throws Exception {
+        GameProfile profile = profile("ReconnectChat");
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+
+        listener.onPublicChat(new PublicChatEvent(profile, "still visible"));
+
+        var chats = service.recentChats("ReconnectChat", 10);
+        assertEquals(1, chats.size());
+        assertEquals("still visible", chats.get(0).message);
+    }
+
+    @Test
+    void fallbackRecordsPublicSystemChatWhenMetaPluginDropsMissingRosterSender() throws Exception {
+        SystemChatMessageEvent event = new SystemChatMessageEvent(Component.text("<RosterMissing> hello after drift"), false);
+
+        listener.beforeSystemChat(event);
+        listener.onSystemChat(event);
+
+        var chats = service.recentChats("RosterMissing", 10);
+        assertEquals(1, chats.size());
+        assertEquals("hello after drift", chats.get(0).message);
+    }
+
+    @Test
+    void fallbackDoesNotDuplicatePublicChatAlreadyGeneratedFromTheSameSystemMessage() throws Exception {
+        GameProfile profile = profile("NoDuplicate");
+        SystemChatMessageEvent event = new SystemChatMessageEvent(Component.text("<NoDuplicate> once"), false);
+
+        listener.beforeSystemChat(event);
+        listener.onPublicChat(new PublicChatEvent(profile, "once"));
+        listener.onSystemChat(event);
+
+        var chats = service.recentChats("NoDuplicate", 10);
+        assertEquals(1, chats.size());
+        assertEquals("once", chats.get(0).message);
+    }
+
+    @Test
+    void statusCountsChatPipelineStages() throws Exception {
+        GameProfile profile = profile("CounterChat");
+        listener.onPublicChat(new PublicChatEvent(profile, "hello"));
+
+        PlayerMonitorListener.StatScanStatus status = listener.statScanStatus();
+
+        assertEquals(1, status.publicChatParsed());
+        assertEquals(1, status.chatAcceptedByPlayerMonitor());
+        assertEquals(0, status.chatRejected());
+        assertEquals(0, status.chatDbFailed());
     }
 
     @Test
