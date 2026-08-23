@@ -492,8 +492,33 @@ class SQLitePlayerRecordStoreTest {
             DatabaseHealth health = store.databaseHealth();
             assertTrue(health.failedEventLines() >= 1L);
             assertTrue(health.pendingFailedEvents() >= 1L);
+            assertEquals(1L, health.chatQueueRejected());
+            assertEquals(1L, health.chatDbFailed());
         } finally {
             store.setWriteDelayForTesting(0L);
+            store.close();
+        }
+    }
+
+    @Test
+    void chatSubmittedAfterTerminalFailureIsDeadLettered() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-terminal-deadletter");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        try {
+            store.enterTerminalFailureForTesting(new IOException("simulated terminal failure"));
+
+            IOException error = assertThrows(IOException.class,
+                    () -> store.recordChat("FailedChat", "saved for replay", 100L));
+
+            assertTrue(error.getMessage().contains("terminal failed state"));
+            Path failedEvents = directory.resolve("failed-events.jsonl");
+            assertTrue(Files.exists(failedEvents));
+            assertTrue(Files.readString(failedEvents, StandardCharsets.UTF_8).contains("saved for replay"));
+            DatabaseHealth health = store.databaseHealth();
+            assertEquals(1L, health.chatDbFailed());
+            assertEquals(1L, health.failedEventLines());
+        } finally {
             store.close();
         }
     }
@@ -645,6 +670,45 @@ class SQLitePlayerRecordStoreTest {
     }
 
     @Test
+    void simulatedSixMonthChatRunTracksWriterHealth() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-six-month-run");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.queueCapacity = 50_000;
+        settings.batchSize = 500;
+        settings.flushIntervalMs = 10;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        store.initialize();
+        int messages = 0;
+        try {
+            long day = TimeUnit.DAYS.toMillis(1);
+            for (int offset = 0; offset < 180; offset++) {
+                long base = offset * day;
+                String playerName = "MonthRunner" + (offset % 50);
+                store.recordLogin(playerName, base);
+                for (int chat = 0; chat < 50; chat++) {
+                    store.recordChat(playerName, "day-" + offset + "-msg-" + chat, base + chat + 1);
+                    messages++;
+                }
+                store.recordLogout(playerName, base + TimeUnit.HOURS.toMillis(1));
+            }
+            store.flush();
+            DatabaseHealth health = store.databaseHealth();
+            assertEquals(messages, health.chatCommitted());
+            assertTrue(health.lastChatCommittedAt() > 0L);
+            assertTrue(health.lastSessionCommittedAt() > 0L);
+            assertTrue(health.queueHighWaterMark() > 0);
+            assertFalse(health.writerStalled());
+        } finally {
+            store.close();
+        }
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(messages, countRows(connection, "chat_messages"));
+            SQLiteSchema.verify(connection);
+        }
+    }
+
+    @Test
     void interleavedLoginLogoutStressKeepsDatabaseConsistent() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-interleaved-stress");
         MonitorSettings.Database settings = new MonitorSettings.Database();
@@ -710,6 +774,57 @@ class SQLitePlayerRecordStoreTest {
 
         try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
             assertEquals(1_000, countRows(connection, "chat_messages"));
+            SQLiteSchema.verify(connection);
+        }
+    }
+
+    @Test
+    void parallelPressureKeepsAllAcceptedChats() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-parallel-pressure");
+        MonitorSettings.Database settings = new MonitorSettings.Database();
+        settings.queueCapacity = 50_000;
+        settings.batchSize = 500;
+        settings.flushIntervalMs = 10;
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, settings);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        store.initialize();
+        int workers = 8;
+        int perWorker = 2_500;
+        List<Thread> threads = new ArrayList<>();
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            for (int worker = 0; worker < workers; worker++) {
+                int workerId = worker;
+                Thread thread = new Thread(() -> {
+                    try {
+                        start.await();
+                        for (int index = 0; index < perWorker; index++) {
+                            store.recordChat("Pressure" + (index % 100),
+                                    workerId + "-" + index, workerId * 1_000_000L + index);
+                        }
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    }
+                }, "sqlite-pressure-" + worker);
+                threads.add(thread);
+                thread.start();
+            }
+            start.countDown();
+            for (Thread thread : threads) {
+                thread.join(30_000L);
+                assertFalse(thread.isAlive(), "pressure submitter should finish");
+            }
+            if (failure.get() != null) {
+                throw new AssertionError("pressure writer failed", failure.get());
+            }
+            store.flush();
+            assertEquals((long) workers * perWorker, store.databaseHealth().chatCommitted());
+        } finally {
+            store.close();
+        }
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals(workers * perWorker, countRows(connection, "chat_messages"));
             SQLiteSchema.verify(connection);
         }
     }

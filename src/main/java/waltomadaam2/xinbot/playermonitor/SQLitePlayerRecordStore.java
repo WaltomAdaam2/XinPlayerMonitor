@@ -26,8 +26,10 @@ import java.sql.Types;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
@@ -41,8 +43,11 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -58,11 +63,28 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private final Object playerNamesLock = new Object();
     private final AtomicLong nextSequence = new AtomicLong();
     private final AtomicLong lastCommittedAt = new AtomicLong();
+    private final AtomicLong lastWriterProgressAt = new AtomicLong();
+    private final AtomicLong lastChatCommittedAt = new AtomicLong();
+    private final AtomicLong lastSessionCommittedAt = new AtomicLong();
+    private final AtomicLong lastStatCommittedAt = new AtomicLong();
     private final AtomicLong lastFailureAt = new AtomicLong();
+    private final AtomicLong writerRecoveryCount = new AtomicLong();
+    private final AtomicLong chatCommitted = new AtomicLong();
+    private final AtomicLong chatDbFailed = new AtomicLong();
+    private final AtomicLong chatQueueRejected = new AtomicLong();
+    private final AtomicLong failedEventPersistFailures = new AtomicLong();
     private final AtomicLong failedEventLines = new AtomicLong();
     private final AtomicLong replayedFailedEvents = new AtomicLong();
     private final AtomicLong malformedFailedEvents = new AtomicLong();
+    private final AtomicInteger queueHighWaterMark = new AtomicInteger();
+    private final AtomicInteger inFlightCount = new AtomicInteger();
+    private final Object queueSamplesLock = new Object();
+    private final Deque<QueueSample> queueSamples = new ArrayDeque<>();
     private volatile String lastFailureMessage = "";
+    private volatile boolean writerRecovering;
+    private volatile boolean writerStalled;
+    private volatile long lastWriterStallWarningAt;
+    private volatile long lastQueueGrowthWarningAt;
     private final ConcurrentLinkedQueue<FailureRecord> pendingFailures = new ConcurrentLinkedQueue<>();
     private volatile Consumer<String> warningSink = ignored -> {
     };
@@ -75,6 +97,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private volatile LifecycleState lifecycleState = LifecycleState.NEW;
     private volatile IOException terminalFailure;
     private Thread writerThread;
+    private ScheduledExecutorService watchdogExecutor;
 
     SQLitePlayerRecordStore(Path directory, MonitorSettings.Database settings) {
         this.directory = Objects.requireNonNull(directory, "directory");
@@ -102,6 +125,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     void setWriteDelayForTesting(long writeDelayMillisForTesting) {
         this.writeDelayMillisForTesting = Math.max(0L, writeDelayMillisForTesting);
+    }
+
+    void enterTerminalFailureForTesting(IOException error) {
+        enterTerminalFailure(error);
     }
 
     @Override
@@ -156,10 +183,19 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
         synchronized (lifecycleLock) {
             terminalFailure = null;
+            lastWriterProgressAt.set(System.currentTimeMillis());
+            writerRecovering = false;
+            writerStalled = false;
             lifecycleState = LifecycleState.RUNNING;
             writerThread = new Thread(this::writerLoop, "XinPlayerMonitor-sqlite-writer");
             writerThread.setDaemon(true);
             writerThread.start();
+            watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "XinPlayerMonitor-sqlite-watchdog");
+                thread.setDaemon(true);
+                return thread;
+            });
+            watchdogExecutor.scheduleWithFixedDelay(this::writerWatchdog, 30L, 30L, TimeUnit.SECONDS);
         }
     }
 
@@ -175,6 +211,11 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                 lifecycleState = LifecycleState.CLOSING;
             }
             thread = writerThread;
+        }
+        ScheduledExecutorService watchdog = watchdogExecutor;
+        if (watchdog != null) {
+            watchdog.shutdownNow();
+            watchdogExecutor = null;
         }
 
         if (thread != null && thread != Thread.currentThread()) {
@@ -281,6 +322,11 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     @Override
     public DatabaseStats databaseStats() throws IOException {
         flush();
+        return databaseStatsSnapshot();
+    }
+
+    @Override
+    public DatabaseStats databaseStatsSnapshot() throws IOException {
         try (Connection connection = openConnection()) {
             return new DatabaseStats(
                     countRows(connection, "players"),
@@ -298,14 +344,29 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         Thread thread = writerThread;
         long failedLines = failedEventLines.get();
         long replayed = replayedFailedEvents.get();
+        int currentQueueSize = queue.size();
+        recordQueueSample(System.currentTimeMillis(), currentQueueSize);
         return new DatabaseHealth(
                 lifecycleState.name(),
                 thread != null && thread.isAlive(),
-                queue.size(),
-                queue.size() + queue.remainingCapacity(),
+                writerRecovering,
+                writerStalled,
+                currentQueueSize,
+                currentQueueSize + queue.remainingCapacity(),
+                queueHighWaterMark.get(),
+                queueDelta(TimeUnit.MINUTES.toMillis(1)),
+                queueDelta(TimeUnit.MINUTES.toMillis(5)),
                 lastCommittedAt.get(),
+                lastChatCommittedAt.get(),
+                lastSessionCommittedAt.get(),
+                lastStatCommittedAt.get(),
                 lastFailureAt.get(),
                 lastFailureMessage,
+                writerRecoveryCount.get(),
+                chatCommitted.get(),
+                chatDbFailed.get(),
+                chatQueueRejected.get(),
+                failedEventPersistFailures.get(),
                 failedLines,
                 replayed,
                 Math.max(0L, failedLines - replayed),
@@ -456,6 +517,61 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         return countRows(playerName, "chat_messages");
     }
 
+    @Override
+    public Optional<PlayerOverview> playerOverview(String playerName, long now) throws IOException {
+        validatePlayerName(playerName);
+        flush();
+        try (Connection connection = openConnection()) {
+            Long playerId = findPlayerId(connection, normalize(playerName));
+            if (playerId == null) {
+                return Optional.empty();
+            }
+            String displayName;
+            long firstSeenAt;
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT display_name, first_seen_at FROM players WHERE id = ?")) {
+                statement.setLong(1, playerId);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    if (!resultSet.next()) {
+                        return Optional.empty();
+                    }
+                    displayName = resultSet.getString("display_name");
+                    firstSeenAt = resultSet.getLong("first_seen_at");
+                }
+            }
+
+            long chatTotal = countRows(connection, playerId, "chat_messages");
+            Long latestLoginAt = null;
+            Long latestLogoutAt = null;
+            Long latestDurationMillis = null;
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT login_at, logout_at
+                    FROM sessions
+                    WHERE player_id = ?
+                    ORDER BY login_at DESC, id DESC
+                    LIMIT 1
+                    """)) {
+                statement.setLong(1, playerId);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    if (resultSet.next()) {
+                        latestLoginAt = resultSet.getLong("login_at");
+                        long logout = resultSet.getLong("logout_at");
+                        latestLogoutAt = resultSet.wasNull() ? null : logout;
+                        latestDurationMillis = Math.max(0L, (latestLogoutAt == null ? now : latestLogoutAt) - latestLoginAt);
+                    }
+                }
+            }
+
+            long playtimeLast30DaysMillis = playtimeSince(connection, playerId,
+                    now - TimeUnit.DAYS.toMillis(30), now);
+            StatSnapshot latestStat = latestStatForPlayerId(connection, playerId);
+            return Optional.of(new PlayerOverview(displayName, firstSeenAt, chatTotal, latestLoginAt,
+                    latestLogoutAt, latestDurationMillis, playtimeLast30DaysMillis, latestStat));
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("read player overview " + playerName, error);
+        }
+    }
+
     private int countRows(String playerName, String tableName) throws IOException {
         validatePlayerName(playerName);
         flush();
@@ -585,7 +701,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                     markPlayersOffline.executeUpdate();
                 }
                 connection.commit();
-                lastCommittedAt.set(System.currentTimeMillis());
+                long committedAt = System.currentTimeMillis();
+                lastCommittedAt.set(committedAt);
+                lastWriterProgressAt.set(committedAt);
+                lastSessionCommittedAt.set(committedAt);
                 return openSessions;
             } catch (SQLException error) {
                 SQLiteSchema.rollbackQuietly(connection);
@@ -705,7 +824,16 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                     markReplayed.executeUpdate();
                     connection.commit();
                     rememberCommittedPlayer(event);
-                    lastCommittedAt.set(System.currentTimeMillis());
+                    long committedAt = System.currentTimeMillis();
+                    lastCommittedAt.set(committedAt);
+                    lastWriterProgressAt.set(committedAt);
+                    if (event instanceof ChatEvent) {
+                        lastChatCommittedAt.set(committedAt);
+                    } else if (event instanceof LoginEvent || event instanceof LogoutEvent) {
+                        lastSessionCommittedAt.set(committedAt);
+                    } else if (event instanceof StatEvent) {
+                        lastStatCommittedAt.set(committedAt);
+                    }
                     replayed++;
                 } catch (Exception error) {
                     SQLiteSchema.rollbackQuietly(connection);
@@ -797,32 +925,142 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
+    private static long countRows(Connection connection, long playerId, String tableName) throws SQLException {
+        String sql = "SELECT COUNT(*) FROM " + tableName + " WHERE player_id = ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, playerId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getLong(1) : 0L;
+            }
+        }
+    }
+
+    private long playtimeSince(Connection connection, long playerId, long cutoffAt, long now) throws SQLException {
+        long total = 0L;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT login_at, logout_at
+                FROM sessions
+                WHERE player_id = ? AND COALESCE(logout_at, ?) > ?
+                """)) {
+            statement.setLong(1, playerId);
+            statement.setLong(2, now);
+            statement.setLong(3, cutoffAt);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    long loginAt = resultSet.getLong("login_at");
+                    long logoutAt = resultSet.getLong("logout_at");
+                    long end = resultSet.wasNull() ? now : Math.min(logoutAt, now);
+                    long start = Math.max(loginAt, cutoffAt);
+                    if (end > start) {
+                        total += end - start;
+                    }
+                }
+            }
+        }
+        return total;
+    }
+
+    private StatSnapshot latestStatForPlayerId(Connection connection, long playerId) throws SQLException, IOException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT stat_json
+                FROM stat_snapshots
+                WHERE player_id = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT 1
+                """)) {
+            statement.setLong(1, playerId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+                try {
+                    return gson.fromJson(resultSet.getString("stat_json"), StatSnapshot.class);
+                } catch (JsonParseException error) {
+                    throw new IOException("Unable to parse latest stat for player_id=" + playerId + ": "
+                            + error.getMessage(), error);
+                }
+            }
+        }
+    }
+
+    private void recordQueueSample(long now, int size) {
+        queueHighWaterMark.accumulateAndGet(size, Math::max);
+        synchronized (queueSamplesLock) {
+            queueSamples.addLast(new QueueSample(now, size));
+            long cutoff = now - TimeUnit.MINUTES.toMillis(6);
+            while (!queueSamples.isEmpty() && queueSamples.peekFirst().timestamp() < cutoff) {
+                queueSamples.removeFirst();
+            }
+        }
+    }
+
+    private int queueDelta(long windowMillis) {
+        long cutoff = System.currentTimeMillis() - windowMillis;
+        synchronized (queueSamplesLock) {
+            QueueSample oldest = null;
+            for (QueueSample sample : queueSamples) {
+                if (sample.timestamp() >= cutoff) {
+                    oldest = sample;
+                    break;
+                }
+            }
+            QueueSample newest = queueSamples.peekLast();
+            return oldest == null || newest == null ? 0 : newest.size() - oldest.size();
+        }
+    }
+
+    private void writerWatchdog() {
+        if (lifecycleState != LifecycleState.RUNNING) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        int queued = queue.size();
+        recordQueueSample(now, queued);
+        int active = queued + inFlightCount.get();
+        long lastProgress = lastWriterProgressAt.get();
+        long stallThreshold = Math.max(TimeUnit.MINUTES.toMillis(1), databaseSettings.busyTimeoutMs * 3L);
+        if (active > 0 && lastProgress > 0L && now - lastProgress > stallThreshold) {
+            writerStalled = true;
+            if (now - lastWriterStallWarningAt >= TimeUnit.MINUTES.toMillis(5)) {
+                lastWriterStallWarningAt = now;
+                warn("SQLite writer appears stalled; queue=" + queued
+                        + ", inFlight=" + inFlightCount.get()
+                        + ", lastCommit=" + lastProgress);
+            }
+        } else {
+            writerStalled = false;
+        }
+        int delta5m = queueDelta(TimeUnit.MINUTES.toMillis(5));
+        int capacity = queued + queue.remainingCapacity();
+        if (capacity > 0 && (queued >= capacity * 4 / 5 || delta5m > capacity / 10)
+                && now - lastQueueGrowthWarningAt >= TimeUnit.MINUTES.toMillis(5)) {
+            lastQueueGrowthWarningAt = now;
+            warn("SQLite queue backlog growing; queue=" + queued + "/" + capacity
+                    + ", peak=" + queueHighWaterMark.get()
+                    + ", delta5m=" + (delta5m >= 0 ? "+" : "") + delta5m);
+        }
+    }
+
     private void submit(DatabaseEvent event) throws IOException {
         Objects.requireNonNull(event, "event");
-        WriteTask task;
+        WriteTask task = new WriteTask(nextSequence.incrementAndGet(), event);
         IOException queueFailure = null;
         synchronized (lifecycleLock) {
             IOException fatal = terminalFailure;
             if (fatal != null || lifecycleState == LifecycleState.FAILED) {
-                throw new IOException("SQLite writer is in a terminal failed state", fatal);
+                queueFailure = new IOException("SQLite writer is in a terminal failed state", fatal);
+            } else if (lifecycleState != LifecycleState.RUNNING) {
+                queueFailure = new IOException("SQLite storage is not accepting events; state=" + lifecycleState);
             }
-            if (lifecycleState != LifecycleState.RUNNING) {
-                throw new IOException("SQLite storage is not accepting events; state=" + lifecycleState);
-            }
-            task = new WriteTask(nextSequence.incrementAndGet(), event);
-            try {
-                if (!queue.offer(task, Math.max(1000L, databaseSettings.flushIntervalMs), TimeUnit.MILLISECONDS)) {
-                    queueFailure = new IOException("SQLite write queue is full; event=" + event.operation());
-                }
-            } catch (InterruptedException error) {
-                Thread.currentThread().interrupt();
-                queueFailure = new IOException("Interrupted while queueing SQLite event " + event.operation(), error);
-            }
+        }
+        if (queueFailure == null && !queue.offer(task)) {
+            queueFailure = new IOException("SQLite write queue is full; event=" + event.operation());
         }
         if (queueFailure != null) {
             recordRejectedTask(task, queueFailure);
             throw queueFailure;
         }
+        queueHighWaterMark.accumulateAndGet(queue.size(), Math::max);
         if (event instanceof FlushEvent) {
             await(task);
         }
@@ -832,6 +1070,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         markFailure(error);
         if (!(task.event instanceof FlushEvent)) {
             pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), error));
+            if (task.event instanceof ChatEvent) {
+                chatQueueRejected.incrementAndGet();
+                chatDbFailed.incrementAndGet();
+            }
             persistFailedEvent(task, error);
         }
         task.completed.completeExceptionally(error);
@@ -861,29 +1103,51 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     private void writerLoop() {
         List<WriteTask> inFlight = new ArrayList<>();
-        try (Connection connection = openConnection(); WriterSql sql = new WriterSql(connection)) {
-            while (lifecycleState == LifecycleState.RUNNING || !queue.isEmpty()) {
-                WriteTask first = queue.poll(databaseSettings.flushIntervalMs, TimeUnit.MILLISECONDS);
-                if (first == null) {
-                    continue;
+        long recoveryBackoffMillis = 100L;
+        try {
+            while (lifecycleState == LifecycleState.RUNNING || !queue.isEmpty() || !inFlight.isEmpty()) {
+                try (Connection connection = openConnection(); WriterSql sql = new WriterSql(connection)) {
+                    writerRecovering = false;
+                    recoveryBackoffMillis = 100L;
+                    while (lifecycleState == LifecycleState.RUNNING || !queue.isEmpty() || !inFlight.isEmpty()) {
+                        if (inFlight.isEmpty()) {
+                            WriteTask first = queue.poll(databaseSettings.flushIntervalMs, TimeUnit.MILLISECONDS);
+                            if (first == null) {
+                                continue;
+                            }
+                            inFlight = new ArrayList<>(databaseSettings.batchSize);
+                            inFlight.add(first);
+                            queue.drainTo(inFlight, databaseSettings.batchSize - 1);
+                            inFlightCount.set(inFlight.size());
+                        }
+                        delayWriteForTesting();
+                        processBatch(connection, sql, inFlight);
+                        inFlight.clear();
+                        inFlightCount.set(0);
+                    }
+                    SQLiteSchema.checkpoint(connection);
+                } catch (SQLException error) {
+                    IOException io = SQLiteSchema.toIo("run SQLite writer", error);
+                    if (isTerminalSqliteFailure(error)) {
+                        failInFlight(inFlight, io);
+                        warn("SEVERE: SQLite writer entered terminal failed state: " + io.getMessage());
+                        enterTerminalFailure(io);
+                        break;
+                    }
+                    markFailure(io);
+                    writerRecovering = true;
+                    writerRecoveryCount.incrementAndGet();
+                    warn("SQLite writer recovered after connection error; pending batch=" + inFlight.size()
+                            + ", queue=" + queue.size()
+                            + ", error=" + io.getMessage());
+                    sleepBeforeRecovery(recoveryBackoffMillis);
+                    recoveryBackoffMillis = Math.min(TimeUnit.SECONDS.toMillis(5), recoveryBackoffMillis * 2L);
                 }
-                inFlight = new ArrayList<>(databaseSettings.batchSize);
-                inFlight.add(first);
-                delayWriteForTesting();
-                queue.drainTo(inFlight, databaseSettings.batchSize - 1);
-                processBatch(connection, sql, inFlight);
-                inFlight.clear();
             }
-            SQLiteSchema.checkpoint(connection);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             IOException io = new IOException("SQLite writer interrupted", error);
             failInFlight(inFlight, io);
-            enterTerminalFailure(io);
-        } catch (SQLException error) {
-            IOException io = SQLiteSchema.toIo("run SQLite writer", error);
-            failInFlight(inFlight, io);
-            warn("SEVERE: SQLite writer stopped: " + io.getMessage());
             enterTerminalFailure(io);
         } catch (RuntimeException error) {
             IOException io = new IOException("SQLite writer stopped unexpectedly", error);
@@ -891,6 +1155,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             warn("SEVERE: SQLite writer stopped: " + error.getMessage());
             enterTerminalFailure(io);
         } finally {
+            inFlightCount.set(0);
+            writerRecovering = false;
             synchronized (lifecycleLock) {
                 if (Thread.currentThread() == writerThread && lifecycleState == LifecycleState.CLOSING) {
                     lifecycleState = LifecycleState.CLOSED;
@@ -898,6 +1164,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                 lifecycleLock.notifyAll();
             }
         }
+    }
+
+    private void sleepBeforeRecovery(long backoffMillis) throws InterruptedException {
+        Thread.sleep(Math.max(100L, backoffMillis));
     }
 
     private void failInFlight(List<WriteTask> inFlight, IOException error) {
@@ -914,7 +1184,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             Thread.sleep(delay);
         }
     }
-    private void processBatch(Connection connection, WriterSql sql, List<WriteTask> batch) {
+    private void processBatch(Connection connection, WriterSql sql, List<WriteTask> batch) throws SQLException {
         try {
             connection.setAutoCommit(false);
             for (WriteTask task : batch) {
@@ -924,6 +1194,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             batch.forEach(this::completeCommitted);
         } catch (Exception batchError) {
             SQLiteSchema.rollbackQuietly(connection);
+            if (batchError instanceof SQLException sqlError && isRecoverableSqliteFailure(sqlError)) {
+                throw sqlError;
+            }
             if (batch.size() == 1) {
                 completeFailed(batch.get(0), batchError);
             } else {
@@ -947,7 +1220,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
-    private boolean processOne(Connection connection, WriterSql sql, WriteTask task) {
+    private boolean processOne(Connection connection, WriterSql sql, WriteTask task) throws SQLException {
         try {
             connection.setAutoCommit(false);
             applyEvent(sql, task.event);
@@ -956,6 +1229,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             return true;
         } catch (Exception error) {
             SQLiteSchema.rollbackQuietly(connection);
+            if (error instanceof SQLException sqlError && isRecoverableSqliteFailure(sqlError)) {
+                throw sqlError;
+            }
             completeFailed(task, error);
             return terminalFailure == null;
         } finally {
@@ -989,7 +1265,19 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private void completeCommitted(WriteTask task) {
         rememberCommittedPlayer(task.event);
         if (!(task.event instanceof FlushEvent)) {
-            lastCommittedAt.set(System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            lastCommittedAt.set(now);
+            lastWriterProgressAt.set(now);
+            if (task.event instanceof ChatEvent) {
+                lastChatCommittedAt.set(now);
+                chatCommitted.incrementAndGet();
+            } else if (task.event instanceof LoginEvent || task.event instanceof LogoutEvent) {
+                lastSessionCommittedAt.set(now);
+            } else if (task.event instanceof StatEvent) {
+                lastStatCommittedAt.set(now);
+            }
+        } else {
+            lastWriterProgressAt.set(System.currentTimeMillis());
         }
         if (task.event instanceof FlushEvent) {
             FailureRecord first = null;
@@ -1039,6 +1327,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
         markFailure(io);
         pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), io));
+        if (task.event instanceof ChatEvent) {
+            chatDbFailed.incrementAndGet();
+        }
         persistFailedEvent(task, io);
         warn("SQLite event failed; sequence=" + task.sequence
                 + ", operation=" + task.event.operation()
@@ -1056,13 +1347,22 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     private boolean isTerminalSqliteFailure(SQLException error) {
         int primaryCode = error.getErrorCode() & 0xFF;
-        return primaryCode == 7   // SQLITE_NOMEM
-                || primaryCode == 10  // SQLITE_IOERR
-                || primaryCode == 11  // SQLITE_CORRUPT
+        return primaryCode == 11  // SQLITE_CORRUPT
                 || primaryCode == 13  // SQLITE_FULL
-                || primaryCode == 14  // SQLITE_CANTOPEN
-                || primaryCode == 21  // SQLITE_MISUSE
                 || primaryCode == 26; // SQLITE_NOTADB
+    }
+
+    private boolean isRecoverableSqliteFailure(SQLException error) {
+        if (isTerminalSqliteFailure(error)) {
+            return false;
+        }
+        int primaryCode = error.getErrorCode() & 0xFF;
+        return primaryCode == 5   // SQLITE_BUSY
+                || primaryCode == 6   // SQLITE_LOCKED
+                || primaryCode == 10  // SQLITE_IOERR
+                || primaryCode == 14  // SQLITE_CANTOPEN
+                || primaryCode == 15  // SQLITE_PROTOCOL
+                || primaryCode == 17; // SQLITE_SCHEMA
     }
 
     private void persistFailedEvent(WriteTask task, IOException error) {
@@ -1079,6 +1379,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                         StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
                 failedEventLines.incrementAndGet();
             } catch (IOException persistError) {
+                failedEventPersistFailures.incrementAndGet();
                 warn("SEVERE: Unable to persist failed SQLite event sequence=" + task.sequence
                         + " to " + failedEventsPath + ": " + persistError.getMessage());
             }
@@ -1109,6 +1410,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         markFailure(error);
         if (!(task.event instanceof FlushEvent)) {
             pendingFailures.add(new FailureRecord(task.sequence, task.event.operation(), error));
+            if (task.event instanceof ChatEvent) {
+                chatDbFailed.incrementAndGet();
+            }
             persistFailedEvent(task, error);
         }
         task.completed.completeExceptionally(error);
@@ -1411,6 +1715,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private record FailedReplaySummary(long totalLines, long replayed, long alreadyReplayed,
                                        long malformed, long pending) {
         private static final FailedReplaySummary EMPTY = new FailedReplaySummary(0L, 0L, 0L, 0L, 0L);
+    }
+
+    private record QueueSample(long timestamp, int size) {
     }
 
     private record PlayerRow(long id, String displayName) {

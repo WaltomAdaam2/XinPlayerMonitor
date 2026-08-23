@@ -104,6 +104,32 @@ interface PlayerRepository extends AutoCloseable {
         return find(playerName).map(record -> record.chatMessages.size()).orElse(0);
     }
 
+    default Optional<PlayerOverview> playerOverview(String playerName, long now) throws IOException {
+        return find(playerName).map(record -> {
+            LoginSession latest = record.loginSessions.stream()
+                    .max(java.util.Comparator.comparingLong(session -> session.loginAt))
+                    .orElse(null);
+            long cutoff = now - java.util.concurrent.TimeUnit.DAYS.toMillis(30);
+            long last30Days = 0L;
+            for (LoginSession session : record.loginSessions) {
+                long start = Math.max(session.loginAt, cutoff);
+                long end = session.logoutAt == null ? now : Math.min(session.logoutAt, now);
+                if (end > start) {
+                    last30Days += end - start;
+                }
+            }
+            StatSnapshot latestStat = record.statSnapshots.stream()
+                    .max(java.util.Comparator.comparingLong(snapshot -> snapshot.capturedAt))
+                    .orElse(null);
+            Long duration = latest == null ? null
+                    : Math.max(0L, (latest.logoutAt == null ? now : latest.logoutAt) - latest.loginAt);
+            return new PlayerOverview(record.playerName, record.firstSeenAt, record.chatMessages.size(),
+                    latest == null ? null : latest.loginAt,
+                    latest == null ? null : latest.logoutAt,
+                    duration, last30Days, latestStat);
+        });
+    }
+
     List<String> listPlayerNames() throws IOException;
 
     /**
@@ -117,8 +143,13 @@ interface PlayerRepository extends AutoCloseable {
         return new DatabaseStats(listPlayerNames().size(), 0, 0, 0, 0);
     }
 
+    default DatabaseStats databaseStatsSnapshot() throws IOException {
+        return databaseStats();
+    }
+
     default DatabaseHealth databaseHealth() throws IOException {
-        return new DatabaseHealth("UNKNOWN", false, 0, 0, 0L, 0L, "",
+        return new DatabaseHealth("UNKNOWN", false, false, false, 0, 0, 0, 0, 0,
+                0L, 0L, 0L, 0L, 0L, "", 0L, 0L, 0L, 0L, 0L,
                 0L, 0L, 0L, 0L, 0L, 0L, 0L);
     }
 

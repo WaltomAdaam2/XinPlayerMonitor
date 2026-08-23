@@ -121,6 +121,10 @@ public final class PlayerMonitorService {
         return store.chatCount(playerName);
     }
 
+    public Optional<PlayerOverview> playerOverview(String playerName, long now) throws IOException {
+        return store.playerOverview(playerName, now);
+    }
+
     public boolean hasStatCapturedAtOrAfter(String playerName, long cutoffAt) throws IOException {
         return store.hasStatCapturedAtOrAfter(playerName, cutoffAt);
     }
@@ -159,6 +163,10 @@ public final class PlayerMonitorService {
 
     public DatabaseStats databaseStats() throws IOException {
         return store.databaseStats();
+    }
+
+    public DatabaseStats databaseStatsSnapshot() throws IOException {
+        return store.databaseStatsSnapshot();
     }
 
     public DatabaseHealth databaseHealth() throws IOException {
