@@ -471,7 +471,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             print("[最近游玩时长]： " + durationMillis(overview.latestSessionDurationMillis()));
             print("");
             print("特殊付费权限：" + paidPermissionsDisplay(snapshot, permissions));
-            print("优先列队：" + priorityDisplay(priority, now));
+            long priorityBaseAt = snapshot == null || snapshot.capturedAt <= 0L ? now : snapshot.capturedAt;
+            print("优先列队：" + priorityDisplay(priority, priorityBaseAt));
             print("");
             printRecentChats(overview.recentChats(), overview.chatCount());
             print("");

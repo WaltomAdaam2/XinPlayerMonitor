@@ -186,6 +186,19 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
+    void priorityDisplayUsesStatCaptureTimeAsExpiryBase() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-priority-display");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setDisplayTimezone("UTC");
+        PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                null, settings, null, NOPLogger.NOP_LOGGER);
+
+        assertEquals("1秒  (预计到期时间: 1970-01-01 00:00:02)",
+                command.priorityDisplay("1秒", 1_000L));
+    }
+
+    @Test
     void backupIntervalCompletionOffersHourPlaceholder() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor");
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
