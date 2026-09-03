@@ -569,8 +569,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             long playtimeLast30DaysMillis = playtimeSince(connection, playerId,
                     now - TimeUnit.DAYS.toMillis(30), now);
             StatSnapshot latestStat = latestStatForPlayerId(connection, playerId);
-            return Optional.of(new PlayerOverview(displayName, firstSeenAt, chatTotal, latestLoginAt,
-                    latestLogoutAt, latestDurationMillis, playtimeLast30DaysMillis, latestStat));
+            List<ChatEntry> recentChats = recentChatsForPlayerId(connection, playerId, 5);
+            return Optional.of(new PlayerOverview(displayName, firstSeenAt, chatTotal, recentChats,
+                    latestLoginAt, latestLogoutAt, latestDurationMillis, playtimeLast30DaysMillis, latestStat));
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("read player overview " + playerName, error);
         }
@@ -984,6 +985,27 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                             + error.getMessage(), error);
                 }
             }
+        }
+    }
+
+    private static List<ChatEntry> recentChatsForPlayerId(Connection connection, long playerId, int limit)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT timestamp, message
+                FROM chat_messages
+                WHERE player_id = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+                """)) {
+            statement.setLong(1, playerId);
+            statement.setInt(2, limit);
+            List<ChatEntry> chats = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    chats.add(new ChatEntry(resultSet.getLong("timestamp"), resultSet.getString("message")));
+                }
+            }
+            return chats;
         }
     }
 

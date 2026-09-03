@@ -913,6 +913,35 @@ class SQLitePlayerRecordStoreTest {
         assertTrue(Files.exists(directory.resolve("failed-events.jsonl")));
         assertTrue(warnings.stream().anyMatch(line -> line.contains("operation=stat")));
     }
+
+    @Test
+    void playerOverviewIncludesLatestFiveChatsAndRawPermissionsDisplay() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-overview-recent-chat");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        try {
+            for (int index = 0; index < 6; index++) {
+                store.recordChat("Steve", "msg-" + index, 1_000L + index);
+            }
+            StatSnapshot snapshot = new StatSnapshot();
+            snapshot.capturedAt = 2_000L;
+            snapshot.permissionsDisplay = "🎨√丨👟√丨🎒√";
+            store.recordStat("Steve", snapshot);
+            store.flush();
+
+            var overview = store.playerOverview("Steve", 10_000L);
+
+            assertTrue(overview.isPresent());
+            assertEquals(6L, overview.get().chatCount());
+            assertEquals(5, overview.get().recentChats().size());
+            assertEquals("msg-5", overview.get().recentChats().get(0).message);
+            assertEquals("msg-1", overview.get().recentChats().get(4).message);
+            assertEquals("🎨√丨👟√丨🎒√", overview.get().latestStat().permissionsDisplay);
+        } finally {
+            store.close();
+        }
+    }
+
     private PlayerMonitorService service(Path directory) {
         PlayerMonitorService service = new PlayerMonitorService(directory);
         services.add(service);

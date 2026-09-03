@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.helpers.NOPLogger;
 import waltomadaam2.xinbot.playermonitor.model.ChatEntry;
 import waltomadaam2.xinbot.playermonitor.model.LoginSession;
+import waltomadaam2.xinbot.playermonitor.model.PlayerPermissions;
 import waltomadaam2.xinbot.playermonitor.model.PlayerRecord;
 import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
@@ -156,6 +157,32 @@ class PlayerMonitorManagementCommandTest {
                 new String[]{"setting", ""});
         assertTrue(completions.contains("backup-interval"),
                 "tab completion should include backup-interval after 'playermonitor setting'");
+    }
+
+    @Test
+    void playerDataPermissionsPreferRawStatDisplayAndEmojiFallback() {
+        StatSnapshot snapshot = new StatSnapshot();
+        snapshot.permissionsDisplay = "🎨√丨👟√丨🎒√";
+        PlayerPermissions fallback = new PlayerPermissions();
+        assertEquals("🎨√丨👟√丨🎒√",
+                PlayerMonitorManagementCommand.paidPermissionsDisplay(snapshot, fallback));
+
+        snapshot.permissionsDisplay = "";
+        fallback.greenText = true;
+        fallback.dupe = true;
+        assertEquals("🎨√丨👟×丨🎒√",
+                PlayerMonitorManagementCommand.paidPermissionsDisplay(snapshot, fallback));
+    }
+
+    @Test
+    void priorityDurationParsesStatQueueText() {
+        long expected = 897L * 24L * 60L * 60L * 1000L
+                + 7L * 60L * 60L * 1000L
+                + 15L * 60L * 1000L
+                + 31L * 1000L;
+        assertEquals(expected, PlayerMonitorManagementCommand.priorityDurationMillis("897天7时15分31秒"));
+        assertEquals(expected, PlayerMonitorManagementCommand.priorityDurationMillis("897天7小时15分31秒"));
+        assertEquals(null, PlayerMonitorManagementCommand.priorityDurationMillis("已过期"));
     }
 
     @Test
@@ -380,6 +407,7 @@ class PlayerMonitorManagementCommandTest {
             snapshot.playtimeSeconds = 3600L;
             snapshot.addedGameCount = 3;
             return Optional.of(new PlayerOverview("Steve", 100L, 4L,
+                    List.of(new ChatEntry(400L, "recent")),
                     200L, 300L, 100L, 3_600_000L, snapshot));
         }
 

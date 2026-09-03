@@ -123,7 +123,13 @@ interface PlayerRepository extends AutoCloseable {
                     .orElse(null);
             Long duration = latest == null ? null
                     : Math.max(0L, (latest.logoutAt == null ? now : latest.logoutAt) - latest.loginAt);
+            int start = Math.max(0, record.chatMessages.size() - 5);
+            List<ChatEntry> recentChats = new java.util.ArrayList<>();
+            for (int index = record.chatMessages.size() - 1; index >= start; index--) {
+                recentChats.add(record.chatMessages.get(index));
+            }
             return new PlayerOverview(record.playerName, record.firstSeenAt, record.chatMessages.size(),
+                    recentChats,
                     latest == null ? null : latest.loginAt,
                     latest == null ? null : latest.logoutAt,
                     duration, last30Days, latestStat);

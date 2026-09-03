@@ -75,6 +75,9 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private static final Pattern TIMESTAMP = Pattern.compile("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final DateTimeFormatter CHAT_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy MM dd HH:mm:ss");
+    private static final Pattern PRIORITY_DURATION = Pattern.compile(
+            "^(?:(\\d+)天)?(?:(\\d+)(?:小时|时))?(?:(\\d+)分)?(?:(\\d+)秒)?$");
 
     private final PlayerMonitorService service;
     private final MonitorSettingsStore settings;
@@ -441,7 +444,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void playerData(String playerName) {
         try {
-            Optional<PlayerOverview> overviewOptional = service.playerOverview(playerName, System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            Optional<PlayerOverview> overviewOptional = service.playerOverview(playerName, now);
             if (overviewOptional.isEmpty()) {
                 print("未找到玩家档案: " + playerName);
                 return;
@@ -466,10 +470,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             print("[最近下线]： " + latestLogout(overview));
             print("[最近游玩时长]： " + durationMillis(overview.latestSessionDurationMillis()));
             print("");
-            print("绿色名字/聊天字体：" + yesNo(permissions.greenText));
-            print("RunMax权限：" + yesNo(permissions.runMax));
-            print("Dupe物刷权限：" + yesNo(permissions.dupe));
-            print("优先队列：" + value(priority));
+            print("特殊付费权限：" + paidPermissionsDisplay(snapshot, permissions));
+            print("优先列队：" + priorityDisplay(priority, now));
+            print("");
+            printRecentChats(overview.recentChats(), overview.chatCount());
             print("");
             print("- 总游玩时长：" + hours(snapshot == null ? null : snapshot.playtimeSeconds));
             print("- 近30天游玩时长：" + hoursFromMillis(overview.playtimeLast30DaysMillis()));
@@ -610,72 +614,69 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private void status() {
         List<String> lines = new ArrayList<>();
         PlayerMonitorListener.StatScanStatus scan = listener.statScanStatus();
-        lines.add("Game Active: " + scan.gameActive());
-        lines.add("Reconnect Pending: " + scan.reconnectPending());
-        lines.add("Roster Reconciling: " + scan.rosterReconciling());
-        lines.add("Force Fresh Roster: " + scan.forceFreshRoster());
-        lines.add("Reconnect Generation: " + scan.reconnectGeneration());
-        lines.add("Last Disconnect: " + optionalTime(scan.lastDisconnectAt()));
-        lines.add("Bot Roster: " + scan.botRoster());
-        lines.add("Monitor Roster: " + scan.monitorRoster());
-        lines.add("Roster Drift: missing=" + scan.missingFromMonitor()
-                + ", extra=" + scan.extraInMonitor());
-        lines.add("Stat 扫描: online=" + scan.onlinePlayers()
-                + ", queued=" + scan.queued()
-                + ", pending=" + scan.pendingDispatches()
-                + ", active=" + scan.activeCycles()
-                + ", waiting-response=" + scan.waitingResponse());
-        lines.add("Chat Pipeline:");
-        lines.add("  system received:   " + scan.systemChatReceived());
-        lines.add("  public parsed:     " + scan.publicChatParsed());
-        lines.add("  monitor accepted:  " + scan.chatAcceptedByPlayerMonitor());
-        lines.add("  rejected:          " + scan.chatRejected());
-        lines.add("  parse failed:      " + scan.chatParseFailed());
-        lines.add("  db failed:         " + scan.chatDbFailed());
+        lines.add("连接状态: 游戏活跃=" + scan.gameActive()
+                + ", 等待重连=" + scan.reconnectPending()
+                + ", 名单同步中=" + scan.rosterReconciling()
+                + ", 强制刷新名单=" + scan.forceFreshRoster()
+                + ", 重连代次=" + scan.reconnectGeneration());
+        lines.add("最近断线: " + optionalTime(scan.lastDisconnectAt()));
+        lines.add("名单状态: 机器人=" + scan.botRoster()
+                + ", 监控=" + scan.monitorRoster()
+                + ", 缺失=" + scan.missingFromMonitor()
+                + ", 多余=" + scan.extraInMonitor());
+        lines.add("Stat 扫描: 在线=" + scan.onlinePlayers()
+                + ", 队列=" + scan.queued()
+                + ", 待发送=" + scan.pendingDispatches()
+                + ", 活动轮次=" + scan.activeCycles()
+                + ", 等待响应=" + scan.waitingResponse());
+        lines.add("聊天流水线: 系统收到=" + scan.systemChatReceived()
+                + ", 公聊解析=" + scan.publicChatParsed()
+                + ", 监控接收=" + scan.chatAcceptedByPlayerMonitor());
+        lines.add("聊天异常: 拒绝=" + scan.chatRejected()
+                + ", 解析失败=" + scan.chatParseFailed()
+                + ", 数据库失败=" + scan.chatDbFailed());
         try {
             DatabaseHealth health = service.databaseHealth();
-            lines.add("  db committed:      " + health.chatCommitted());
+            lines.add("聊天入库: 已提交=" + health.chatCommitted()
+                    + ", 队列拒绝=" + health.chatQueueRejected());
             String condition;
             double queueUsage = health.queueCapacity() <= 0
                     ? 0.0
                     : (double) health.queueSize() / (double) health.queueCapacity();
             if ("FAILED".equals(health.writerState()) || !health.writerAlive() || health.writerStalled()) {
-                condition = "ERROR";
+                condition = "错误";
             } else if (health.pendingFailedEvents() > 0 || health.writerRecovering() || queueUsage >= 0.80) {
-                condition = "DEGRADED";
+                condition = "降级";
             } else {
-                condition = "HEALTHY";
+                condition = "正常";
             }
             lines.add("健康状态: " + condition);
-            lines.add("Writer 状态: " + health.writerState()
-                    + " / alive=" + health.writerAlive()
-                    + " / recovering=" + health.writerRecovering()
-                    + " / stalled=" + health.writerStalled());
-            lines.add("SQLite queue: " + health.queueSize() + " / " + health.queueCapacity());
-            lines.add("Peak queue: " + health.queueHighWaterMark());
-            lines.add("Queue growth: 1m=" + signed(health.queueDelta1m())
-                    + ", 5m=" + signed(health.queueDelta5m()));
+            lines.add("写入线程状态: " + health.writerState()
+                    + ", 存活=" + health.writerAlive()
+                    + ", 恢复中=" + health.writerRecovering()
+                    + ", 卡住=" + health.writerStalled()
+                    + ", 恢复次数=" + health.writerRecoveryCount());
+            lines.add("SQLite 队列: " + health.queueSize() + " / " + health.queueCapacity()
+                    + ", 峰值=" + health.queueHighWaterMark()
+                    + ", 1分钟变化=" + signed(health.queueDelta1m())
+                    + ", 5分钟变化=" + signed(health.queueDelta5m()));
             lines.add("最近提交: " + optionalTime(health.lastCommittedAt()));
-            lines.add("最近Chat写入: " + optionalTime(health.lastChatCommittedAt()));
-            lines.add("最近Session写入: " + optionalTime(health.lastSessionCommittedAt()));
-            lines.add("最近Stat写入: " + optionalTime(health.lastStatCommittedAt()));
+            lines.add("最近写入: 聊天=" + optionalTime(health.lastChatCommittedAt())
+                    + ", 会话=" + optionalTime(health.lastSessionCommittedAt())
+                    + ", Stat=" + optionalTime(health.lastStatCommittedAt()));
             lines.add("最近失败: " + optionalTime(health.lastFailureAt()));
             if (health.lastFailureAt() > 0 && health.lastFailureMessage() != null
                     && !health.lastFailureMessage().isBlank()) {
                 lines.add("失败原因: " + health.lastFailureMessage());
             }
-            lines.add("Chat 写入: db committed=" + health.chatCommitted()
-                    + ", db failed=" + health.chatDbFailed()
-                    + ", queue rejected=" + health.chatQueueRejected());
-            lines.add("Writer recoveries: " + health.writerRecoveryCount());
-            lines.add("失败事件: pending=" + health.pendingFailedEvents()
-                    + ", replayed=" + health.replayedFailedEvents()
-                    + ", malformed=" + health.malformedFailedEvents()
-                    + ", file-lines=" + health.failedEventLines()
-                    + ", persist-failed=" + health.failedEventPersistFailures());
-            lines.add("数据库文件: db=" + humanBytes(health.databaseBytes())
-                    + ", wal=" + humanBytes(health.walBytes())
-                    + ", shm=" + humanBytes(health.shmBytes()));
+            lines.add("失败事件: 待处理=" + health.pendingFailedEvents()
+                    + ", 已重放=" + health.replayedFailedEvents()
+                    + ", 格式错误=" + health.malformedFailedEvents()
+                    + ", 文件行数=" + health.failedEventLines()
+                    + ", 保存失败=" + health.failedEventPersistFailures());
+            lines.add("数据库文件: 主库=" + humanBytes(health.databaseBytes())
+                    + ", WAL=" + humanBytes(health.walBytes())
+                    + ", SHM=" + humanBytes(health.shmBytes()));
         } catch (IOException error) {
             lines.add("数据库健康信息: 无法读取 - " + error.getMessage());
         }
@@ -689,13 +690,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
         SQLiteBackupManager manager = backupManager;
         if (manager == null) {
-            lines.add("备份状态: unavailable");
+            lines.add("备份状态: 不可用");
         } else {
             try {
                 SQLiteBackupManager.BackupStatus backup = manager.status();
-                lines.add("备份调度: running=" + backup.schedulerRunning()
-                        + ", in-progress=" + backup.backupInProgress()
-                        + ", interval=" + backup.intervalHours() + " h");
+                lines.add("备份调度: 运行=" + backup.schedulerRunning()
+                        + ", 进行中=" + backup.backupInProgress()
+                        + ", 间隔=" + backup.intervalHours() + " h");
                 lines.add("备份数量: " + backup.backupCount() + " / " + backup.maxBackupCount());
                 lines.add("最近备份: " + (backup.lastBackupAt() <= 0
                         ? "无" : backup.lastBackupFile() + " @ " + format(backup.lastBackupAt())));
@@ -704,7 +705,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 lines.add("备份状态: 无法读取 - " + error.getMessage());
             }
         }
-        report("PlayerMonitor status", lines);
+        report("PlayerMonitor 状态", lines);
     }
 
     private void backup(String[] args) {
@@ -836,6 +837,17 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             return "无";
         }
         return overview.latestLogoutAt() == null ? "在线中" : format(overview.latestLogoutAt());
+    }
+
+    private void printRecentChats(List<ChatEntry> chats, long totalCount) {
+        int shown = chats == null ? 0 : chats.size();
+        print("最近发言 (" + shown + "/" + totalCount + "):");
+        if (chats == null) {
+            return;
+        }
+        for (ChatEntry entry : chats) {
+            print("[" + formatChatTime(entry.timestamp) + " CHAT]: " + entry.message);
+        }
     }
 
     private void stat(String playerName, Optional<StatSnapshot> snapshotOptional) {
@@ -1037,15 +1049,62 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         if (snapshot.permissionsDisplay != null && !snapshot.permissionsDisplay.isBlank()) {
             return snapshot.permissionsDisplay;
         }
-        return marker(permissions.greenText) + " | " + marker(permissions.runMax) + " | " + marker(permissions.dupe);
+        return paidPermissionsDisplay(snapshot, permissions);
+    }
+
+    static String paidPermissionsDisplay(StatSnapshot snapshot, PlayerPermissions permissions) {
+        if (snapshot != null && snapshot.permissionsDisplay != null && !snapshot.permissionsDisplay.isBlank()) {
+            return snapshot.permissionsDisplay;
+        }
+        return "🎨" + marker(permissions.greenText)
+                + "丨👟" + marker(permissions.runMax)
+                + "丨🎒" + marker(permissions.dupe);
     }
 
     private static String marker(boolean value) {
-        return value ? "✓" : "—";
+        return value ? "√" : "×";
+    }
+
+    String priorityDisplay(String priority, long now) {
+        if (priority == null || priority.isBlank()) {
+            return "未知";
+        }
+        Long millis = priorityDurationMillis(priority);
+        if (millis == null) {
+            return priority;
+        }
+        return priority + "  (预计到期时间: " + format(now + millis) + ")";
+    }
+
+    static Long priorityDurationMillis(String priority) {
+        Matcher matcher = PRIORITY_DURATION.matcher(priority.trim());
+        if (!matcher.matches()) {
+            return null;
+        }
+        long days = parseDurationPart(matcher.group(1));
+        long hours = parseDurationPart(matcher.group(2));
+        long minutes = parseDurationPart(matcher.group(3));
+        long seconds = parseDurationPart(matcher.group(4));
+        if (days == 0L && hours == 0L && minutes == 0L && seconds == 0L) {
+            return null;
+        }
+        return Duration.ofDays(days)
+                .plusHours(hours)
+                .plusMinutes(minutes)
+                .plusSeconds(seconds)
+                .toMillis();
+    }
+
+    private static long parseDurationPart(String value) {
+        return value == null || value.isBlank() ? 0L : Long.parseLong(value);
     }
 
     private String format(long timestamp) {
         return TIME_FORMAT.withZone(settings.displayZoneId()).format(Instant.ofEpochMilli(timestamp));
+    }
+
+    private String formatChatTime(long timestamp) {
+        return CHAT_TIME_FORMAT.withZone(settings.displayZoneId()).format(Instant.ofEpochMilli(timestamp));
     }
 
     private String optionalTime(long timestamp) {
@@ -1089,10 +1148,6 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private static String value(Object value) {
         return value == null ? "未知" : value.toString();
-    }
-
-    private static String yesNo(boolean value) {
-        return value ? "有" : "无";
     }
 
     private static String kd(Integer kills, Integer deaths) {
