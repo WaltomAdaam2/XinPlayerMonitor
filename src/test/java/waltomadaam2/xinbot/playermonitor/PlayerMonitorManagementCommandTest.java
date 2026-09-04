@@ -1,5 +1,8 @@
 package waltomadaam2.xinbot.playermonitor;
 
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.jline.utils.AttributedStyle;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -242,6 +245,8 @@ class PlayerMonitorManagementCommandTest {
     @Test
     void statusAndBackupCommandsUseExpectedStylesAndRejectInvalidTrailingArguments() {
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"status"}, 0));
+        assertStyle(0xE0B0FF,
+                PlayerMonitorManagementCommand.styleForArgument(new String[]{"status", "full"}, 1));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 0));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 1));
         assertEquals(AttributedStyle.DEFAULT.getStyle(),
@@ -264,6 +269,8 @@ class PlayerMonitorManagementCommandTest {
         assertFalse(roots.contains("db-stat"));
         assertEquals(List.of("now", "status", "list", "verify", "limit"),
                 command.onTabComplete(null, "playermonitor", new String[]{"backup", ""}));
+        assertEquals(List.of("full"),
+                command.onTabComplete(null, "playermonitor", new String[]{"status", ""}));
         assertEquals(List.of(),
                 command.onTabComplete(null, "playermonitor", new String[]{"backup", "now", ""}));
     }
@@ -343,6 +350,94 @@ class PlayerMonitorManagementCommandTest {
         assertTrue(rendered.contains("登录会话: \u001B[38;5;215m4\u001B[0m"));
         assertTrue(rendered.contains("玩家 Stat 信息记录: \u001B[38;5;215m5\u001B[0m"));
         assertTrue(rendered.contains("未结束会话: \u001B[38;5;215m1\u001B[0m"));
+    }
+
+    @Test
+    void playerDataColorsValuesAndUsesHyphenatedRecentChatDate() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-player-data-colors");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setDisplayTimezone("UTC");
+        LimitedQueryRepository repository = new LimitedQueryRepository();
+        PlayerMonitorService service = new PlayerMonitorService(repository);
+        service.initialize();
+        PlayerMonitorListener listener = new PlayerMonitorListener(
+                service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings);
+        LoggerContext context = new LoggerContext();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger("player-data-colors");
+        logger.addAppender(appender);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    service, settings, listener, logger);
+            command.onCommand(null, "playermonitor", new String[]{"Steve"});
+            String rendered = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+
+            assertTrue(rendered.contains("\u001B[36m玩家：\u001B[0m\u001B[33mSteve\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m最近发言 \u001B[0m\u001B[33m(1/4)\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m[\u001B[0m\u001B[33m1970-01-01 00:00:00\u001B[0m"
+                    + "\u001B[36m CHAT]: \u001B[0mrecent"), rendered);
+            assertFalse(rendered.contains("1970 01 01"));
+        } finally {
+            listener.close();
+            service.close();
+            context.stop();
+        }
+    }
+
+    @Test
+    void statusSupportsCompactAndLegacyFullOutput() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-status-output");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        LimitedQueryRepository repository = new LimitedQueryRepository();
+        PlayerMonitorService service = new PlayerMonitorService(repository);
+        service.initialize();
+        PlayerMonitorListener listener = new PlayerMonitorListener(
+                service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings);
+        LoggerContext context = new LoggerContext();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger("status-output");
+        logger.addAppender(appender);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    service, settings, listener, logger);
+            command.onCommand(null, "playermonitor", new String[]{"status"});
+            String compact = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right)
+                    .replaceAll("\u001B\\[[0-9;]*m", "");
+            assertTrue(compact.contains("Roster: bot="));
+            assertTrue(compact.contains("Chat Pipeline: system received="));
+            assertTrue(compact.contains("Writer: state="));
+            assertTrue(compact.contains("Failed events: pending="));
+            assertTrue(compact.contains("最近写入："));
+            assertTrue(compact.contains("聊天=无"));
+            assertFalse(compact.contains("Game Active:"));
+
+            appender.list.clear();
+            command.onCommand(null, "playermonitor", new String[]{"status", "full"});
+            String full = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right)
+                    .replaceAll("\u001B\\[[0-9;]*m", "");
+            assertTrue(full.contains("Game Active:"));
+            assertTrue(full.contains("Chat Pipeline:"));
+            assertTrue(full.contains("Peak queue:"));
+            assertTrue(full.contains("失败事件: pending="));
+            assertTrue(full.contains("最近Chat写入:"));
+            assertFalse(full.contains("最近写入："));
+        } finally {
+            listener.close();
+            service.close();
+            context.stop();
+        }
     }
     private static void assertStyle(int rgb, AttributedStyle actual) {
         assertEquals(AttributedStyle.DEFAULT.foregroundRgb(rgb).getStyle(), actual.getStyle());
