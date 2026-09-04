@@ -10,6 +10,7 @@ import org.slf4j.helpers.NOPLogger;
 import xin.bbtt.mcbot.Bot;
 import xin.bbtt.mcbot.Server;
 import xin.bbtt.mcbot.events.SendCommandEvent;
+import xin.bbtt.mcbot.events.PublicChatEvent;
 import xin.bbtt.mcbot.events.ServerChangeEvent;
 import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
@@ -208,6 +209,47 @@ class PlayerMonitorListenerStatTest {
 
         assertEquals(0, listener.statAttemptsForTesting("Eve"),
                 "a player who left before the retry must not be retried further");
+    }
+
+    @Test
+    void missingPlayerResponseStopsStatWithoutRetry() throws Exception {
+        listener.setGameActiveForTesting(true);
+        GameProfile profile = profile("MissingPlayer");
+        Bot.INSTANCE.players.put(profile.getId(), profile);
+        listener.scanAllOnlinePlayers();
+        waitUntil(() -> listener.isPendingStatDispatchForTesting("MissingPlayer"),
+                "stat command was never dispatched for MissingPlayer");
+        listener.onSendCommand(new SendCommandEvent("stat MissingPlayer"));
+        assertEquals(1, listener.statAttemptsForTesting("MissingPlayer"));
+        assertTrue(listener.hasActiveStatCycleForTesting("MissingPlayer"));
+
+        listener.onSystemChat(new SystemChatMessageEvent(Component.text("玩家不存在!"), false));
+
+        assertEquals(0, listener.statAttemptsForTesting("MissingPlayer"));
+        assertFalse(listener.isPendingStatDispatchForTesting("MissingPlayer"));
+        assertFalse(listener.hasActiveStatCycleForTesting("MissingPlayer"));
+        assertEquals(0, listener.statScanStatus().queued());
+        assertFalse(listener.statScanStatus().waitingResponse());
+    }
+
+    @Test
+    void playerChatSayingMissingPlayerDoesNotStopStat() throws Exception {
+        listener.setGameActiveForTesting(true);
+        GameProfile profile = profile("StatTarget");
+        Bot.INSTANCE.players.put(profile.getId(), profile);
+        listener.scanAllOnlinePlayers();
+        waitUntil(() -> listener.isPendingStatDispatchForTesting("StatTarget"),
+                "stat command was never dispatched for StatTarget");
+        listener.onSendCommand(new SendCommandEvent("stat StatTarget"));
+        SystemChatMessageEvent systemEvent = new SystemChatMessageEvent(Component.text("玩家不存在!"), false);
+
+        listener.beforeSystemChat(systemEvent);
+        listener.onPublicChat(new PublicChatEvent(profile("Chatter"), "玩家不存在!"));
+        listener.onSystemChat(systemEvent);
+
+        assertEquals(1, listener.statAttemptsForTesting("StatTarget"));
+        assertTrue(listener.hasActiveStatCycleForTesting("StatTarget"));
+        assertTrue(listener.statScanStatus().waitingResponse());
     }
 
     private static void waitUntil(BooleanSupplier condition, String failureMessage) throws InterruptedException {

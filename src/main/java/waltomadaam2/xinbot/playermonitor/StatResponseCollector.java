@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 final class StatResponseCollector {
     private static final long REQUEST_TIMEOUT_MILLIS = 3_000L;
     private static final Pattern HEADER = Pattern.compile("^玩家名称\\s*[:：]\\s*(.+?)\\s*$");
+    private static final Pattern PLAYER_NOT_FOUND = Pattern.compile("^玩家不存在\\s*[!！]?$");
     private static final Pattern SEPARATOR = Pattern.compile("-{10,}");
     private static final Pattern STAT_FIELD = Pattern.compile(
             "^(加入游戏|在线次数|死亡计数|击杀数|击杀计数|游戏时长|队伍|优先队列|特殊权限)\\s*[:：].*$");
@@ -77,6 +78,19 @@ final class StatResponseCollector {
             }
         }
         return Optional.empty();
+    }
+
+    synchronized Optional<String> rejectMissingPlayer(String text) {
+        boolean missing = PLAYER_NOT_FOUND.matcher(StatText.normalize(text)).matches();
+        if (!missing || expectedPlayers.isEmpty()) {
+            return Optional.empty();
+        }
+        Map.Entry<String, Expectation> oldest = expectedPlayers.entrySet().iterator().next();
+        expectedPlayers.remove(oldest.getKey());
+        if (oldest.getKey().equals(activeKey)) {
+            resetActiveResponse();
+        }
+        return Optional.of(oldest.getValue().displayName);
     }
 
     synchronized List<String> expire() {

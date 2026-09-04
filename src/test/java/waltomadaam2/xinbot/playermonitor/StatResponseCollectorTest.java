@@ -98,4 +98,19 @@ class StatResponseCollectorTest {
         assertEquals(10, captured.snapshot().deathCount,
                 "Bob's stat must reflect his own data, not Alice's");
     }
+
+    @Test
+    void missingPlayerResponseRejectsOldestPendingRequest() {
+        StatResponseCollector collector = new StatResponseCollector();
+        collector.expect("Alice");
+        collector.expect("Bob");
+
+        assertTrue(collector.rejectMissingPlayer("<Chatter> 玩家不存在!").isEmpty());
+        assertTrue(collector.rejectMissingPlayer("普通消息\n玩家不存在!").isEmpty());
+        assertEquals("Alice", collector.rejectMissingPlayer("§c玩家不存在!").orElseThrow());
+        assertFalse(collector.isExpecting("Alice"));
+        assertTrue(collector.isExpecting("Bob"));
+        assertEquals("Bob", collector.rejectMissingPlayer("玩家不存在！").orElseThrow());
+        assertFalse(collector.hasPending());
+    }
 }

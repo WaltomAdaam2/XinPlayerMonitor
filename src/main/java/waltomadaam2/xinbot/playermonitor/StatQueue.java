@@ -90,6 +90,13 @@ final class StatQueue {
         return pendingByKey.containsKey(normalize(playerName));
     }
 
+    void cancel(String playerName) {
+        QueuedPlayer item = pendingByKey.remove(normalize(playerName));
+        if (item != null) {
+            item.cancel();
+        }
+    }
+
     int size() {
         return pendingByKey.size();
     }

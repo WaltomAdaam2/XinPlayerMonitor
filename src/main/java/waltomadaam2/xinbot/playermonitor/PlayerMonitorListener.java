@@ -20,6 +20,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -347,15 +348,22 @@ final class PlayerMonitorListener implements Listener {
         try {
             if (gameActive && beginStatCallback()) {
                 try {
+                    SystemChatContext context = systemChatContext.get();
+                    Optional<String> missingPlayer = context != null && context.publicChatEventSeen
+                            ? Optional.empty() : statResponses.rejectMissingPlayer(event.getText());
+                    if (missingPlayer.isPresent()) {
+                        handleStatPlayerNotFound(missingPlayer.get());
+                    } else {
+                        statResponses.accept(event.getText()).ifPresent(captured -> {
+                            statOutputSuppressionUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+                            String normalizedName = normalize(captured.playerName());
+                            statAttempts.remove(normalizedName);
+                            pendingStatDispatches.remove(normalizedName);
+                            finishStatCycle(captured.playerName());
+                            scheduleStatWrite(captured);
+                        });
+                    }
                     retryTimedOutStats();
-                    statResponses.accept(event.getText()).ifPresent(captured -> {
-                        statOutputSuppressionUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
-                        String normalizedName = normalize(captured.playerName());
-                        statAttempts.remove(normalizedName);
-                        pendingStatDispatches.remove(normalizedName);
-                        finishStatCycle(captured.playerName());
-                        scheduleStatWrite(captured);
-                    });
                 } finally {
                     endStatCallback();
                 }
@@ -909,6 +917,17 @@ final class PlayerMonitorListener implements Listener {
         statResponses.cancel(playerName);
         int attempts = statAttempts.merge(normalizedName, 1, Integer::sum);
         evaluateStatAttempt(playerName, attempts, "failed to send");
+    }
+
+    private void handleStatPlayerNotFound(String playerName) {
+        String normalizedName = normalize(playerName);
+        statQueue.cancel(playerName);
+        statAttempts.remove(normalizedName);
+        pendingStatDispatches.remove(normalizedName);
+        statResponses.cancel(playerName);
+        finishStatCycle(playerName);
+        log.warn("stat scan stopped for " + playerName + ": player does not exist");
+        logger.warn("Stat scan stopped for {}: player does not exist.", playerName);
     }
 
     private void evaluateStatAttempt(String playerName, int attempts, String reason) {
