@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class XinPlayerMonitorStartupTest {
@@ -24,7 +25,12 @@ class XinPlayerMonitorStartupTest {
             assertTrue(Files.exists(dataDirectory.resolve("settings.json")));
             assertTrue(Files.exists(dataDirectory.resolve("xinpm.db")));
             assertTrue(Files.exists(dataDirectory.resolve("log")));
-            assertNotNull(Bot.INSTANCE.getPluginManager().commands().getCommandByLabel("playermonitor"));
+            var command = Bot.INSTANCE.getPluginManager().commands().getCommandByLabel("playermonitor");
+            var alias = Bot.INSTANCE.getPluginManager().commands().getCommandByLabel("xpm");
+            assertNotNull(command);
+            assertNotNull(alias);
+            assertSame(command.command(), alias.command());
+            assertSame(command.executor(), alias.executor());
         } finally {
             plugin.onDisable();
         }
