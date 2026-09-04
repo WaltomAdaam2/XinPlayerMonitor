@@ -10,12 +10,15 @@ import waltomadaam2.xinbot.playermonitor.model.PlayerProfile;
 import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -939,6 +942,85 @@ class SQLitePlayerRecordStoreTest {
             assertEquals("🎨√丨👟√丨🎒√", overview.get().latestStat().permissionsDisplay);
         } finally {
             store.close();
+        }
+    }
+
+    @Test
+    void recoveryDoesNotRepeatCompletedTasksAndFlushDoesNotOpenTransaction() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-partial-batch-recovery");
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.initialize();
+        store.close();
+        store.setStatWriteFailureForTesting(name -> name.equals("bad"));
+
+        // Drive the batch directly so the fault lands after the first individual commit.
+        Class<?> eventType = Class.forName(SQLitePlayerRecordStore.class.getName() + "$DatabaseEvent");
+        Class<?> taskType = Class.forName(SQLitePlayerRecordStore.class.getName() + "$WriteTask");
+        var taskConstructor = taskType.getDeclaredConstructor(long.class, eventType);
+        taskConstructor.setAccessible(true);
+        var chatConstructor = Class.forName(SQLitePlayerRecordStore.class.getName() + "$ChatEvent")
+                .getDeclaredConstructor(String.class, String.class, long.class);
+        chatConstructor.setAccessible(true);
+        var statConstructor = Class.forName(SQLitePlayerRecordStore.class.getName() + "$StatEvent")
+                .getDeclaredConstructor(String.class, StatSnapshot.class);
+        statConstructor.setAccessible(true);
+        var flushConstructor = Class.forName(SQLitePlayerRecordStore.class.getName() + "$FlushEvent")
+                .getDeclaredConstructor();
+        flushConstructor.setAccessible(true);
+        var completed = taskType.getDeclaredField("completed");
+        completed.setAccessible(true);
+        StatSnapshot bad = new StatSnapshot();
+        bad.capturedAt = 101L;
+        List<Object> batch = new ArrayList<>(List.of(
+                taskConstructor.newInstance(1L, chatConstructor.newInstance("Good", "before", 100L)),
+                taskConstructor.newInstance(2L, statConstructor.newInstance("bad", bad)),
+                taskConstructor.newInstance(3L, chatConstructor.newInstance("Good", "after", 102L))));
+        Class<?> sqlType = Class.forName(SQLitePlayerRecordStore.class.getName() + "$WriterSql");
+        var sqlConstructor = sqlType.getDeclaredConstructor(Connection.class);
+        sqlConstructor.setAccessible(true);
+        var processBatch = SQLitePlayerRecordStore.class.getDeclaredMethod(
+                "processBatch", Connection.class, sqlType, List.class);
+        processBatch.setAccessible(true);
+        AtomicInteger commitAttempts = new AtomicInteger();
+        AtomicInteger transactions = new AtomicInteger();
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            Connection faultConnection = (Connection) Proxy.newProxyInstance(
+                    Connection.class.getClassLoader(), new Class<?>[]{Connection.class}, (proxy, method, args) -> {
+                        if (method.getName().equals("setAutoCommit") && Boolean.FALSE.equals(args[0])) {
+                            transactions.incrementAndGet();
+                        }
+                        if (method.getName().equals("commit") && commitAttempts.incrementAndGet() == 2) {
+                            throw new SQLException("simulated SQLITE_BUSY before commit", "", 5);
+                        }
+                        try {
+                            return method.invoke(connection, args);
+                        } catch (InvocationTargetException error) {
+                            throw error.getCause();
+                        }
+                    });
+            try (AutoCloseable sql = (AutoCloseable) sqlConstructor.newInstance(faultConnection)) {
+                var error = assertThrows(InvocationTargetException.class,
+                        () -> processBatch.invoke(store, faultConnection, sql, batch));
+                assertEquals(5, ((SQLException) error.getCause()).getErrorCode());
+                assertEquals(1, countRows(connection, "chat_messages"));
+                processBatch.invoke(store, faultConnection, sql, batch);
+                assertEquals(2, countRows(connection, "chat_messages"));
+                assertEquals(2L, store.databaseHealth().chatCommitted());
+                assertEquals(0L, store.databaseHealth().chatDbFailed());
+                assertEquals(1L, store.databaseHealth().failedEventLines());
+                assertEquals(1L, Files.readAllLines(directory.resolve("failed-events.jsonl")).size());
+
+                int beforeFlush = transactions.get();
+                Object flush = taskConstructor.newInstance(4L, flushConstructor.newInstance());
+                processBatch.invoke(store, faultConnection, sql, new ArrayList<>(List.of(flush)));
+                assertTrue(((java.util.concurrent.CompletableFuture<?>) completed.get(flush)).isCompletedExceptionally(),
+                        "flush must still report the earlier failed stat event");
+                Object nextFlush = taskConstructor.newInstance(5L, flushConstructor.newInstance());
+                processBatch.invoke(store, faultConnection, sql, new ArrayList<>(List.of(nextFlush)));
+                ((java.util.concurrent.CompletableFuture<?>) completed.get(nextFlush)).get(1, TimeUnit.SECONDS);
+                assertEquals(beforeFlush, transactions.get(), "flush-only batches should not open a transaction");
+                SQLiteSchema.verify(connection);
+            }
         }
     }
 

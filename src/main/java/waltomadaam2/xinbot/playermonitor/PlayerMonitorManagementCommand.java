@@ -470,14 +470,14 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     : snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
             print(SectionFormatter.header("Player Data"));
             playerDataField("玩家：", overview.playerName());
-            playerDataField("> 发言次数：", overview.chatCount() + "次");
-            playerDataField("> 击杀数：", value(kills) + "人");
-            playerDataField("> 死亡次数：", value(deaths) + "次");
+            print(CYAN + "> 发言次数：" + RESET + overview.chatCount() + "次");
+            print(CYAN + "> 击杀数：" + RESET + value(kills) + "人");
+            print(CYAN + "> 死亡次数：" + RESET + value(deaths) + "次");
             playerDataField("> KD比：", kd(kills, deaths));
             print("");
             playerDataField("[首次记录]： ", format(overview.firstSeenAt()));
             playerDataField("[最近上线]： ", optionalTime(overview.latestLoginAt()));
-            playerDataField("[最近下线]： ", latestLogout(overview));
+            print(CYAN + "[最近下线]： " + RESET + latestLogout(overview));
             playerDataField("[最近游玩时长]： ", durationMillis(overview.latestSessionDurationMillis()));
             print("");
             playerDataField("特殊付费权限：", paidPermissionsDisplay(snapshot, permissions));
@@ -909,8 +909,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void printRecentChats(List<ChatEntry> chats, long totalCount) {
         int shown = chats == null ? 0 : chats.size();
-        print(CYAN + "最近发言 " + RESET + YELLOW + "(" + shown + "/" + totalCount + ")"
-                + RESET + CYAN + ":" + RESET);
+        print(CYAN + "最近发言 " + RESET + "(" + shown + "/" + totalCount + ")"
+                + CYAN + ":" + RESET);
         if (chats == null) {
             return;
         }

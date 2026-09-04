@@ -353,7 +353,7 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
-    void playerDataColorsValuesAndUsesHyphenatedRecentChatDate() throws Exception {
+    void playerDataLeavesRequestedValuesUncoloredAndUsesHyphenatedRecentChatDate() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-player-data-colors");
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
         settings.initialize();
@@ -378,7 +378,13 @@ class PlayerMonitorManagementCommandTest {
                     .reduce("", (left, right) -> left + "\n" + right);
 
             assertTrue(rendered.contains("\u001B[36m玩家：\u001B[0m\u001B[33mSteve\u001B[0m"));
-            assertTrue(rendered.contains("\u001B[36m最近发言 \u001B[0m\u001B[33m(1/4)\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m> 发言次数：\u001B[0m4次"));
+            assertTrue(rendered.contains("\u001B[36m> 击杀数：\u001B[0m1人"));
+            assertTrue(rendered.contains("\u001B[36m> 死亡次数：\u001B[0m2次"));
+            assertTrue(rendered.contains("\u001B[36m[最近下线]： \u001B[0m1970-01-01 00:00:00"));
+            assertTrue(rendered.contains("\u001B[36m[首次记录]： \u001B[0m\u001B[33m1970-01-01 00:00:00"));
+            assertTrue(rendered.contains("\u001B[36m[最近上线]： \u001B[0m\u001B[33m1970-01-01 00:00:00"));
+            assertTrue(rendered.contains("\u001B[36m最近发言 \u001B[0m(1/4)\u001B[36m:\u001B[0m"));
             assertTrue(rendered.contains("\u001B[36m[\u001B[0m\u001B[33m1970-01-01 00:00:00\u001B[0m"
                     + "\u001B[36m CHAT]: \u001B[0mrecent"), rendered);
             assertFalse(rendered.contains("1970 01 01"));

@@ -1069,18 +1069,18 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
     private void submit(DatabaseEvent event) throws IOException {
         Objects.requireNonNull(event, "event");
-        WriteTask task = new WriteTask(nextSequence.incrementAndGet(), event);
+        WriteTask task;
         IOException queueFailure = null;
         synchronized (lifecycleLock) {
+            task = new WriteTask(nextSequence.incrementAndGet(), event);
             IOException fatal = terminalFailure;
             if (fatal != null || lifecycleState == LifecycleState.FAILED) {
                 queueFailure = new IOException("SQLite writer is in a terminal failed state", fatal);
             } else if (lifecycleState != LifecycleState.RUNNING) {
                 queueFailure = new IOException("SQLite storage is not accepting events; state=" + lifecycleState);
+            } else if (!queue.offer(task)) {
+                queueFailure = new IOException("SQLite write queue is full; event=" + event.operation());
             }
-        }
-        if (queueFailure == null && !queue.offer(task)) {
-            queueFailure = new IOException("SQLite write queue is full; event=" + event.operation());
         }
         if (queueFailure != null) {
             recordRejectedTask(task, queueFailure);
@@ -1128,7 +1128,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private void writerLoop() {
-        List<WriteTask> inFlight = new ArrayList<>();
+        List<WriteTask> inFlight = new ArrayList<>(databaseSettings.batchSize);
         long recoveryBackoffMillis = 100L;
         long recoveryStartedAt = 0L;
         long lastRecoveryWarningAt = 0L;
@@ -1147,7 +1147,6 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                             if (first == null) {
                                 continue;
                             }
-                            inFlight = new ArrayList<>(databaseSettings.batchSize);
                             inFlight.add(first);
                             queue.drainTo(inFlight, databaseSettings.batchSize - 1);
                             inFlightCount.set(inFlight.size());
@@ -1263,6 +1262,12 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
     private void processBatch(Connection connection, WriterSql sql, List<WriteTask> batch) throws SQLException {
+        // Individual fallback may have committed part of this batch before a recoverable failure.
+        batch.removeIf(task -> task.completed.isDone());
+        if (batch.stream().allMatch(task -> task.event instanceof FlushEvent)) {
+            batch.forEach(this::completeCommitted);
+            return;
+        }
         try {
             connection.setAutoCommit(false);
             for (WriteTask task : batch) {
