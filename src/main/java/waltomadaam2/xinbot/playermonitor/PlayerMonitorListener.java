@@ -81,6 +81,7 @@ final class PlayerMonitorListener implements Listener {
     private ScheduledFuture<?> disconnectFinalizer;
     private ScheduledFuture<?> connectionWatchdog;
     private volatile long stuckGameStateSince;
+    private volatile long rosterDriftSince;
     private volatile long lastRosterDriftWarningAt;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
@@ -671,13 +672,25 @@ final class PlayerMonitorListener implements Listener {
         }
         RosterDrift drift = rosterDrift();
         long now = System.currentTimeMillis();
-        if ((drift.missingFromMonitor() > 0 || drift.extraInMonitor() > 0)
-                && now - lastRosterDriftWarningAt >= TimeUnit.MINUTES.toMillis(5)) {
-            lastRosterDriftWarningAt = now;
-            log.warn("Player roster drift detected: botRoster=" + drift.botRoster()
-                    + ", monitorRoster=" + drift.monitorRoster()
-                    + ", missing=" + drift.missingFromMonitor()
-                    + ", extra=" + drift.extraInMonitor());
+        boolean rosterDrifted = drift.missingFromMonitor() > 0 || drift.extraInMonitor() > 0;
+        if (rosterDrifted) {
+            if (rosterDriftSince == 0L) {
+                rosterDriftSince = now;
+            }
+            if (now - lastRosterDriftWarningAt >= TimeUnit.MINUTES.toMillis(5)) {
+                lastRosterDriftWarningAt = now;
+                log.warn("Player roster drift detected: botRoster=" + drift.botRoster()
+                        + ", monitorRoster=" + drift.monitorRoster()
+                        + ", missing=" + drift.missingFromMonitor()
+                        + ", extra=" + drift.extraInMonitor());
+            }
+            if (gameActive && !reconnectPending && !rosterReconciling
+                    && now - rosterDriftSince >= CONNECTION_WATCHDOG_GRACE_MILLIS) {
+                reconcileLiveRoster(now);
+                rosterDriftSince = 0L;
+            }
+        } else {
+            rosterDriftSince = 0L;
         }
         if (gameActive && !reconnectPending && !rosterReconciling) {
             stuckGameStateSince = 0L;
@@ -707,12 +720,62 @@ final class PlayerMonitorListener implements Listener {
             }
             reconnectGeneration++;
             gameActive = true;
-            rosterReconciling = false;
+            rosterReconciling = true;
+            boolean recoverStaleSessions = !coldStartReconciled;
+            boolean recordFreshSessions = recoverStaleSessions || forceFreshRoster;
+            coldStartReconciled = true;
             forceFreshRoster = false;
+            try {
+                clearOnlinePlayers();
+                if (recordFreshSessions) {
+                    recordFreshRoster(now, recoverStaleSessions);
+                } else {
+                    syncMonitorRosterFromBot();
+                }
+                clearStatTracking();
+            } finally {
+                rosterReconciling = false;
+            }
         }
-        syncMonitorRosterFromBot();
-        clearStatTracking();
         log.warn("connection watchdog restored Game state from Bot roster at " + now);
+    }
+
+    private void reconcileLiveRoster(long now) {
+        synchronized (connectionStateLock) {
+            if (closed || !gameActive || reconnectPending || rosterReconciling) {
+                return;
+            }
+            rosterReconciling = true;
+            int loggedIn = 0;
+            int loggedOut = 0;
+            try {
+                Set<String> currentPlayers = Bot.INSTANCE.players.values().stream()
+                        .map(PlayerMonitorListener::nameOf)
+                        .filter(name -> name != null && !name.isBlank())
+                        .collect(java.util.stream.Collectors.toSet());
+                Set<String> previousPlayers = Set.copyOf(onlinePlayers.values());
+                for (String playerName : previousPlayers) {
+                    if (!containsIgnoreCase(currentPlayers, playerName)) {
+                        recordLogoutAt(playerName, now);
+                        loggedOut++;
+                    }
+                }
+                for (String playerName : currentPlayers) {
+                    if (!containsIgnoreCase(previousPlayers, playerName)) {
+                        recordLogin(playerName, now);
+                        loggedIn++;
+                    }
+                }
+                onlinePlayers.clear();
+                for (String playerName : currentPlayers) {
+                    onlinePlayers.put(normalize(playerName), playerName);
+                }
+            } finally {
+                rosterReconciling = false;
+            }
+            log.warn("connection watchdog reconciled roster drift: loggedIn=" + loggedIn
+                    + ", loggedOut=" + loggedOut);
+        }
     }
 
     private void syncMonitorRosterFromBot() {
@@ -947,6 +1010,7 @@ final class PlayerMonitorListener implements Listener {
 
     void runConnectionWatchdogForTesting() {
         stuckGameStateSince = System.currentTimeMillis() - CONNECTION_WATCHDOG_GRACE_MILLIS;
+        rosterDriftSince = System.currentTimeMillis() - CONNECTION_WATCHDOG_GRACE_MILLIS;
         connectionWatchdog(true);
     }
 

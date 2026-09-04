@@ -193,6 +193,45 @@ class PlayerMonitorListenerReconnectTest {
         assertNull(service.getRecord("WatchdogPlayer").loginSessions.get(0).logoutAt);
     }
 
+    @Test
+    void watchdogRecordsCurrentRosterWhenPluginStartsInsideGame() throws Exception {
+        GameProfile player = profile("AlreadyOnline");
+        Bot.INSTANCE.players.put(player.getId(), player);
+
+        listener.runConnectionWatchdogForTesting();
+        service.flush();
+
+        PlayerMonitorListener.StatScanStatus status = listener.statScanStatus();
+        assertTrue(status.gameActive());
+        assertEquals(1, status.onlinePlayers());
+        assertEquals(1, service.databaseStatsSnapshot().openSessions());
+        assertNull(service.getRecord("AlreadyOnline").loginSessions.get(0).logoutAt);
+    }
+
+    @Test
+    void watchdogRepairsPersistentRosterDriftAndSessions() throws Exception {
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        GameProfile player = profile("MissedJoin");
+        Bot.INSTANCE.players.put(player.getId(), player);
+
+        listener.runConnectionWatchdogForTesting();
+        service.flush();
+
+        PlayerMonitorListener.StatScanStatus joined = listener.statScanStatus();
+        assertEquals(1, joined.onlinePlayers());
+        assertEquals(0, joined.missingFromMonitor());
+        assertEquals(1, service.databaseStatsSnapshot().openSessions());
+
+        Bot.INSTANCE.players.remove(player.getId());
+        listener.runConnectionWatchdogForTesting();
+        service.flush();
+
+        PlayerMonitorListener.StatScanStatus left = listener.statScanStatus();
+        assertEquals(0, left.onlinePlayers());
+        assertEquals(0, left.extraInMonitor());
+        assertEquals(0, service.databaseStatsSnapshot().openSessions());
+    }
+
     private static GameProfile profile(String name) {
         return new GameProfile(UUID.nameUUIDFromBytes(name.getBytes()), name);
     }
