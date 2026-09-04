@@ -2,7 +2,7 @@
 
 XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人进入 `Game` 状态后，插件会记录玩家登录、登出、公共聊天和 Stat，并将数据持续写入 SQLite。
 
-当前版本：**v1.5.2**
+当前版本：**v1.5.4**
 
 ## 主要功能
 
@@ -11,9 +11,12 @@ XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人�
 - 记录玩家登录、登出和在线会话；
 - 保存玩家公共聊天的**原始消息**，不再在入库前删除 emoji、符号或合并空格；
 - 自动或手动获取在线玩家 Stat；
+- 一条指令汇总玩家聊天数、KD、会话、游玩时间、付费权限、优先队列到期时间和最近 5 条发言；
 - 查询玩家最新 Stat、最近登录和最近聊天；
 - 自动备份、手动备份、备份列表和备份完整性验证；
 - 提供数据库健康状态和记录数量；
+- 自动检测并修复连接状态卡死、Bot/监控名单漂移和会话差异；
+- 记录聊天流水线、SQLite 队列增长、writer 恢复和各类最近写入时间；
 - 从旧版 JSON/JSONL 玩家目录迁移数据；
 - 对数据库写入失败和队列拒绝事件写入 `failed-events.jsonl`；
 - 启动时幂等重放可恢复的失败事件；
@@ -28,7 +31,7 @@ XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人�
 
 1. 停止 XinBot。
 2. 备份完整的 `playermonitor/` 目录。
-3. 将 `XinPlayerMonitor-v1.5.2.jar` 放入 XinBot 插件目录并替换旧版本。
+3. 将 `XinPlayerMonitor-v1.5.4.jar` 放入 XinBot 插件目录并替换旧版本。
 4. 启动 XinBot。
 5. 执行 `playermonitor status` 检查数据库、writer、失败事件和备份状态。
 6. 执行 `playermonitor backup now` 创建一份升级后的人工备份。
@@ -37,13 +40,15 @@ XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人�
 
 ## 指令
 
-XinBot 控制台中直接输入指令，不需要 `/`。
+XinBot 控制台中直接输入指令，不需要 `/`。所有 `playermonitor` 指令都可以缩写为 `xpm`，两者使用相同的执行和 Tab 补全逻辑。
 
 ### 帮助与设置
 
 ```text
 playermonitor
 playermonitor setting
+xpm
+xpm setting
 ```
 
 ### 手动扫描在线玩家 Stat
@@ -58,9 +63,10 @@ playermonitor scan-stat
 
 ```text
 playermonitor status
+playermonitor status full
 ```
 
-输出包括：
+普通 `status` 使用较精简的中文状态输出，`status full` 显示完整诊断字段。输出包括：
 
 - Game Active、Reconnect Pending、Roster Reconciling、Reconnect Generation 和最近断线时间；
 - Bot roster 与 PlayerMonitor roster 数量及漂移；
@@ -98,6 +104,7 @@ playermonitor backup limit <count>
 ### 查询玩家
 
 ```text
+playermonitor <玩家名>
 playermonitor <玩家名> stat
 playermonitor <玩家名> latestlogin
 playermonitor <玩家名> recentlogin [count]
@@ -112,6 +119,8 @@ playermonitor Steve stat
 playermonitor Steve recentlogin 10
 playermonitor Steve chat 20
 ```
+
+直接输入玩家名会显示综合玩家资料，包括发言次数、击杀、死亡、KD、首次记录、最近上下线、最近一次游玩时长、特殊付费权限、优先队列及预计到期时间、最近 5 条发言、总游玩时长、近 30 天游玩时长和加入游戏次数。
 
 `recentlogin` 和 `chat` 的临时查询数量范围为 `5–50`。不填写时，分别使用 `recentlogin-count` 和 `chat-count` 的当前设置。
 
@@ -232,6 +241,14 @@ playermonitor/
 
 恢复时间使用本次进入 `Game` 的时间；这代表异常恢复边界，不应被当作精确的历史登出时刻。
 
+### 连接、名单与聊天自愈
+
+- 已经生成的 `PublicChatEvent` 不受 `gameActive` 限制，即使重连状态切换也会继续进入聊天写入流程；
+- 连接 watchdog 会检测机器人已在 `Game`、网络正常但内部状态长期未恢复的情况，并重新同步名单；
+- watchdog 会比较 Bot roster 与 PlayerMonitor roster，漂移持续超过宽限时间后自动补记缺失的登录或登出；
+- 无法从 Bot roster 找到发送者时，聊天事件仍可使用回退身份继续记录；
+- `playermonitor status` 可查看精简状态，`playermonitor status full` 可查看所有连接、名单、聊天和 writer 诊断字段。
+
 ## Stat 扫描与解析
 
 - 进入 `Game` 扫描 roster 时，Stat 冷却状态使用一次批量查询，不再为每个玩家单独 flush 和创建连接；
@@ -239,6 +256,8 @@ playermonitor/
 - Tab 补全使用内存玩家名快照，不再为了补全强制 flush；
 - Stat 返回字段可以调整顺序；
 - `特殊权限` 为可选字段，只要存在玩家名和至少一个可识别 Stat 字段，并遇到结束分隔线，即可完成解析；
+- 只有系统返回的完整 `玩家不存在!` 消息会终止该玩家的 Stat 周期；玩家发出的同名聊天不会触发；
+- 系统确认玩家不存在时会取消该玩家已排队的重试，并输出一条明确 WARN；
 - StatQueue 关闭后拒绝新任务，并避免 executor 关闭期间继续 schedule。
 
 自动扫描优先级：
@@ -317,7 +336,7 @@ mvn clean test package
 生成文件：
 
 ```text
-target/XinPlayerMonitor-v1.5.2.jar
+target/XinPlayerMonitor-v1.5.4.jar
 ```
 
 升级发布前至少验证：
