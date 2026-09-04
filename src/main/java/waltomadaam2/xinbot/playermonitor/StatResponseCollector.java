@@ -13,6 +13,7 @@ import java.util.regex.Pattern;
 
 final class StatResponseCollector {
     private static final long REQUEST_TIMEOUT_MILLIS = 3_000L;
+    private static final long LATE_RESPONSE_GRACE_MILLIS = 5_000L;
     private static final Pattern HEADER = Pattern.compile("^玩家名称\\s*[:：]\\s*(.+?)\\s*$");
     private static final Pattern PLAYER_NOT_FOUND = Pattern.compile("^玩家不存在\\s*[!！]?$");
     private static final Pattern SEPARATOR = Pattern.compile("-{10,}");
@@ -20,6 +21,7 @@ final class StatResponseCollector {
             "^(加入游戏|在线次数|死亡计数|击杀数|击杀计数|游戏时长|队伍|优先队列|特殊权限)\\s*[:：].*$");
 
     private final Map<String, Expectation> expectedPlayers = new LinkedHashMap<>();
+    private final Map<String, Expectation> recentlyExpiredPlayers = new LinkedHashMap<>();
     private final long requestTimeoutMillis;
     private String activeKey;
     private String activePlayer;
@@ -40,11 +42,13 @@ final class StatResponseCollector {
 
     synchronized void expect(String playerName, long timeoutMillis) {
         long safeTimeout = Math.max(1L, timeoutMillis);
-        expectedPlayers.put(normalize(playerName),
+        String normalized = normalize(playerName);
+        expectedPlayers.put(normalized,
                 new Expectation(playerName, System.currentTimeMillis() + safeTimeout));
     }
 
     synchronized Optional<CapturedStat> accept(String text) {
+        pruneRecentlyExpired(System.currentTimeMillis());
         for (String line : text.replace("\r", "").split("\n")) {
             String trimmed = StatText.normalize(line);
             Matcher header = HEADER.matcher(trimmed);
@@ -73,6 +77,7 @@ final class StatResponseCollector {
                 resetActiveResponse();
                 if (snapshot.isPresent()) {
                     expectedPlayers.remove(completedKey);
+                    recentlyExpiredPlayers.remove(completedKey);
                     return Optional.of(new CapturedStat(completedPlayer, snapshot.get()));
                 }
             }
@@ -82,11 +87,17 @@ final class StatResponseCollector {
 
     synchronized Optional<String> rejectMissingPlayer(String text) {
         boolean missing = PLAYER_NOT_FOUND.matcher(StatText.normalize(text)).matches();
-        if (!missing || expectedPlayers.isEmpty()) {
+        if (!missing) {
             return Optional.empty();
         }
-        Map.Entry<String, Expectation> oldest = expectedPlayers.entrySet().iterator().next();
-        expectedPlayers.remove(oldest.getKey());
+        pruneRecentlyExpired(System.currentTimeMillis());
+        Map<String, Expectation> source = recentlyExpiredPlayers.isEmpty()
+                ? expectedPlayers : recentlyExpiredPlayers;
+        if (source.isEmpty()) {
+            return Optional.empty();
+        }
+        Map.Entry<String, Expectation> oldest = source.entrySet().iterator().next();
+        source.remove(oldest.getKey());
         if (oldest.getKey().equals(activeKey)) {
             resetActiveResponse();
         }
@@ -95,6 +106,7 @@ final class StatResponseCollector {
 
     synchronized List<String> expire() {
         long now = System.currentTimeMillis();
+        pruneRecentlyExpired(now);
         List<String> expired = new ArrayList<>();
         expectedPlayers.entrySet().removeIf(entry -> {
             if (entry.getValue().expiresAt > now) {
@@ -102,6 +114,8 @@ final class StatResponseCollector {
             }
             String displayName = entry.getValue().displayName;
             expired.add(displayName);
+            recentlyExpiredPlayers.put(entry.getKey(),
+                    new Expectation(displayName, now + LATE_RESPONSE_GRACE_MILLIS));
             if (normalize(displayName).equals(activeKey)) {
                 resetActiveResponse();
             }
@@ -118,6 +132,7 @@ final class StatResponseCollector {
     synchronized void cancel(String playerName) {
         String normalized = normalize(playerName);
         expectedPlayers.remove(normalized);
+        recentlyExpiredPlayers.remove(normalized);
         if (normalized.equals(activeKey)) {
             resetActiveResponse();
         }
@@ -125,6 +140,7 @@ final class StatResponseCollector {
 
     synchronized void clear() {
         expectedPlayers.clear();
+        recentlyExpiredPlayers.clear();
         resetActiveResponse();
     }
 
@@ -140,8 +156,16 @@ final class StatResponseCollector {
     }
 
     private String expectedName(String actualName) {
-        Expectation expectation = expectedPlayers.get(normalize(actualName));
+        String normalized = normalize(actualName);
+        Expectation expectation = expectedPlayers.get(normalized);
+        if (expectation == null) {
+            expectation = recentlyExpiredPlayers.get(normalized);
+        }
         return expectation == null ? null : expectation.displayName;
+    }
+
+    private void pruneRecentlyExpired(long now) {
+        recentlyExpiredPlayers.entrySet().removeIf(entry -> entry.getValue().expiresAt <= now);
     }
 
     private static String normalize(String playerName) {

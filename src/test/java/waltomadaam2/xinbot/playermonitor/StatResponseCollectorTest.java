@@ -113,4 +113,29 @@ class StatResponseCollectorTest {
         assertEquals("Bob", collector.rejectMissingPlayer("玩家不存在！").orElseThrow());
         assertFalse(collector.hasPending());
     }
+
+    @Test
+    void lateMissingPlayerResponseStillIdentifiesJustTimedOutRequest() throws Exception {
+        StatResponseCollector collector = new StatResponseCollector(1L);
+        collector.expect("LatePlayer");
+        Thread.sleep(10L);
+
+        assertEquals(List.of("LatePlayer"), collector.expire());
+        assertEquals("LatePlayer", collector.rejectMissingPlayer("玩家不存在!").orElseThrow());
+        assertFalse(collector.hasPending());
+    }
+
+    @Test
+    void lateMissingPlayerResponseDoesNotRejectNextPlayerAfterRetryWasSent() throws Exception {
+        StatResponseCollector collector = new StatResponseCollector(1L);
+        collector.expect("LatePlayer", 1L);
+        collector.expect("NextPlayer", 30_000L);
+        Thread.sleep(10L);
+
+        assertEquals(List.of("LatePlayer"), collector.expire());
+        collector.expect("LatePlayer", 30_000L);
+
+        assertEquals("LatePlayer", collector.rejectMissingPlayer("玩家不存在!").orElseThrow());
+        assertTrue(collector.isExpecting("NextPlayer"));
+    }
 }

@@ -14,6 +14,7 @@ import xin.bbtt.mcbot.events.PublicChatEvent;
 import xin.bbtt.mcbot.events.ServerChangeEvent;
 import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
@@ -230,6 +231,11 @@ class PlayerMonitorListenerStatTest {
         assertFalse(listener.hasActiveStatCycleForTesting("MissingPlayer"));
         assertEquals(0, listener.statScanStatus().queued());
         assertFalse(listener.statScanStatus().waitingResponse());
+        try (var logFiles = Files.list(temporaryDirectory.resolve("playermonitor/log"))) {
+            Path logFile = logFiles.findFirst().orElseThrow();
+            assertTrue(Files.readString(logFile).contains(
+                    "[WARN] skipping stat for MissingPlayer: system reported player does not exist"));
+        }
     }
 
     @Test

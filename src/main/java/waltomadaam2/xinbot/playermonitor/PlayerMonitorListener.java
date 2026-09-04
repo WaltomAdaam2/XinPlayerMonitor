@@ -357,6 +357,7 @@ final class PlayerMonitorListener implements Listener {
                         statResponses.accept(event.getText()).ifPresent(captured -> {
                             statOutputSuppressionUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
                             String normalizedName = normalize(captured.playerName());
+                            statQueue.cancel(captured.playerName());
                             statAttempts.remove(normalizedName);
                             pendingStatDispatches.remove(normalizedName);
                             finishStatCycle(captured.playerName());
@@ -926,8 +927,8 @@ final class PlayerMonitorListener implements Listener {
         pendingStatDispatches.remove(normalizedName);
         statResponses.cancel(playerName);
         finishStatCycle(playerName);
-        log.warn("stat scan stopped for " + playerName + ": player does not exist");
-        logger.warn("Stat scan stopped for {}: player does not exist.", playerName);
+        log.warn("skipping stat for " + playerName + ": system reported player does not exist");
+        logger.warn("Skipping stat for {}: system reported player does not exist.", playerName);
     }
 
     private void evaluateStatAttempt(String playerName, int attempts, String reason) {
