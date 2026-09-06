@@ -91,7 +91,7 @@ public final class XinPlayerMonitor implements Plugin {
             commandMayBeRegistered = true;
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[]{"xpm"}, "Query player monitoring data and configure stat scanning",
-                            "playermonitor setting|scan-stat|status|backup|<player> [stat|latestlogin|recentlogin|chat]"),
+                            "playermonitor setting|scan-stat|status|backup|<player> [stat|uuid|latestlogin|recentlogin|chat]"),
                     command,
                     this);
             log.info("plugin enabled");

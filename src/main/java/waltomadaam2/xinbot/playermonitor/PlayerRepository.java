@@ -46,6 +46,15 @@ interface PlayerRepository extends AutoCloseable {
 
     void recordStat(String playerName, StatSnapshot snapshot) throws IOException;
 
+    default PlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution,
+                                               long checkedAt) throws IOException {
+        throw new UnsupportedOperationException("identity storage not supported");
+    }
+
+    default Optional<PlayerIdentity> playerIdentity(String playerName) throws IOException {
+        return Optional.empty();
+    }
+
     /**
      * Legacy full-history read. Production command paths should prefer summary and paged query methods.
      */
@@ -132,7 +141,7 @@ interface PlayerRepository extends AutoCloseable {
                     recentChats,
                     latest == null ? null : latest.loginAt,
                     latest == null ? null : latest.logoutAt,
-                    duration, last30Days, latestStat);
+                    duration, last30Days, latestStat, null);
         });
     }
 
@@ -155,7 +164,7 @@ interface PlayerRepository extends AutoCloseable {
 
     default DatabaseHealth databaseHealth() throws IOException {
         return new DatabaseHealth("UNKNOWN", false, false, false, 0, 0, 0, 0, 0,
-                0L, 0L, 0L, 0L, 0L, "", 0L, 0L, 0L, 0L, 0L,
+                0L, 0L, 0L, 0L, 0L, 0L, "", 0L, 0L, 0L, 0L, 0L,
                 0L, 0L, 0L, 0L, 0L, 0L, 0L);
     }
 

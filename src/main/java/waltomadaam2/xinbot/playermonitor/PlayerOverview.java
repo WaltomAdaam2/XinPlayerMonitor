@@ -14,5 +14,6 @@ record PlayerOverview(
         Long latestLogoutAt,
         Long latestSessionDurationMillis,
         long playtimeLast30DaysMillis,
-        StatSnapshot latestStat) {
+        StatSnapshot latestStat,
+        PlayerIdentity identity) {
 }

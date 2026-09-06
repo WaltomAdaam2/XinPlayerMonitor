@@ -289,6 +289,28 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     @Override
+    public PlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution, long checkedAt)
+            throws IOException {
+        validatePlayerName(playerName);
+        submit(new IdentityEvent(playerName, Objects.requireNonNull(resolution, "resolution"), checkedAt));
+        flush();
+        return playerIdentity(playerName).orElseThrow(
+                () -> new IOException("UUID identity write did not create player " + playerName));
+    }
+
+    @Override
+    public Optional<PlayerIdentity> playerIdentity(String playerName) throws IOException {
+        validatePlayerName(playerName);
+        flush();
+        try (Connection connection = openConnection()) {
+            Long playerId = findPlayerId(connection, normalize(playerName));
+            return playerId == null ? Optional.empty() : Optional.of(readIdentity(connection, playerId));
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("read player UUID identity " + playerName, error);
+        }
+    }
+
+    @Override
     public PlayerRecord read(String playerName) throws IOException {
         validatePlayerName(playerName);
         return find(playerName).orElseGet(() -> new PlayerRecord(playerName, System.currentTimeMillis()));
@@ -344,12 +366,21 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     @Override
-    public DatabaseHealth databaseHealth() {
+    public DatabaseHealth databaseHealth() throws IOException {
         Thread thread = writerThread;
         long failedLines = failedEventLines.get();
         long replayed = replayedFailedEvents.get();
         int currentQueueSize = queue.size();
         recordQueueSample(System.currentTimeMillis(), currentQueueSize);
+        long lastUuidWrittenAt;
+        try (Connection connection = openConnection();
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(
+                     "SELECT COALESCE(MAX(uuid_last_written_at), 0) FROM players")) {
+            lastUuidWrittenAt = resultSet.next() ? resultSet.getLong(1) : 0L;
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("read last UUID write timestamp", error);
+        }
         return new DatabaseHealth(
                 lifecycleState.name(),
                 thread != null && thread.isAlive(),
@@ -364,6 +395,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                 lastChatCommittedAt.get(),
                 lastSessionCommittedAt.get(),
                 lastStatCommittedAt.get(),
+                lastUuidWrittenAt,
                 lastFailureAt.get(),
                 lastFailureMessage,
                 writerRecoveryCount.get(),
@@ -571,7 +603,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             StatSnapshot latestStat = latestStatForPlayerId(connection, playerId);
             List<ChatEntry> recentChats = recentChatsForPlayerId(connection, playerId, 5);
             return Optional.of(new PlayerOverview(displayName, firstSeenAt, chatTotal, recentChats,
-                    latestLoginAt, latestLogoutAt, latestDurationMillis, playtimeLast30DaysMillis, latestStat));
+                    latestLoginAt, latestLogoutAt, latestDurationMillis, playtimeLast30DaysMillis, latestStat,
+                    readIdentity(connection, playerId)));
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("read player overview " + playerName, error);
         }
@@ -887,6 +920,17 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                     throw new IOException("stat event snapshot is invalid");
                 }
                 yield new StatEvent(playerName, snapshot);
+            }
+            case "identity" -> {
+                String playerName = requiredString(payload, "playerName");
+                if (!payload.has("resolution") || payload.get("resolution").isJsonNull()) {
+                    throw new IOException("identity event is missing resolution");
+                }
+                IdentityResolution resolution = gson.fromJson(payload.get("resolution"), IdentityResolution.class);
+                if (resolution == null) {
+                    throw new IOException("identity event resolution is invalid");
+                }
+                yield new IdentityEvent(playerName, resolution, requiredLong(payload, "checkedAt"));
             }
             default -> throw new IOException("unsupported failed event operation: " + record.operation());
         };
@@ -1342,6 +1386,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                 throw new IOException("simulated stat write failure for " + normalized);
             }
             writeStat(sql, stat.playerName(), stat.snapshot());
+        } else if (event instanceof IdentityEvent identity) {
+            writeIdentity(sql, identity.playerName(), identity.resolution(), identity.checkedAt());
         }
     }
 
@@ -1396,6 +1442,8 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             rememberPlayerName(chat.playerName());
         } else if (event instanceof StatEvent stat) {
             rememberPlayerName(stat.playerName());
+        } else if (event instanceof IdentityEvent identity) {
+            rememberPlayerName(identity.playerName());
         }
     }
 
@@ -1570,6 +1618,77 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         sql.updatePlayerStat.executeUpdate();
     }
 
+    private void writeIdentity(WriterSql sql, String playerName, IdentityResolution resolution, long checkedAt)
+            throws SQLException {
+        long playerId = ensurePlayer(sql, playerName, checkedAt);
+        PlayerIdentity previous = readIdentity(sql.connection, playerId);
+        String mojangUuid = resolvedUuid(previous.mojangUuid(), resolution.mojang());
+        String thirdPartyUuid = resolvedUuid(previous.thirdPartyUuid(), resolution.thirdParty());
+        IdentityType identityType = resolution.identityType() == null
+                ? previous.identityType() : resolution.identityType();
+
+        List<String> assignments = new ArrayList<>();
+        List<Object> values = new ArrayList<>();
+        boolean identityChanged = addChanged(assignments, values, "server_uuid",
+                previous.serverUuid(), resolution.serverUuid());
+        identityChanged |= addChanged(assignments, values, "offline_uuid",
+                previous.offlineUuid(), resolution.offlineUuid());
+        identityChanged |= addChanged(assignments, values, "mojang_uuid", previous.mojangUuid(), mojangUuid);
+        identityChanged |= addChanged(assignments, values, "third_party_uuid",
+                previous.thirdPartyUuid(), thirdPartyUuid);
+        identityChanged |= addChanged(assignments, values, "identity_type",
+                previous.identityType() == null ? null : previous.identityType().name(),
+                identityType == null ? null : identityType.name());
+        if (resolution.mojang().completed()) {
+            assignments.add("mojang_checked_at = ?");
+            values.add(checkedAt);
+        }
+        if (resolution.thirdParty().completed()) {
+            assignments.add("third_party_checked_at = ?");
+            values.add(checkedAt);
+        }
+        if (resolution.successful()) {
+            assignments.add("uuid_last_checked_at = ?");
+            values.add(checkedAt);
+        }
+        if (identityChanged) {
+            assignments.add("uuid_last_written_at = ?");
+            values.add(checkedAt);
+        }
+        if (assignments.isEmpty()) {
+            return;
+        }
+        assignments.add("updated_at = ?");
+        values.add(checkedAt);
+        try (PreparedStatement statement = sql.connection.prepareStatement(
+                "UPDATE players SET " + String.join(", ", assignments) + " WHERE id = ?")) {
+            int index = 1;
+            for (Object value : values) {
+                statement.setObject(index++, value);
+            }
+            statement.setLong(index, playerId);
+            statement.executeUpdate();
+        }
+    }
+
+    private static String resolvedUuid(String previous, IdentityResolution.Lookup lookup) {
+        return switch (lookup.status()) {
+            case FOUND -> lookup.uuid();
+            case NOT_FOUND -> null;
+            case ERROR, NOT_CHECKED -> previous;
+        };
+    }
+
+    private static boolean addChanged(List<String> assignments, List<Object> values, String column,
+                                      Object previous, Object current) {
+        if (Objects.equals(previous, current)) {
+            return false;
+        }
+        assignments.add(column + " = ?");
+        values.add(current);
+        return true;
+    }
+
     private long ensurePlayer(WriterSql sql, String playerName, long timestamp) throws SQLException {
         PlayerRow existing = findPlayer(sql, normalize(playerName));
         if (existing != null) {
@@ -1703,6 +1822,45 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         return record;
     }
 
+    private PlayerIdentity readIdentity(Connection connection, long playerId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT display_name, server_uuid, offline_uuid, mojang_uuid, third_party_uuid,
+                       identity_type, mojang_checked_at, third_party_checked_at,
+                       uuid_last_checked_at, uuid_last_written_at
+                FROM players WHERE id = ?
+                """)) {
+            statement.setLong(1, playerId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new SQLException("Player id disappeared while reading identity: " + playerId);
+                }
+                String type = resultSet.getString("identity_type");
+                IdentityType identityType;
+                try {
+                    identityType = type == null ? null : IdentityType.valueOf(type);
+                } catch (IllegalArgumentException ignored) {
+                    identityType = IdentityType.UNKNOWN;
+                }
+                return new PlayerIdentity(
+                        resultSet.getString("display_name"),
+                        resultSet.getString("server_uuid"),
+                        resultSet.getString("offline_uuid"),
+                        resultSet.getString("mojang_uuid"),
+                        resultSet.getString("third_party_uuid"),
+                        identityType,
+                        nullableLong(resultSet, "mojang_checked_at"),
+                        nullableLong(resultSet, "third_party_checked_at"),
+                        nullableLong(resultSet, "uuid_last_checked_at"),
+                        nullableLong(resultSet, "uuid_last_written_at"));
+            }
+        }
+    }
+
+    private static Long nullableLong(ResultSet resultSet, String column) throws SQLException {
+        long value = resultSet.getLong(column);
+        return resultSet.wasNull() ? null : value;
+    }
+
     private String legacyMigrationStatus(Connection connection) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT status FROM migration_state WHERE migration_key = 'legacy-json-v1'")) {
@@ -1780,6 +1938,12 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         public String playerNameForLog() { return playerName; }
     }
 
+    private record IdentityEvent(String playerName, IdentityResolution resolution, long checkedAt)
+            implements DatabaseEvent {
+        public String operation() { return "identity"; }
+        public String playerNameForLog() { return playerName; }
+    }
+
     private record FlushEvent() implements DatabaseEvent {
         public String operation() { return "flush"; }
     }
@@ -1817,6 +1981,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     private static final class WriterSql implements AutoCloseable {
+        private final Connection connection;
         private final PreparedStatement selectPlayer;
         private final PreparedStatement insertPlayer;
         private final PreparedStatement updatePlayerLastSeen;
@@ -1830,6 +1995,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         private final PreparedStatement updatePlayerStat;
 
         private WriterSql(Connection connection) throws SQLException {
+            this.connection = connection;
             selectPlayer = connection.prepareStatement("SELECT id, display_name FROM players WHERE normalized_name = ?");
             insertPlayer = connection.prepareStatement("""
                     INSERT INTO players(normalized_name, display_name, first_seen_at, last_seen_at,

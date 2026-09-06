@@ -78,6 +78,15 @@ public final class PlayerMonitorService {
         store.recordStat(playerName, snapshot);
     }
 
+    PlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution, long checkedAt)
+            throws IOException {
+        return store.recordIdentityCheck(playerName, resolution, checkedAt);
+    }
+
+    Optional<PlayerIdentity> playerIdentity(String playerName) throws IOException {
+        return store.playerIdentity(playerName);
+    }
+
     /** @deprecated Prefer summary and bounded query methods. */
     @Deprecated
     public PlayerRecord getRecord(String playerName) throws IOException {

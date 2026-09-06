@@ -14,6 +14,7 @@ record DatabaseHealth(
         long lastChatCommittedAt,
         long lastSessionCommittedAt,
         long lastStatCommittedAt,
+        long lastUuidWrittenAt,
         long lastFailureAt,
         String lastFailureMessage,
         long writerRecoveryCount,

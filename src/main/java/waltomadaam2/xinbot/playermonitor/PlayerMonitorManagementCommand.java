@@ -54,7 +54,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String COUNT_PLACEHOLDER = "<count>";
     private static final String TIMEZONE_PLACEHOLDER = "<timezone>";
 
-    private static final List<String> PLAYER_ACTIONS = List.of("stat", "latestlogin", "recentlogin", "chat");
+    private static final List<String> PLAYER_ACTIONS = List.of("stat", "uuid", "latestlogin", "recentlogin", "chat");
     private static final List<String> BOOLEAN_VALUES = List.of("true", "false");
     private static final List<String> SETTING_ITEMS = List.of(
             "scan-on-entry",
@@ -70,6 +70,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             "display-timezone",
             "recentlogin-count",
             "chat-count",
+            "uuidRecordEnable",
+            "uuidRecordCooldown",
             "backup-interval");
 
     private static final List<String> TIMEZONE_VALUES = MonitorSettingsStore.SUPPORTED_TIMEZONES;
@@ -343,6 +345,22 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     settings.setChatCount(parsed);
                     print("聊天记录默认显示数量已设置为 " + parsed + "，已立即生效。");
                 }
+                case "uuidrecordenable", "uuid-record-enable" -> {
+                    boolean parsed = parseBoolean(value);
+                    settings.setUuidRecordEnable(parsed);
+                    if (listener != null) {
+                        listener.applyUuidSettingsNow();
+                    }
+                    print("UUID 定期记录已设置为 " + parsed + "，已立即生效。");
+                }
+                case "uuidrecordcooldown", "uuid-record-cooldown" -> {
+                    int parsed = parseInt(value, HOUR_PLACEHOLDER);
+                    settings.setUuidRecordCooldown(parsed);
+                    if (listener != null) {
+                        listener.applyUuidSettingsNow();
+                    }
+                    print("UUID 记录冷却时间已设置为 " + parsed + " 小时，已立即生效。");
+                }
                 case "cache-idle", "max-cached-history" ->
                         print("该设置仅用于旧版内存存储，SQLite 后端不使用它，未修改设置。");
                 case "backup-interval" -> {
@@ -444,6 +462,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 case "chat" -> chats(displayName,
                         service.recentChats(playerName, queryCount(args, settings.chatCount())),
                         service.chatCount(playerName));
+                case "uuid" -> uuid(displayName, service.playerIdentity(playerName));
                 default -> playerHelp();
             }
         } catch (NumberFormatException error) {
@@ -471,6 +490,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     : snapshot.priorityQueue != null ? snapshot.priorityQueue : snapshot.team;
             print(SectionFormatter.header("Player Data"));
             playerDataField("玩家：", overview.playerName());
+            playerDataUuidField("uuid：", overview.identity());
             playerDataCountField("> 发言次数：", overview.chatCount() + "次");
             playerDataCountField("> 击杀数：", value(kills) + "人");
             playerDataCountField("> 死亡次数：", value(deaths) + "次");
@@ -514,6 +534,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 case "display-timezone" -> TIMEZONE_VALUES;
                 case "recentlogin-count" -> List.of(Integer.toString(settings.recentLoginCount()));
                 case "chat-count" -> List.of(Integer.toString(settings.chatCount()));
+                case "uuidrecordenable", "uuid-record-enable" -> BOOLEAN_VALUES;
+                case "uuidrecordcooldown", "uuid-record-cooldown" -> List.of(HOUR_PLACEHOLDER);
                 default -> List.of();
             };
             return matching(args[2], candidates);
@@ -611,6 +633,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 "显示时区: " + current.displayTimezone,
                 "近期登录默认数量: " + current.recentLoginCount,
                 "聊天默认数量: " + current.chatCount,
+                "uuidRecordEnable=" + current.uuidRecordEnable,
+                "uuidRecordCooldown=" + current.uuidRecordCooldown,
                 "自动备份间隔: " + current.backupInterval + " h");
     }
 
@@ -725,11 +749,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 lines.add("最近Chat写入: " + statusTime(health.lastChatCommittedAt()));
                 lines.add("最近Session写入: " + statusTime(health.lastSessionCommittedAt()));
                 lines.add("最近Stat写入: " + statusTime(health.lastStatCommittedAt()));
+                lines.add("最近UUID写入: " + statusTime(health.lastUuidWrittenAt()));
             } else {
                 lines.add("最近写入：");
                 lines.add("聊天=" + statusTime(health.lastChatCommittedAt()));
                 lines.add("会话=" + statusTime(health.lastSessionCommittedAt()));
                 lines.add("Stat=" + statusTime(health.lastStatCommittedAt()));
+                lines.add("UUID=" + statusTime(health.lastUuidWrittenAt()));
             }
             lines.add("最近失败: " + statusTime(health.lastFailureAt()));
             if (health.lastFailureAt() > 0 && health.lastFailureMessage() != null
@@ -935,6 +961,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(CYAN + label + RESET + COUNT_COLOR + value + RESET);
     }
 
+    private void playerDataUuidField(String label, PlayerIdentity identity) {
+        print(CYAN + label + RESET + uuidValue(identity));
+    }
+
     private void playerDataPlainField(String label, String value) {
         print(CYAN + label + RESET + value);
     }
@@ -958,6 +988,25 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(CYAN + "优先队列: " + priorityColor + value(priority) + RESET);
         statField("特殊权限", permissionsDisplay(snapshot, permissions));
         print(SectionFormatter.divider("Player stat"));
+    }
+
+    private void uuid(String playerName, Optional<PlayerIdentity> identity) {
+        report("uuid", List.of(
+                "玩家: " + playerName,
+                "uuid: " + uuidValue(identity.orElse(null))));
+        if (listener != null) {
+            listener.refreshUuidIfEligible(playerName);
+        }
+    }
+
+    private String uuidValue(PlayerIdentity identity) {
+        if (identity == null || identity.serverUuid() == null || identity.serverUuid().isBlank()) {
+            return "无";
+        }
+        if (identity.uuidLastWrittenAt() == null || identity.uuidLastWrittenAt() <= 0L) {
+            return identity.serverUuid();
+        }
+        return identity.serverUuid() + " (" + YELLOW + format(identity.uuidLastWrittenAt()) + RESET + ")";
     }
 
     private void statField(String label, String value) {
@@ -1072,7 +1121,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void playerHelp() {
         print(colorUsage("Usage: playermonitor " + PLAYER_PLACEHOLDER
-                + " [stat|latestlogin|recentlogin [count]|chat [count]]"));
+                + " [stat|uuid|latestlogin|recentlogin [count]|chat [count]]"));
     }
 
     private void print(String message) {
@@ -1082,10 +1131,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static String placeholderFor(String setting) {
         return switch (setting) {
             case "scan-on-entry", "stat-enabled", "stat-output-hide", "scan-on-join",
-                    "prioritize-join-stat" -> TRUE_FALSE_PLACEHOLDER;
+                    "prioritize-join-stat", "uuidRecordEnable" -> TRUE_FALSE_PLACEHOLDER;
             case "disconnect-timeout" -> MINUTE_PLACEHOLDER;
             case "stat-send-interval", "stat-timeout" -> MS_PLACEHOLDER;
-            case "stat-cooldown", "backup-interval" -> HOUR_PLACEHOLDER;
+            case "stat-cooldown", "backup-interval", "uuidRecordCooldown" -> HOUR_PLACEHOLDER;
             case "display-timezone" -> TIMEZONE_PLACEHOLDER;
             default -> COUNT_PLACEHOLDER;
         };

@@ -22,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -29,6 +30,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,6 +38,7 @@ final class PlayerMonitorListener implements Listener {
     private static final long STAT_WRITE_DELAY_MILLIS = 25L;
     private static final long CONNECTION_WATCHDOG_PERIOD_MILLIS = TimeUnit.SECONDS.toMillis(30);
     private static final long CONNECTION_WATCHDOG_GRACE_MILLIS = TimeUnit.MINUTES.toMillis(1);
+    private static final long UUID_REFRESH_RETRY_MILLIS = TimeUnit.MINUTES.toMillis(5);
     private static final Pattern MINECRAFT_FORMAT_CODE = Pattern.compile("(?i)§[0-9a-fk-or]");
     private static final Pattern PUBLIC_CHAT_TEXT = Pattern.compile(
             "^(?:§[0-9a-fk-or])*\\s*<((?:(?:§[0-9a-fk-or])|[^>])+)>(.*)$",
@@ -45,7 +48,10 @@ final class PlayerMonitorListener implements Listener {
     private final PluginLog log;
     private final Logger logger;
     private final MonitorSettingsStore settings;
+    private final PlayerIdentityResolver identityResolver;
+    private final LongSupplier clock;
     private final Map<String, String> onlinePlayers = new ConcurrentHashMap<>();
+    private final Map<String, UUID> onlineServerUuids = new ConcurrentHashMap<>();
     private final Set<String> pendingStatDispatches = ConcurrentHashMap.newKeySet();
     private final Set<String> activeStatCycles = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
@@ -56,6 +62,15 @@ final class PlayerMonitorListener implements Listener {
         thread.setDaemon(true);
         return thread;
     });
+    private final ScheduledExecutorService uuidExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "XinPlayerMonitor-uuid-refresh");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final Object uuidScheduleLock = new Object();
+    private final Map<String, ScheduledUuidCheck> scheduledUuidChecks = new ConcurrentHashMap<>();
+    private final AtomicLong uuidTaskSequence = new AtomicLong();
+    private final AtomicLong uuidGeneration = new AtomicLong();
     private volatile boolean gameActive;
     private volatile boolean closed;
     private volatile boolean reconnectPending;
@@ -86,10 +101,17 @@ final class PlayerMonitorListener implements Listener {
     private volatile long lastRosterDriftWarningAt;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
+        this(service, log, logger, settings, new HttpPlayerIdentityResolver(), System::currentTimeMillis);
+    }
+
+    PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings,
+                          PlayerIdentityResolver identityResolver, LongSupplier clock) {
         this.service = service;
         this.log = log;
         this.logger = logger;
         this.settings = settings;
+        this.identityResolver = identityResolver;
+        this.clock = clock;
         statQueue = new StatQueue(
                 () -> gameActive,
                 name -> onlinePlayers.containsKey(normalize(name)),
@@ -133,10 +155,15 @@ final class PlayerMonitorListener implements Listener {
         }
         statQueue.close();
         clearStatTracking();
+        invalidateUuidChecks();
+        uuidExecutor.shutdownNow();
         retryExecutor.shutdown();
         waitForPendingStatWrites();
         retryExecutor.shutdownNow();
         try {
+            if (!uuidExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                log.warn("UUID refresh executor did not terminate cleanly");
+            }
             if (!retryExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
                 log.warn("stat retry executor did not terminate cleanly");
             }
@@ -213,6 +240,7 @@ final class PlayerMonitorListener implements Listener {
     public void onServerChange(ServerChangeEvent event) {
         boolean enteringGame = event.getServer() == Server.Game;
         if (!enteringGame) {
+            invalidateUuidChecks();
             if (event.getCurrentServer() == Server.Game) {
                 beginReconnectWindow(System.currentTimeMillis());
             } else {
@@ -251,6 +279,7 @@ final class PlayerMonitorListener implements Listener {
                 }
             }
         }
+        observeUuidRoster(Bot.INSTANCE.players.values());
         log.info(resumed
                 ? "reconnected to Game; reconciled player roster"
                 : "entered Game; monitoring enabled");
@@ -285,6 +314,7 @@ final class PlayerMonitorListener implements Listener {
         if (onlinePlayers.put(normalize(playerName), playerName) == null) {
             recordLogin(playerName, System.currentTimeMillis());
         }
+        observeUuid(event.getPlayerProfile());
         if (scanJoinStat) {
             enqueueAutomaticJoinStat(playerName, brandNew);
         }
@@ -296,6 +326,8 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
+        cancelUuidCheck(playerName);
+        onlineServerUuids.remove(normalize(playerName));
         statResponses.cancel(playerName);
         statAttempts.remove(normalize(playerName));
         pendingStatDispatches.remove(normalize(playerName));
@@ -526,6 +558,7 @@ final class PlayerMonitorListener implements Listener {
             reconnectPending = true;
             rosterReconciling = false;
             gameActive = false;
+            invalidateUuidChecks();
             clearOnlinePlayers();
             clearStatTracking();
             if (disconnectFinalizer != null) {
@@ -779,11 +812,160 @@ final class PlayerMonitorListener implements Listener {
                 for (String playerName : currentPlayers) {
                     onlinePlayers.put(normalize(playerName), playerName);
                 }
+                observeUuidRoster(Bot.INSTANCE.players.values());
             } finally {
                 rosterReconciling = false;
             }
             log.warn("connection watchdog reconciled roster drift: loggedIn=" + loggedIn
                     + ", loggedOut=" + loggedOut);
+        }
+    }
+
+    void applyUuidSettingsNow() {
+        invalidateUuidChecks();
+        if (gameActive && settings.uuidRecordEnable() && settings.uuidRecordCooldown() > 0) {
+            observeUuidRoster(Bot.INSTANCE.players.values());
+            for (Map.Entry<String, UUID> entry : onlineServerUuids.entrySet()) {
+                String playerName = onlinePlayers.get(entry.getKey());
+                if (playerName != null) {
+                    scheduleUuidCheck(playerName, entry.getValue(), 0L, false);
+                }
+            }
+        }
+    }
+
+    void refreshUuidIfEligible(String playerName) {
+        String normalized = normalize(playerName);
+        UUID serverUuid = onlineServerUuids.get(normalized);
+        String displayName = onlinePlayers.get(normalized);
+        if (serverUuid != null && displayName != null) {
+            scheduleUuidCheck(displayName, serverUuid, 0L, false);
+        }
+    }
+
+    private void observeUuidRoster(Collection<GameProfile> profiles) {
+        for (GameProfile profile : profiles) {
+            observeUuid(profile);
+        }
+    }
+
+    private void observeUuid(GameProfile profile) {
+        if (profile == null || profile.getId() == null || nameOf(profile) == null || nameOf(profile).isBlank()) {
+            return;
+        }
+        String playerName = nameOf(profile);
+        String normalized = normalize(playerName);
+        UUID previous = onlineServerUuids.put(normalized, profile.getId());
+        scheduleUuidCheck(playerName, profile.getId(), 0L,
+                previous != null && !previous.equals(profile.getId()));
+    }
+
+    private void scheduleUuidCheck(String playerName, UUID serverUuid, long delayMillis, boolean replace) {
+        if (closed || !gameActive || !settings.uuidRecordEnable() || settings.uuidRecordCooldown() <= 0) {
+            return;
+        }
+        String normalized = normalize(playerName);
+        synchronized (uuidScheduleLock) {
+            ScheduledUuidCheck existing = scheduledUuidChecks.get(normalized);
+            if (existing != null && !existing.future().isDone()) {
+                if (!replace && existing.serverUuid().equals(serverUuid)) {
+                    return;
+                }
+                existing.future().cancel(false);
+            }
+            long token = uuidTaskSequence.incrementAndGet();
+            long generation = uuidGeneration.get();
+            try {
+                ScheduledFuture<?> future = uuidExecutor.schedule(
+                        () -> runUuidCheck(playerName, serverUuid, generation, token),
+                        Math.max(0L, delayMillis), TimeUnit.MILLISECONDS);
+                scheduledUuidChecks.put(normalized, new ScheduledUuidCheck(serverUuid, token, future));
+            } catch (RejectedExecutionException ignored) {
+                // Plugin shutdown invalidates all UUID work.
+            }
+        }
+    }
+
+    private void runUuidCheck(String playerName, UUID scheduledServerUuid, long generation, long token) {
+        String normalized = normalize(playerName);
+        synchronized (uuidScheduleLock) {
+            ScheduledUuidCheck current = scheduledUuidChecks.get(normalized);
+            if (current == null || current.token() != token) {
+                return;
+            }
+            scheduledUuidChecks.remove(normalized);
+        }
+        UUID currentServerUuid = onlineServerUuids.get(normalized);
+        if (currentServerUuid == null || !uuidContextValid(normalized, currentServerUuid, generation)) {
+            return;
+        }
+        if (!currentServerUuid.equals(scheduledServerUuid)) {
+            scheduleUuidCheck(onlinePlayers.get(normalized), currentServerUuid, 0L, true);
+            return;
+        }
+
+        long now = clock.getAsLong();
+        try {
+            PlayerIdentity previous = service.playerIdentity(playerName).orElse(null);
+            long cooldownMillis = TimeUnit.HOURS.toMillis(settings.uuidRecordCooldown());
+            boolean serverUuidChanged = previous == null || previous.serverUuid() == null
+                    || !currentServerUuid.toString().equalsIgnoreCase(previous.serverUuid());
+            long lastCheckedAt = previous == null || previous.uuidLastCheckedAt() == null
+                    ? 0L : previous.uuidLastCheckedAt();
+            long dueAt = lastCheckedAt <= 0L ? now : saturatedAdd(lastCheckedAt, cooldownMillis);
+            if (!serverUuidChanged && now < dueAt) {
+                scheduleUuidCheck(playerName, currentServerUuid, dueAt - now, false);
+                return;
+            }
+
+            IdentityResolution resolution = identityResolver.resolve(playerName, currentServerUuid, previous);
+            if (!uuidContextValid(normalized, currentServerUuid, generation)) {
+                return;
+            }
+            PlayerIdentity updated = service.recordIdentityCheck(playerName, resolution, now);
+            if (resolution.successful() && updated.uuidLastCheckedAt() != null) {
+                long nextAt = saturatedAdd(updated.uuidLastCheckedAt(),
+                        TimeUnit.HOURS.toMillis(settings.uuidRecordCooldown()));
+                scheduleUuidCheck(playerName, currentServerUuid, Math.max(0L, nextAt - clock.getAsLong()), false);
+            } else {
+                scheduleUuidCheck(playerName, currentServerUuid, UUID_REFRESH_RETRY_MILLIS, false);
+            }
+        } catch (IOException | RuntimeException error) {
+            log.warn("failed to refresh UUID identity for " + playerName + ": " + error.getMessage());
+            scheduleUuidCheck(playerName, currentServerUuid, UUID_REFRESH_RETRY_MILLIS, false);
+        }
+    }
+
+    private boolean uuidContextValid(String normalizedPlayerName, UUID serverUuid, long generation) {
+        return !closed && generation == uuidGeneration.get() && gameActive && !reconnectPending
+                && settings.uuidRecordEnable() && settings.uuidRecordCooldown() > 0
+                && onlinePlayers.containsKey(normalizedPlayerName)
+                && serverUuid.equals(onlineServerUuids.get(normalizedPlayerName));
+    }
+
+    private static long saturatedAdd(long first, long second) {
+        if (second > 0L && first > Long.MAX_VALUE - second) {
+            return Long.MAX_VALUE;
+        }
+        return first + second;
+    }
+
+    private void cancelUuidCheck(String playerName) {
+        synchronized (uuidScheduleLock) {
+            ScheduledUuidCheck scheduled = scheduledUuidChecks.remove(normalize(playerName));
+            if (scheduled != null) {
+                scheduled.future().cancel(false);
+            }
+        }
+    }
+
+    private void invalidateUuidChecks() {
+        uuidGeneration.incrementAndGet();
+        synchronized (uuidScheduleLock) {
+            for (ScheduledUuidCheck scheduled : scheduledUuidChecks.values()) {
+                scheduled.future().cancel(false);
+            }
+            scheduledUuidChecks.clear();
         }
     }
 
@@ -795,6 +977,7 @@ final class PlayerMonitorListener implements Listener {
                 onlinePlayers.put(normalize(playerName), playerName);
             }
         }
+        observeUuidRoster(Bot.INSTANCE.players.values());
     }
 
     private RosterDrift rosterDrift() {
@@ -1034,6 +1217,23 @@ final class PlayerMonitorListener implements Listener {
         connectionWatchdog(true);
     }
 
+    int scheduledUuidCheckCountForTesting() {
+        return scheduledUuidChecks.size();
+    }
+
+    void runUuidCheckForTesting(GameProfile profile) {
+        String playerName = nameOf(profile);
+        onlinePlayers.put(normalize(playerName), playerName);
+        onlineServerUuids.put(normalize(playerName), profile.getId());
+        try {
+            PlayerIdentity previous = service.playerIdentity(playerName).orElse(null);
+            IdentityResolution resolution = identityResolver.resolve(playerName, profile.getId(), previous);
+            service.recordIdentityCheck(playerName, resolution, clock.getAsLong());
+        } catch (IOException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private static String nameOf(GameProfile profile) {
         return profile.getName();
     }
@@ -1049,6 +1249,7 @@ final class PlayerMonitorListener implements Listener {
 
     private void clearOnlinePlayers() {
         onlinePlayers.clear();
+        onlineServerUuids.clear();
     }
 
     private void recordLogin(String playerName, long now) {
@@ -1073,6 +1274,9 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private record RosterDrift(int botRoster, int monitorRoster, int missingFromMonitor, int extraInMonitor) {
+    }
+
+    private record ScheduledUuidCheck(UUID serverUuid, long token, ScheduledFuture<?> future) {
     }
 
     private static final class SystemChatContext {

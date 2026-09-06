@@ -304,6 +304,8 @@ class PlayerMonitorManagementCommandTest {
                 "Usage: playermonitor setting display-timezone <timezone>",
                 "Usage: playermonitor setting recentlogin-count <count>",
                 "Usage: playermonitor setting chat-count <count>",
+                "Usage: playermonitor setting uuidRecordEnable <true|false>",
+                "Usage: playermonitor setting uuidRecordCooldown <hour>",
                 "Usage: playermonitor setting backup-interval <hour>"),
                 PlayerMonitorManagementCommand.settingUsageLines());
 
@@ -327,6 +329,8 @@ class PlayerMonitorManagementCommandTest {
                 "显示时区: UTC+08:00",
                 "近期登录默认数量: 15",
                 "聊天默认数量: 10",
+                "uuidRecordEnable=false",
+                "uuidRecordCooldown=168",
                 "自动备份间隔: 168 h"),
                 PlayerMonitorManagementCommand.settingStatusLines(current));
     }
@@ -366,6 +370,80 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
+    void settingsCommandShowsAndPersistsConfiguredUuidValues() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-uuid-settings-command");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        LoggerContext context = new LoggerContext();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger("uuid-settings-output");
+        logger.addAppender(appender);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    null, settings, null, logger);
+            command.onCommand(null, "playermonitor",
+                    new String[]{"setting", "uuidRecordEnable", "true"});
+            command.onCommand(null, "playermonitor",
+                    new String[]{"setting", "uuidRecordCooldown", "72"});
+            command.onCommand(null, "playermonitor", new String[]{"setting"});
+            String rendered = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertTrue(rendered.contains("uuidRecordEnable=true"));
+            assertTrue(rendered.contains("uuidRecordCooldown=72"));
+
+            MonitorSettingsStore reloaded = new MonitorSettingsStore(directory);
+            reloaded.initialize();
+            assertTrue(reloaded.uuidRecordEnable());
+            assertEquals(72, reloaded.uuidRecordCooldown());
+        } finally {
+            context.stop();
+        }
+    }
+
+    @Test
+    void uuidCommandUsesStoredValueWithoutColoringUuidAndHandlesMissingValue() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-uuid-output");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setDisplayTimezone("UTC");
+        LimitedQueryRepository repository = new LimitedQueryRepository();
+        PlayerMonitorService service = new PlayerMonitorService(repository);
+        service.initialize();
+        LoggerContext context = new LoggerContext();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger("uuid-command-output");
+        logger.addAppender(appender);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    service, settings, null, logger);
+            command.onCommand(null, "playermonitor", new String[]{"Steve", "uuid"});
+            String rendered = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertTrue(rendered.contains(SectionFormatter.header("uuid")));
+            assertTrue(rendered.contains("\u001B[36m玩家:\u001B[0m \u001B[38;5;29mSteve\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36muuid:\u001B[0m "
+                    + "98465ebe-e619-3b1d-8b25-98352b6abbb9 (\u001B[33m1970-01-01 00:00:05\u001B[0m)"));
+            assertFalse(rendered.contains("\u001B[38;5;215m98465ebe"));
+            assertTrue(rendered.contains(SectionFormatter.divider("uuid")));
+
+            appender.list.clear();
+            repository.identity = null;
+            command.onCommand(null, "playermonitor", new String[]{"Steve", "uuid"});
+            String missing = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertTrue(missing.contains("\u001B[36muuid:\u001B[0m 无"));
+            assertFalse(missing.contains("\u001B[33m无"));
+        } finally {
+            service.close();
+            context.stop();
+        }
+    }
+
+    @Test
     void playerDataUsesRequestedColorsWithoutColoringHistoricalTimes() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-player-data-colors");
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
@@ -391,6 +469,9 @@ class PlayerMonitorManagementCommandTest {
                     .reduce("", (left, right) -> left + "\n" + right);
 
             assertTrue(rendered.contains("\u001B[36m玩家：\u001B[0m\u001B[33mSteve\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36muuid：\u001B[0m"
+                    + "98465ebe-e619-3b1d-8b25-98352b6abbb9 (\u001B[33m1970-01-01 00:00:05\u001B[0m)"));
+            assertFalse(rendered.contains("\u001B[38;5;215m98465ebe"));
             assertTrue(rendered.contains("\u001B[36m> 发言次数：\u001B[0m\u001B[38;5;215m4次\u001B[0m"));
             assertTrue(rendered.contains("\u001B[36m> 击杀数：\u001B[0m\u001B[38;5;215m1人\u001B[0m"));
             assertTrue(rendered.contains("\u001B[36m> 死亡次数：\u001B[0m\u001B[38;5;215m2次\u001B[0m"));
@@ -451,6 +532,8 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(compactRendered.contains(
                     "聊天=\u001B[33m1970-01-01 00:00:02\u001B[0m"));
             assertTrue(compactRendered.contains(
+                    "Stat=\u001B[33m1970-01-01 00:00:04\u001B[0m\n  UUID=\u001B[33m1970-01-01 00:00:04\u001B[0m"));
+            assertTrue(compactRendered.contains(
                     "\u001B[36m最近提交:\u001B[0m \u001B[33m1970-01-01 00:00:01\u001B[0m"));
             assertTrue(compactRendered.contains(
                     "bot=\u001B[38;5;215m0\u001B[0m, monitor=\u001B[38;5;215m0\u001B[0m"));
@@ -485,6 +568,9 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(fullRendered.contains(
                     "\u001B[36m最近Chat写入:\u001B[0m \u001B[33m1970-01-01 00:00:02\u001B[0m"));
             assertTrue(fullRendered.contains(
+                    "\u001B[36m最近Stat写入:\u001B[0m \u001B[33m1970-01-01 00:00:04\u001B[0m\n"
+                            + "  \u001B[36m最近UUID写入:\u001B[0m \u001B[33m1970-01-01 00:00:04\u001B[0m"));
+            assertTrue(fullRendered.contains(
                     "\u001B[36mLast Disconnect:\u001B[0m \u001B[33m1970-01-01 00:00:06\u001B[0m"));
             assertFalse(fullRendered.contains("\u001B[33mLast Disconnect"));
             assertTrue(fullRendered.contains(
@@ -498,6 +584,15 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(full.contains("失败事件: pending="));
             assertTrue(full.contains("最近Chat写入:"));
             assertFalse(full.contains("最近写入："));
+
+            repository.lastUuidWrittenAt = 0L;
+            appender.list.clear();
+            command.onCommand(null, "playermonitor", new String[]{"status"});
+            String missingUuid = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertTrue(missingUuid.contains("UUID=无"));
+            assertFalse(missingUuid.contains("UUID=\u001B[33m无"));
         } finally {
             listener.close();
             service.close();
@@ -517,6 +612,8 @@ class PlayerMonitorManagementCommandTest {
         int chatCountCalls;
         int fullFindCalls;
         int overviewCalls;
+        PlayerIdentity identity = defaultIdentity();
+        long lastUuidWrittenAt = 4_500L;
 
         @Override
         public void initialize() {
@@ -581,7 +678,12 @@ class PlayerMonitorManagementCommandTest {
             snapshot.addedGameCount = 3;
             return Optional.of(new PlayerOverview("Steve", 100L, 4L,
                     List.of(new ChatEntry(400L, "recent=123")),
-                    200L, 300L, 100L, 3_600_000L, snapshot));
+                    200L, 300L, 100L, 3_600_000L, snapshot, identity));
+        }
+
+        @Override
+        public Optional<PlayerIdentity> playerIdentity(String playerName) {
+            return Optional.ofNullable(identity);
         }
 
         @Override
@@ -592,8 +694,14 @@ class PlayerMonitorManagementCommandTest {
         @Override
         public DatabaseHealth databaseHealth() {
             return new DatabaseHealth("RUNNING", true, false, false, 2, 100, 3, 1, -2,
-                    1_000L, 2_000L, 3_000L, 4_000L, 5_000L, "test failure",
+                    1_000L, 2_000L, 3_000L, 4_000L, lastUuidWrittenAt, 5_000L, "test failure",
                     6L, 7L, 8L, 9L, 10L, 11L, 12L, 0L, 13L, 14L, 15L, 16L);
+        }
+
+        private static PlayerIdentity defaultIdentity() {
+            return new PlayerIdentity("Steve", "98465ebe-e619-3b1d-8b25-98352b6abbb9",
+                    "11111111-1111-3111-8111-111111111111", null, null,
+                    IdentityType.UNKNOWN, null, null, 5_000L, 5_000L);
         }
 
         @Override

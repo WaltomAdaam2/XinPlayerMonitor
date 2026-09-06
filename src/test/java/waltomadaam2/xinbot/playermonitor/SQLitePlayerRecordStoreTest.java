@@ -59,7 +59,7 @@ class SQLitePlayerRecordStoreTest {
             assertEquals("1", pragma(statement, "PRAGMA foreign_keys"));
             try (ResultSet resultSet = statement.executeQuery("SELECT MAX(version) FROM schema_migrations")) {
                 assertTrue(resultSet.next());
-                assertEquals(3, resultSet.getInt(1));
+                assertEquals(4, resultSet.getInt(1));
             }
         }
     }
@@ -78,7 +78,7 @@ class SQLitePlayerRecordStoreTest {
         try {
             assertEquals(1, reopened.chatCount("Steve"));
             try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
-                assertEquals(3, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
+                assertEquals(4, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
                 assertEquals(1, countRows(connection, "chat_messages"));
                 assertEquals(0, countRows(connection, "replayed_failed_events"));
             }
@@ -144,7 +144,7 @@ class SQLitePlayerRecordStoreTest {
         assertEquals(1, record.statSnapshots.size());
         assertEquals(9, record.statSnapshots.get(0).deathCount);
         try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
-            assertEquals(3, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
+            assertEquals(4, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
             assertEquals(1, countRows(connection, "stat_snapshots"));
             SQLiteSchema.verify(connection);
         }
@@ -1056,6 +1056,97 @@ class SQLitePlayerRecordStoreTest {
             store.close();
         }
     }
+
+    @Test
+    void identityChecksAdvanceCheckTimeOnlyUntilValuesChangeAndSurviveRestart() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-identity-persistence");
+        PlayerMonitorService service = service(directory);
+        service.initialize();
+        String serverUuid = "98465ebe-e619-3b1d-8b25-98352b6abbb9";
+        String offlineUuid = "11111111-1111-3111-8111-111111111111";
+        IdentityResolution initial = new IdentityResolution(serverUuid, offlineUuid,
+                IdentityResolution.Lookup.found(serverUuid), IdentityResolution.Lookup.notFound(),
+                IdentityType.PREMIUM, true);
+
+        PlayerIdentity first = service.recordIdentityCheck("Steve", initial, 1_000L);
+        assertEquals(1_000L, first.uuidLastCheckedAt());
+        assertEquals(1_000L, first.uuidLastWrittenAt());
+
+        PlayerIdentity unchanged = service.recordIdentityCheck("Steve", initial, 2_000L);
+        assertEquals(2_000L, unchanged.uuidLastCheckedAt());
+        assertEquals(1_000L, unchanged.uuidLastWrittenAt());
+
+        String changedUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        IdentityResolution changed = new IdentityResolution(changedUuid, offlineUuid,
+                IdentityResolution.Lookup.notFound(), IdentityResolution.Lookup.found(changedUuid),
+                IdentityType.THIRD_PARTY, true);
+        PlayerIdentity updated = service.recordIdentityCheck("Steve", changed, 3_000L);
+        assertEquals(changedUuid, updated.serverUuid());
+        assertEquals(IdentityType.THIRD_PARTY, updated.identityType());
+        assertEquals(3_000L, updated.uuidLastCheckedAt());
+        assertEquals(3_000L, updated.uuidLastWrittenAt());
+        service.close();
+
+        PlayerMonitorService reopened = service(directory);
+        reopened.initialize();
+        PlayerIdentity persisted = reopened.playerIdentity("Steve").orElseThrow();
+        assertEquals(changedUuid, persisted.serverUuid());
+        assertEquals(3_000L, persisted.uuidLastCheckedAt());
+        assertEquals(3_000L, persisted.uuidLastWrittenAt());
+    }
+
+    @Test
+    void failedRemoteLookupDoesNotErasePreviouslyValidExternalUuid() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-identity-errors");
+        PlayerMonitorService service = service(directory);
+        service.initialize();
+        String serverUuid = "98465ebe-e619-3b1d-8b25-98352b6abbb9";
+        IdentityResolution initial = new IdentityResolution(serverUuid, "offline",
+                IdentityResolution.Lookup.found(serverUuid), IdentityResolution.Lookup.notFound(),
+                IdentityType.PREMIUM, true);
+        service.recordIdentityCheck("Steve", initial, 1_000L);
+
+        IdentityResolution failed = new IdentityResolution(serverUuid, "offline",
+                IdentityResolution.Lookup.error(), IdentityResolution.Lookup.error(),
+                IdentityType.PREMIUM, false);
+        PlayerIdentity preserved = service.recordIdentityCheck("Steve", failed, 2_000L);
+
+        assertEquals(serverUuid, preserved.mojangUuid());
+        assertEquals(1_000L, preserved.mojangCheckedAt());
+        assertEquals(1_000L, preserved.uuidLastCheckedAt());
+        assertEquals(1_000L, preserved.uuidLastWrittenAt());
+    }
+
+    @Test
+    void migratesV3PlayersToV4WithoutLosingHistory() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-v3-to-v4");
+        PlayerMonitorService initial = service(directory);
+        initial.initialize();
+        initial.recordChat("Historical", "keep", 100L);
+        initial.flush();
+        initial.close();
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db")); Statement statement = connection.createStatement()) {
+            for (String column : List.of("server_uuid", "offline_uuid", "mojang_uuid", "third_party_uuid",
+                    "identity_type", "mojang_checked_at", "third_party_checked_at",
+                    "uuid_last_checked_at", "uuid_last_written_at")) {
+                statement.executeUpdate("ALTER TABLE players DROP COLUMN " + column);
+            }
+            statement.executeUpdate("DELETE FROM schema_migrations WHERE version = 4");
+        }
+
+        PlayerMonitorService upgraded = service(directory);
+        upgraded.initialize();
+        assertEquals(1, upgraded.chatCount("Historical"));
+        PlayerIdentity identity = upgraded.playerIdentity("Historical").orElseThrow();
+        assertEquals(null, identity.uuidLastCheckedAt());
+        assertEquals(null, identity.uuidLastWrittenAt());
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals("4", scalar(connection, "SELECT MAX(version) FROM schema_migrations"));
+            assertEquals("keep", scalar(connection, "SELECT message FROM chat_messages"));
+        }
+    }
+
     private void writeLegacyPlayer(Path directory, String name, boolean openSession) throws Exception {
         Path playerDirectory = directory.resolve("players").resolve(name);
         Files.createDirectories(playerDirectory);

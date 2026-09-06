@@ -9,7 +9,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 final class SQLiteSchema {
-    static final int VERSION = 3;
+    static final int VERSION = 4;
 
     private SQLiteSchema() {
     }
@@ -75,6 +75,12 @@ final class SQLiteSchema {
             if (currentVersion < 3) {
                 statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(3, 'Track replayed failed events', "
                         + System.currentTimeMillis() + ")");
+                currentVersion = 3;
+            }
+            if (currentVersion < 4) {
+                migrateToV4(connection, statement);
+                statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(4, 'Track player UUID identity checks and writes', "
+                        + System.currentTimeMillis() + ")");
             }
             connection.commit();
         } catch (SQLException | IOException error) {
@@ -102,6 +108,25 @@ final class SQLiteSchema {
                 )
                 """);
         statement.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS idx_stats_one_per_player ON stat_snapshots(player_id)");
+    }
+
+    private static void migrateToV4(Connection connection, Statement statement) throws SQLException {
+        addColumnIfMissing(connection, statement, "server_uuid", "TEXT");
+        addColumnIfMissing(connection, statement, "offline_uuid", "TEXT");
+        addColumnIfMissing(connection, statement, "mojang_uuid", "TEXT");
+        addColumnIfMissing(connection, statement, "third_party_uuid", "TEXT");
+        addColumnIfMissing(connection, statement, "identity_type", "TEXT");
+        addColumnIfMissing(connection, statement, "mojang_checked_at", "INTEGER");
+        addColumnIfMissing(connection, statement, "third_party_checked_at", "INTEGER");
+        addColumnIfMissing(connection, statement, "uuid_last_checked_at", "INTEGER");
+        addColumnIfMissing(connection, statement, "uuid_last_written_at", "INTEGER");
+    }
+
+    private static void addColumnIfMissing(Connection connection, Statement statement,
+                                           String column, String type) throws SQLException {
+        if (!columnExists(connection, "players", column)) {
+            statement.executeUpdate("ALTER TABLE players ADD COLUMN " + column + " " + type);
+        }
     }
 
     static Integer schemaVersion(Connection connection) throws SQLException {
@@ -277,6 +302,18 @@ final class SQLiteSchema {
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next();
             }
+        }
+    }
+
+    private static boolean columnExists(Connection connection, String table, String column) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (resultSet.next()) {
+                if (column.equalsIgnoreCase(resultSet.getString("name"))) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
