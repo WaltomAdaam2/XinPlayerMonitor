@@ -24,9 +24,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PlayerMonitorListenerUuidTest {
@@ -49,7 +49,8 @@ class PlayerMonitorListenerUuidTest {
 
         context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
 
-        assertFalse(context.resolver.called.await(200, TimeUnit.MILLISECONDS));
+        awaitUuidTasks(context);
+        assertEquals(0, context.resolver.calls.get());
         assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
     }
 
@@ -61,7 +62,8 @@ class PlayerMonitorListenerUuidTest {
         context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
 
         assertTrue(context.resolver.called.await(2, TimeUnit.SECONDS));
-        waitUntil(() -> context.listener.scheduledUuidCheckCountForTesting() == 1);
+        awaitUuidTasks(context);
+        assertEquals(1, context.listener.scheduledUuidCheckCountForTesting());
         StoredPlayerIdentity identity = context.service.playerIdentity("Eligible").orElseThrow();
         assertEquals(1_000L, identity.uuidLastCheckedAt());
         assertEquals(1_000L, identity.uuidLastWrittenAt());
@@ -91,12 +93,13 @@ class PlayerMonitorListenerUuidTest {
         context.service.recordIdentityCheck("Changed", context.resolver.resolve("Changed", first.getId(), null), 1_000L);
 
         context.listener.onPlayerJoin(new PlayerJoinEvent(first));
-        waitUntil(() -> context.listener.scheduledUuidCheckCountForTesting() == 1);
+        awaitUuidTasks(context);
         context.resolver.resetLatch();
         GameProfile changed = profile("Changed", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
         context.listener.onPlayerJoin(new PlayerJoinEvent(changed));
 
         assertTrue(context.resolver.called.await(2, TimeUnit.SECONDS));
+        awaitUuidTasks(context);
         StoredPlayerIdentity identity = context.service.playerIdentity("Changed").orElseThrow();
         assertEquals(changed.getId().toString(), identity.serverUuid());
         assertEquals(2_000L, identity.uuidLastWrittenAt());
@@ -111,8 +114,9 @@ class PlayerMonitorListenerUuidTest {
         context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
         context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
 
-        waitUntil(() -> context.listener.scheduledUuidCheckCountForTesting() == 1);
+        awaitUuidTasks(context);
         assertEquals(1, context.listener.scheduledUuidCheckCountForTesting());
+        assertEquals(1, context.resolver.calls.get(), "the seeded identity must not be queried again");
     }
 
     @Test
@@ -150,6 +154,7 @@ class PlayerMonitorListenerUuidTest {
         context.listener.onPlayerLeave(new PlayerLeaveEvent(profile));
         context.resolver.resume();
         assertTrue(context.resolver.finished.await(2, TimeUnit.SECONDS));
+        awaitUuidTasks(context);
 
         StoredPlayerIdentity identity = context.service.playerIdentity("InFlight").orElseThrow();
         assertEquals(null, identity.serverUuid());
@@ -168,16 +173,69 @@ class PlayerMonitorListenerUuidTest {
         context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
 
         assertTrue(context.resolver.called.await(2, TimeUnit.SECONDS));
+        awaitUuidTasks(context);
         assertEquals(1, context.resolver.calls.get());
     }
 
     @Test
     void zeroCooldownCreatesNoRepeatingUuidTask() throws Exception {
         TestContext context = context(true, 0, 1_000L);
-        context.listener.onPlayerJoin(new PlayerJoinEvent(
-                profile("Zero", "98465ebe-e619-3b1d-8b25-98352b6abbb9")));
+        GameProfile profile = profile("Zero", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        context.service.recordIdentityCheck("Zero", context.resolver.resolve("Zero", profile.getId(), null), 1_000L);
+        context.resolver.calls.set(0);
 
-        assertFalse(context.resolver.called.await(200, TimeUnit.MILLISECONDS));
+        context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        awaitUuidTasks(context);
+
+        assertEquals(0, context.resolver.calls.get());
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+    }
+
+    @Test
+    void zeroCooldownStillRefreshesChangedServerUuidExactlyOnce() throws Exception {
+        TestContext context = context(true, 0, 2_000L);
+        GameProfile first = profile("ZeroChanged", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        context.service.recordIdentityCheck("ZeroChanged",
+                context.resolver.resolve("ZeroChanged", first.getId(), null), 1_000L);
+        context.resolver.calls.set(0);
+        context.listener.onPlayerJoin(new PlayerJoinEvent(first));
+        awaitUuidTasks(context);
+        assertEquals(0, context.resolver.calls.get());
+
+        GameProfile changed = profile("ZeroChanged", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        context.listener.onPlayerJoin(new PlayerJoinEvent(changed));
+        awaitUuidTasks(context);
+
+        StoredPlayerIdentity identity = context.service.playerIdentity("ZeroChanged").orElseThrow();
+        assertEquals(changed.getId().toString(), identity.serverUuid());
+        assertEquals(2_000L, identity.uuidLastCheckedAt());
+        assertEquals(2_000L, identity.uuidLastWrittenAt());
+        assertEquals(1, context.resolver.calls.get());
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+
+        context.listener.onPlayerJoin(new PlayerJoinEvent(changed));
+        context.listener.onPlayerJoin(new PlayerJoinEvent(changed));
+        awaitUuidTasks(context);
+        assertEquals(1, context.resolver.calls.get(), "unchanged joins must not restart a zero-cooldown loop");
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+    }
+
+    @Test
+    void zeroCooldownRecordsMissingIdentityOnceWithoutPeriodicRefresh() throws Exception {
+        TestContext context = context(true, 0, 1_000L);
+        GameProfile profile = profile("ZeroMissing", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+
+        context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        awaitUuidTasks(context);
+
+        assertEquals(profile.getId().toString(),
+                context.service.playerIdentity("ZeroMissing").orElseThrow().serverUuid());
+        assertEquals(1, context.resolver.calls.get());
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+
+        context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        awaitUuidTasks(context);
+        assertEquals(1, context.resolver.calls.get());
         assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
     }
 
@@ -217,6 +275,20 @@ class PlayerMonitorListenerUuidTest {
     }
 
     @Test
+    void completedPublicResolvesDoNotRemainInTheInFlightMap() throws Exception {
+        TestContext context = context(false, 168, 1_000L);
+        GameProfile profile = profile("Completed", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        context.listener.markOnlineForTesting(profile);
+
+        CompletableFuture<PlayerIdentity> first = context.listener.resolve("Completed");
+        PlayerIdentity identity = first.get(2, TimeUnit.SECONDS);
+        CompletableFuture<PlayerIdentity> next = context.listener.resolve("Completed");
+
+        assertEquals(identity, next.get(2, TimeUnit.SECONDS));
+        assertNotSame(first, next, "completed requests must not stay cached as in-flight work");
+    }
+
+    @Test
     void externalIdentityConcurrencyIsBoundedToFour() throws Exception {
         Path directory = temporaryDirectory.resolve("bounded-concurrency");
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
@@ -251,7 +323,8 @@ class PlayerMonitorListenerUuidTest {
         GameProfile profile = profile(name, "98465ebe-e619-3b1d-8b25-98352b6abbb9");
         context.service.recordIdentityCheck(name, context.resolver.resolve(name, profile.getId(), null), 1_000L);
         context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
-        waitUntil(() -> context.listener.scheduledUuidCheckCountForTesting() == 1);
+        awaitUuidTasks(context);
+        assertEquals(1, context.listener.scheduledUuidCheckCountForTesting());
         return context;
     }
 
@@ -282,16 +355,8 @@ class PlayerMonitorListenerUuidTest {
         return new GameProfile(UUID.fromString(uuid), name);
     }
 
-    private static void waitUntil(Check condition) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (!condition.get() && System.nanoTime() < deadline) {
-            Thread.sleep(10L);
-        }
-        assertTrue(condition.get());
-    }
-
-    private interface Check {
-        boolean get() throws Exception;
+    private static void awaitUuidTasks(TestContext context) throws Exception {
+        context.listener.awaitUuidTasksForTesting().get(2, TimeUnit.SECONDS);
     }
 
     private record TestContext(PlayerMonitorService service, PlayerMonitorListener listener,

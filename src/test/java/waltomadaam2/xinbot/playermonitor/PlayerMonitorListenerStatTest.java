@@ -16,8 +16,14 @@ import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -329,6 +335,118 @@ class PlayerMonitorListenerStatTest {
 
         assertEquals(0, listener.statAttemptsForTesting("LimitTest"));
         assertFalse(listener.hasActiveStatCycleForTesting("LimitTest"));
+    }
+
+    @Test
+    void retryDequeuedBeforeSuccessfulResponseCannotSendWhilePersistenceIsPending() throws Exception {
+        AtomicInteger sends = new AtomicInteger();
+        replaceListenerWithSender(ignored -> sends.incrementAndGet());
+        settings.setStatSendIntervalMillis(1);
+        settings.setStatTimeoutMillis(10_000);
+        listener.setGameActiveForTesting(true);
+        GameProfile profile = profile("CapturedRace");
+        listener.markOnlineForTesting(profile);
+        CountDownLatch firstDispatchFinished = new CountDownLatch(1);
+        listener.setAfterStatDispatchForTesting(firstDispatchFinished::countDown);
+        listener.queueStatScanForTesting(List.of(profile), false);
+        assertTrue(firstDispatchFinished.await(2, TimeUnit.SECONDS));
+        listener.onSendCommand(new SendCommandEvent("stat CapturedRace"));
+        assertEquals(1, sends.get());
+        assertEquals(1, listener.statAttemptsForTesting("CapturedRace"));
+
+        CountDownLatch retryDequeued = new CountDownLatch(1);
+        CountDownLatch releaseRetry = new CountDownLatch(1);
+        CountDownLatch retryFinished = new CountDownLatch(1);
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch releaseWrite = new CountDownLatch(1);
+        listener.setBeforeStatSendForTesting(() -> {
+            retryDequeued.countDown();
+            awaitLatch(releaseRetry);
+        });
+        listener.setAfterStatDispatchForTesting(retryFinished::countDown);
+        service.setStatWriteFailureForTesting(key -> {
+            writeStarted.countDown();
+            awaitLatch(releaseWrite);
+            return false;
+        });
+        try {
+            listener.evaluateStatAttemptForTesting("CapturedRace", 1);
+            assertTrue(retryDequeued.await(2, TimeUnit.SECONDS));
+
+            listener.onSystemChat(new SystemChatMessageEvent(Component.text(String.join("\n",
+                    "玩家名称: CapturedRace", "加入游戏: 1 次", "死亡计数: 2 次", "击杀计数: 3 人",
+                    "游戏时长: 4秒", "优先队列: 已过期", "特殊权限: ✅", "----------------------")), false));
+            assertTrue(writeStarted.await(2, TimeUnit.SECONDS));
+            releaseRetry.countDown();
+            assertTrue(retryFinished.await(2, TimeUnit.SECONDS));
+
+            assertEquals(1, sends.get(), "a captured response must invalidate a dequeued retry before persistence");
+            assertEquals(0, listener.statAttemptsForTesting("CapturedRace"));
+            assertFalse(listener.isPendingStatDispatchForTesting("CapturedRace"));
+        } finally {
+            releaseRetry.countDown();
+            releaseWrite.countDown();
+        }
+    }
+
+    @Test
+    void manualMergeDoesNotResendPlayerAlreadyAwaitingResponse() throws Exception {
+        List<String> sends = new CopyOnWriteArrayList<>();
+        CountDownLatch sentinelSent = new CountDownLatch(1);
+        replaceListenerWithSender(command -> {
+            sends.add(command);
+            if (command.equals("stat Sentinel")) {
+                sentinelSent.countDown();
+            }
+        });
+        settings.setStatSendIntervalMillis(1);
+        settings.setStatTimeoutMillis(10_000);
+        listener.setGameActiveForTesting(true);
+        GameProfile initial = profile("Awaiting");
+        Bot.INSTANCE.players.put(initial.getId(), initial);
+        CountDownLatch firstDispatchFinished = new CountDownLatch(1);
+        CountDownLatch releaseQueue = new CountDownLatch(1);
+        listener.setAfterStatDispatchForTesting(() -> {
+            firstDispatchFinished.countDown();
+            awaitLatch(releaseQueue);
+        });
+        try {
+            listener.scanAllOnlinePlayers();
+            assertTrue(firstDispatchFinished.await(2, TimeUnit.SECONDS));
+            listener.onSendCommand(new SendCommandEvent("stat Awaiting"));
+            assertTrue(listener.statScanStatus().waitingResponse());
+
+            listener.scanAllOnlinePlayers();
+            listener.scanAllOnlinePlayers();
+            GameProfile sentinel = profile("Sentinel");
+            listener.markOnlineForTesting(sentinel);
+            listener.queueStatScanForTesting(List.of(sentinel), false);
+            releaseQueue.countDown();
+            assertTrue(sentinelSent.await(2, TimeUnit.SECONDS));
+
+            assertEquals(List.of("stat Awaiting", "stat Sentinel"), sends);
+            assertEquals(1, listener.statAttemptsForTesting("Awaiting"));
+        } finally {
+            releaseQueue.countDown();
+        }
+    }
+
+    private void replaceListenerWithSender(Consumer<String> sender) throws java.io.IOException {
+        listener.close();
+        listener = new PlayerMonitorListener(service,
+                new PluginLog(temporaryDirectory.resolve("playermonitor/log")), NOPLogger.NOP_LOGGER,
+                settings, (name, serverUuid, previous) -> {
+                    throw new AssertionError("Stat tests must not query identity services");
+                }, System::currentTimeMillis, sender);
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(2, TimeUnit.SECONDS));
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(error);
+        }
     }
 
     private static GameProfile profile(String name) {

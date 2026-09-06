@@ -3,6 +3,7 @@ package waltomadaam2.xinbot.playermonitor;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import org.geysermc.mcprotocollib.auth.GameProfile;
 import org.jline.utils.AttributedStyle;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -17,6 +18,10 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -51,7 +56,7 @@ class PlayerMonitorManagementCommandTest {
 
     @Test
     void highlightsPlayerNameAndAllPlayerActions() {
-        for (String action : new String[]{"stat", "latestlogin", "recentlogin", "chat"}) {
+        for (String action : new String[]{"playerinfo", "stat", "latestlogin", "recentlogin", "chat"}) {
             String[] args = {"WaltomAdaam_", action};
             assertStyle(0x2E6F40, PlayerMonitorManagementCommand.styleForArgument(args, 0));
             assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(args, 1));
@@ -356,6 +361,80 @@ class PlayerMonitorManagementCommandTest {
         } finally {
             listener.close();
             service.close();
+        }
+    }
+
+    @Test
+    void barePlayerDataRendersMissingIdentityWhileBackgroundRefreshIsBlocked() throws Exception {
+        assertPlayerDataRefreshesWithoutWaiting(false, new String[]{"Steve"});
+    }
+
+    @Test
+    void explicitPlayerinfoRendersStaleIdentityWhileBackgroundRefreshIsBlocked() throws Exception {
+        assertPlayerDataRefreshesWithoutWaiting(true, new String[]{"Steve", "playerinfo"});
+    }
+
+    private void assertPlayerDataRefreshesWithoutWaiting(boolean storedIdentity, String[] args) throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-player-data-refresh");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setUuidRecordEnable(true);
+        settings.setDisplayTimezone("UTC");
+        PlayerMonitorService service = new PlayerMonitorService(directory, settings);
+        service.initialize();
+        service.recordLogin("Steve", 1_000L);
+        UUID serverUuid = UUID.fromString("98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        IdentityResolution resolution = new IdentityResolution(serverUuid.toString(), null,
+                IdentityResolution.Lookup.notFound(), IdentityResolution.Lookup.notFound(),
+                PlayerIdentityType.UNKNOWN, true);
+        if (storedIdentity) {
+            service.recordIdentityCheck("Steve", resolution, 1_000L);
+        }
+        CountDownLatch lookupStarted = new CountDownLatch(1);
+        CountDownLatch releaseLookup = new CountDownLatch(1);
+        PlayerMonitorListener listener = new PlayerMonitorListener(
+                service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings,
+                (playerName, observedUuid, previous) -> {
+                    lookupStarted.countDown();
+                    try {
+                        if (!releaseLookup.await(5, TimeUnit.SECONDS)) {
+                            throw new IOException("test did not release identity lookup");
+                        }
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException(error);
+                    }
+                    return resolution;
+                }, () -> TimeUnit.DAYS.toMillis(2));
+        listener.setGameActiveForTesting(true);
+        listener.markOnlineForTesting(new GameProfile(serverUuid, "Steve"));
+        LoggerContext context = new LoggerContext();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger("player-data-refresh-output");
+        logger.addAppender(appender);
+        try {
+            PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
+                    service, settings, listener, logger);
+            CompletableFuture<Void> commandCompleted = CompletableFuture.runAsync(
+                    () -> command.onCommand(null, "playermonitor", args));
+            assertTrue(lookupStarted.await(2, TimeUnit.SECONDS), "missing/stale identity must trigger refresh");
+            commandCompleted.get(2, TimeUnit.SECONDS);
+            assertEquals(1L, releaseLookup.getCount(), "command must return before HTTP lookup finishes");
+            List<String> output = appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+            assertTrue(output.contains(SectionFormatter.header("Player Data")));
+            assertTrue(output.contains(SectionFormatter.divider("Player Data")));
+            String cachedValue = storedIdentity
+                    ? serverUuid + " (\u001B[33m1970-01-01 00:00:01\u001B[0m)" : "无";
+            assertTrue(output.contains("\u001B[36muuid：\u001B[0m" + cachedValue));
+            assertEquals(List.of("playerinfo"), command.onTabComplete(null, "playermonitor",
+                    new String[]{"Steve", "playerinfo"}));
+        } finally {
+            releaseLookup.countDown();
+            listener.close();
+            service.close();
+            context.stop();
         }
     }
 

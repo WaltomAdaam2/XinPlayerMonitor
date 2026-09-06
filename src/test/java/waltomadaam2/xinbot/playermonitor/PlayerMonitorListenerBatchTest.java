@@ -21,11 +21,14 @@ import waltomadaam2.xinbot.playermonitor.model.StatSnapshot;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -83,7 +86,12 @@ class PlayerMonitorListenerBatchTest {
 
     @Test
     void staleLoginRosterDoesNotLeakAndServerSwitchInvalidatesDelayedEntryScan() throws Exception {
-        TestContext context = context(System::currentTimeMillis, command -> contextCommands.add(command),
+        AtomicLong now = new AtomicLong(10_000L);
+        CountDownLatch sent = new CountDownLatch(1);
+        TestContext context = context(now::get, command -> {
+            contextCommands.add(command);
+            sent.countDown();
+        },
                 NOPLogger.NOP_LOGGER);
         context.settings.setStatEnabled(true);
         context.settings.setScanOnEntry(true);
@@ -91,21 +99,127 @@ class PlayerMonitorListenerBatchTest {
         GameProfile game = profile("GamePlayer");
         Bot.INSTANCE.players.put(stale.getId(), stale);
         context.listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
-        Thread.sleep(150L);
+        long generation = context.listener.gameGenerationForTesting();
+        context.listener.pollEntryRosterForTesting(generation);
+        now.addAndGet(100L);
         Bot.INSTANCE.players.clear();
         Bot.INSTANCE.players.put(game.getId(), game);
+        context.listener.onPlayerJoin(new PlayerJoinEvent(game));
+        context.listener.pollEntryRosterForTesting(generation);
+        now.addAndGet(499L);
+        context.listener.pollEntryRosterForTesting(generation);
+        assertEquals(0, context.listener.activeStatBatchTotalForTesting());
+        assertTrue(contextCommands.isEmpty());
 
-        waitUntil(() -> contextCommands.contains("stat GamePlayer"));
-        assertFalse(contextCommands.contains("stat LoginStale"));
+        now.incrementAndGet();
+        context.listener.pollEntryRosterForTesting(generation);
+        assertTrue(sent.await(2, TimeUnit.SECONDS));
+        assertEquals(List.of("stat GamePlayer"), contextCommands);
 
         context.listener.onServerChange(new ServerChangeEvent(Server.Login, Server.Game));
         int before = contextCommands.size();
-        Thread.sleep(700L);
+        context.listener.onPlayerJoin(new PlayerJoinEvent(stale));
+        now.addAndGet(700L);
+        context.listener.pollEntryRosterForTesting(generation);
         assertEquals(before, contextCommands.size());
         assertEquals(0, context.listener.activeStatBatchTotalForTesting());
     }
 
     private final List<String> contextCommands = new CopyOnWriteArrayList<>();
+
+    @Test
+    void joinsDuringEntryWaitResetStabilityAndJoinTheAcceptedSnapshot() throws Exception {
+        AtomicLong now = new AtomicLong(10_000L);
+        CountDownLatch sent = new CountDownLatch(2);
+        List<String> commands = new CopyOnWriteArrayList<>();
+        TestContext context = context(now::get, command -> {
+            commands.add(command);
+            sent.countDown();
+        }, NOPLogger.NOP_LOGGER);
+        context.settings.setScanOnEntry(true);
+        context.settings.setStatSendIntervalMillis(1);
+        context.listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        long generation = context.listener.gameGenerationForTesting();
+
+        GameProfile first = profile("InitialRoster");
+        Bot.INSTANCE.players.put(first.getId(), first);
+        context.listener.onPlayerJoin(new PlayerJoinEvent(first));
+        context.listener.pollEntryRosterForTesting(generation);
+        assertEquals(0, context.listener.activeStatBatchTotalForTesting());
+
+        now.addAndGet(499L);
+        GameProfile joining = profile("StabilizingJoin");
+        Bot.INSTANCE.players.put(joining.getId(), joining);
+        context.listener.onPlayerJoin(new PlayerJoinEvent(joining));
+        context.listener.pollEntryRosterForTesting(generation);
+        now.addAndGet(499L);
+        context.listener.pollEntryRosterForTesting(generation);
+        assertEquals(0, context.listener.activeStatBatchTotalForTesting());
+        assertTrue(commands.isEmpty());
+
+        now.incrementAndGet();
+        context.listener.pollEntryRosterForTesting(generation);
+        assertTrue(sent.await(2, TimeUnit.SECONDS));
+        assertEquals(Set.of("stat InitialRoster", "stat StabilizingJoin"), Set.copyOf(commands));
+        assertEquals(2, context.listener.activeStatBatchTotalForTesting());
+    }
+
+    @Test
+    void delayedJoinFromPreviousGenerationCannotEnqueueInTheNextGame() throws Exception {
+        AtomicInteger sends = new AtomicInteger();
+        CountDownLatch lookupStarted = new CountDownLatch(1);
+        CountDownLatch releaseLookup = new CountDownLatch(1);
+        TestContext context = context(System::currentTimeMillis, ignored -> sends.incrementAndGet(),
+                NOPLogger.NOP_LOGGER, playerName -> {
+                    lookupStarted.countDown();
+                    try {
+                        assertTrue(releaseLookup.await(2, TimeUnit.SECONDS));
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(error);
+                    }
+                });
+        context.listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        CompletableFuture<Void> join = CompletableFuture.runAsync(() ->
+                context.listener.onPlayerJoin(new PlayerJoinEvent(profile("StaleJoin"))));
+        try {
+            assertTrue(lookupStarted.await(2, TimeUnit.SECONDS));
+            context.listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+            context.listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        } finally {
+            releaseLookup.countDown();
+        }
+        join.get(2, TimeUnit.SECONDS);
+
+        assertEquals(0, context.listener.activeStatBatchTotalForTesting());
+        assertEquals(0, context.listener.statScanStatus().onlinePlayers());
+        assertEquals(0, sends.get());
+    }
+
+    @Test
+    void staleEntryPollCannotCancelTheNextGenerationsStabilization() throws Exception {
+        AtomicLong now = new AtomicLong(10_000L);
+        CountDownLatch sent = new CountDownLatch(1);
+        TestContext context = context(now::get, ignored -> sent.countDown(), NOPLogger.NOP_LOGGER);
+        context.settings.setScanOnEntry(true);
+        context.listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        long oldGeneration = context.listener.gameGenerationForTesting();
+        context.listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+        context.listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        long generation = context.listener.gameGenerationForTesting();
+        GameProfile player = profile("NewGeneration");
+        Bot.INSTANCE.players.put(player.getId(), player);
+
+        context.listener.pollEntryRosterForTesting(oldGeneration);
+        context.listener.onPlayerJoin(new PlayerJoinEvent(player));
+        assertEquals(0, context.listener.activeStatBatchTotalForTesting());
+        context.listener.pollEntryRosterForTesting(generation);
+        now.addAndGet(500L);
+        context.listener.pollEntryRosterForTesting(generation);
+
+        assertTrue(sent.await(2, TimeUnit.SECONDS));
+        assertEquals(1, context.listener.activeStatBatchTotalForTesting());
+    }
 
     @Test
     void batchAddsOnlyNeverRecordedLaterJoinersAndManualMergeDeduplicates() throws Exception {
@@ -263,6 +377,11 @@ class PlayerMonitorListenerBatchTest {
 
     private TestContext context(java.util.function.LongSupplier clock, Consumer<String> sender, Logger logger)
             throws Exception {
+        return context(clock, sender, logger, null);
+    }
+
+    private TestContext context(java.util.function.LongSupplier clock, Consumer<String> sender, Logger logger,
+                                Consumer<String> beforeLatestStat) throws Exception {
         Path directory = temporaryDirectory.resolve("context-" + services.size());
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
         settings.initialize();
@@ -270,7 +389,22 @@ class PlayerMonitorListenerBatchTest {
         settings.setScanOnJoin(true);
         settings.setStatEnabled(true);
         settings.setUuidRecordEnable(false);
-        PlayerMonitorService service = new PlayerMonitorService(directory, settings);
+        PlayerRepository repository = new SQLitePlayerRecordStore(directory, settings.database());
+        PlayerRepository source = repository;
+        if (beforeLatestStat != null) {
+            repository = (PlayerRepository) Proxy.newProxyInstance(PlayerRepository.class.getClassLoader(),
+                    new Class<?>[]{PlayerRepository.class}, (proxy, method, arguments) -> {
+                        if (method.getName().equals("latestStat")) {
+                            beforeLatestStat.accept((String) arguments[0]);
+                        }
+                        try {
+                            return method.invoke(source, arguments);
+                        } catch (InvocationTargetException error) {
+                            throw error.getCause();
+                        }
+                    });
+        }
+        PlayerMonitorService service = new PlayerMonitorService(repository);
         service.initialize();
         services.add(service);
         PlayerIdentityResolver resolver = (name, serverUuid, previous) -> new IdentityResolution(

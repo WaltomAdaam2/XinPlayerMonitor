@@ -55,7 +55,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String TIMEZONE_PLACEHOLDER = "<timezone>";
     private static final String URL_PLACEHOLDER = "<url>";
 
-    private static final List<String> PLAYER_ACTIONS = List.of("stat", "uuid", "latestlogin", "recentlogin", "chat");
+    private static final List<String> PLAYER_ACTIONS = List.of("playerinfo", "stat", "uuid", "latestlogin", "recentlogin", "chat");
     private static final List<String> BOOLEAN_VALUES = List.of("true", "false");
     private static final List<String> SETTING_ITEMS = List.of(
             "scan-on-entry",
@@ -442,7 +442,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             print("请输入准确的玩家名。");
             return;
         }
-        if (args.length == 1) {
+        if (args.length == 1 || (args.length == 2 && "playerinfo".equalsIgnoreCase(args[1]))) {
             playerData(playerName);
             return;
         }
@@ -520,6 +520,9 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             playerDataCountField("- 近30天游玩时长：", hoursFromMillis(overview.playtimeLast30DaysMillis()));
             playerDataCountField("- 加入游戏次数：", value(snapshot == null ? null : snapshot.addedGameCount) + "次");
             print(SectionFormatter.divider("Player Data"));
+            if (listener != null) {
+                listener.refreshUuidIfEligible(playerName);
+            }
         } catch (IOException error) {
             print("无法读取玩家记录: " + error.getMessage());
         }
@@ -1132,7 +1135,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void playerHelp() {
         print(colorUsage("Usage: playermonitor " + PLAYER_PLACEHOLDER
-                + " [stat|uuid|latestlogin|recentlogin [count]|chat [count]]"));
+                + " [playerinfo|stat|uuid|latestlogin|recentlogin [count]|chat [count]]"));
     }
 
     private void print(String message) {

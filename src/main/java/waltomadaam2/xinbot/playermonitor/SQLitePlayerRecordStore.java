@@ -1701,11 +1701,11 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         identityChanged |= addChanged(assignments, values, "identity_type",
                 previous.identityType() == null ? null : previous.identityType().name(),
                 identityType == null ? null : identityType.name());
-        if (resolution.mojang().completed()) {
+        if (resolution.mojang().completed() && !resolution.mojang().cached()) {
             assignments.add("mojang_checked_at = ?");
             values.add(checkedAt);
         }
-        if (resolution.thirdParty().completed()) {
+        if (resolution.thirdParty().completed() && !resolution.thirdParty().cached()) {
             assignments.add("third_party_checked_at = ?");
             values.add(checkedAt);
         }

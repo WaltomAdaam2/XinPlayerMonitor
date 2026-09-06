@@ -16,15 +16,19 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 final class HttpPlayerIdentityResolver implements PlayerIdentityResolver {
+    private static final long CACHE_TTL_MILLIS = TimeUnit.HOURS.toMillis(24);
     private static final String MOJANG_PROFILE =
             "https://api.minecraftservices.com/minecraft/profile/lookup/name/";
 
     private final HttpClient client;
     private final Supplier<String> mojangBaseUrl;
     private final Supplier<String> thirdPartyBaseUrl;
+    private final LongSupplier clock;
 
     HttpPlayerIdentityResolver() {
         this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), () -> MOJANG_PROFILE,
@@ -38,9 +42,15 @@ final class HttpPlayerIdentityResolver implements PlayerIdentityResolver {
 
     HttpPlayerIdentityResolver(HttpClient client, Supplier<String> mojangBaseUrl,
                                Supplier<String> thirdPartyBaseUrl) {
+        this(client, mojangBaseUrl, thirdPartyBaseUrl, System::currentTimeMillis);
+    }
+
+    HttpPlayerIdentityResolver(HttpClient client, Supplier<String> mojangBaseUrl,
+                               Supplier<String> thirdPartyBaseUrl, LongSupplier clock) {
         this.client = client;
         this.mojangBaseUrl = mojangBaseUrl;
         this.thirdPartyBaseUrl = thirdPartyBaseUrl;
+        this.clock = clock;
     }
 
     @Override
@@ -58,9 +68,13 @@ final class HttpPlayerIdentityResolver implements PlayerIdentityResolver {
                     PlayerIdentityType.OFFLINE, true);
         }
 
-        IdentityResolution.Lookup mojang = lookupMojang(
-                mojangBaseUrl.get() + URLEncoder.encode(playerName, StandardCharsets.UTF_8), playerName);
-        IdentityResolution.Lookup thirdParty = lookupThirdParty(playerName);
+        long now = clock.getAsLong();
+        boolean sameServer = previous != null && server.equalsIgnoreCase(previous.serverUuid());
+        IdentityResolution.Lookup mojang = sameServer && fresh(previous.mojangCheckedAt(), now)
+                ? IdentityResolution.Lookup.cached(previous.mojangUuid())
+                : lookupMojang(mojangBaseUrl.get() + URLEncoder.encode(playerName, StandardCharsets.UTF_8), playerName);
+        IdentityResolution.Lookup thirdParty = sameServer && fresh(previous.thirdPartyCheckedAt(), now)
+                ? IdentityResolution.Lookup.cached(previous.thirdPartyUuid()) : lookupThirdParty(playerName);
         boolean mojangMatch = matches(server, mojang);
         boolean thirdPartyMatch = matches(server, thirdParty);
         PlayerIdentityType type;
@@ -88,12 +102,13 @@ final class HttpPlayerIdentityResolver implements PlayerIdentityResolver {
 
     private IdentityResolution.Lookup lookupThirdParty(String playerName) throws IOException {
         String baseUrl = MonitorSettingsStore.normalizeThirdPartyYggdrasilBaseUrl(thirdPartyBaseUrl.get());
-        String body = "[\"" + playerName.replace("\\", "\\\\").replace("\"", "\\\"") + "\"]";
+        JsonArray names = new JsonArray();
+        names.add(playerName);
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/api/profiles/minecraft"))
                 .timeout(Duration.ofSeconds(5))
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .POST(HttpRequest.BodyPublishers.ofString(names.toString(), StandardCharsets.UTF_8))
                 .build();
         return send(request, playerName, true);
     }
@@ -145,6 +160,10 @@ final class HttpPlayerIdentityResolver implements PlayerIdentityResolver {
     private static boolean matches(String serverUuid, IdentityResolution.Lookup lookup) {
         return lookup.status() == IdentityResolution.LookupStatus.FOUND
                 && serverUuid.equalsIgnoreCase(lookup.uuid());
+    }
+
+    static boolean fresh(Long checkedAt, long now) {
+        return checkedAt != null && checkedAt <= now && now - checkedAt < CACHE_TTL_MILLIS;
     }
 
     static String canonicalUuid(String value) {
