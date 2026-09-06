@@ -9,6 +9,7 @@ import xin.bbtt.mcbot.plugin.Plugin;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 public final class XinPlayerMonitor implements Plugin {
@@ -27,6 +28,14 @@ public final class XinPlayerMonitor implements Plugin {
 
     @Override
     public void onUnload() {
+    }
+
+    public CompletableFuture<PlayerIdentity> resolve(String name) {
+        PlayerMonitorListener current = listener;
+        if (current == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("XinPlayerMonitor is disabled"));
+        }
+        return current.resolve(name);
     }
 
     @Override

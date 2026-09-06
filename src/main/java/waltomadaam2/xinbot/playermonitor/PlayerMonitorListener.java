@@ -17,13 +17,18 @@ import xin.bbtt.mcbot.events.SystemChatMessageEvent;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.time.Instant;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -31,6 +36,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,6 +45,9 @@ final class PlayerMonitorListener implements Listener {
     private static final long CONNECTION_WATCHDOG_PERIOD_MILLIS = TimeUnit.SECONDS.toMillis(30);
     private static final long CONNECTION_WATCHDOG_GRACE_MILLIS = TimeUnit.MINUTES.toMillis(1);
     private static final long UUID_REFRESH_RETRY_MILLIS = TimeUnit.MINUTES.toMillis(5);
+    private static final long ENTRY_ROSTER_POLL_MILLIS = 100L;
+    private static final long ENTRY_ROSTER_STABLE_MILLIS = 500L;
+    private static final long ENTRY_ROSTER_TIMEOUT_MILLIS = 5_000L;
     private static final Pattern MINECRAFT_FORMAT_CODE = Pattern.compile("(?i)§[0-9a-fk-or]");
     private static final Pattern PUBLIC_CHAT_TEXT = Pattern.compile(
             "^(?:§[0-9a-fk-or])*\\s*<((?:(?:§[0-9a-fk-or])|[^>])+)>(.*)$",
@@ -52,7 +61,7 @@ final class PlayerMonitorListener implements Listener {
     private final LongSupplier clock;
     private final Map<String, String> onlinePlayers = new ConcurrentHashMap<>();
     private final Map<String, UUID> onlineServerUuids = new ConcurrentHashMap<>();
-    private final Set<String> pendingStatDispatches = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> pendingStatDispatches = new ConcurrentHashMap<>();
     private final Set<String> activeStatCycles = ConcurrentHashMap.newKeySet();
     private final StatResponseCollector statResponses = new StatResponseCollector();
     private final Map<String, Integer> statAttempts = new ConcurrentHashMap<>();
@@ -67,10 +76,29 @@ final class PlayerMonitorListener implements Listener {
         thread.setDaemon(true);
         return thread;
     });
+    private final ExecutorService identityExecutor = Executors.newFixedThreadPool(4, runnable -> {
+        Thread thread = new Thread(runnable, "XinPlayerMonitor-identity-lookup");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final Map<String, CompletableFuture<IdentityResolution>> inFlightIdentityLookups =
+            new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<PlayerIdentity>> inFlightPublicResolves =
+            new ConcurrentHashMap<>();
     private final Object uuidScheduleLock = new Object();
     private final Map<String, ScheduledUuidCheck> scheduledUuidChecks = new ConcurrentHashMap<>();
     private final AtomicLong uuidTaskSequence = new AtomicLong();
     private final AtomicLong uuidGeneration = new AtomicLong();
+    private final AtomicLong gameGeneration = new AtomicLong();
+    private final AtomicLong statTargetSequence = new AtomicLong();
+    private final Object statBatchLock = new Object();
+    private final Map<String, ScheduledStatCheck> scheduledStatChecks = new ConcurrentHashMap<>();
+    private final Consumer<String> statCommandSender;
+    private volatile Runnable beforeStatSend = () -> {
+    };
+    private StatBatch activeStatBatch;
+    private ScheduledFuture<?> entryRosterPoll;
+    private StableRosterWait entryRosterWait;
     private volatile boolean gameActive;
     private volatile boolean closed;
     private volatile boolean reconnectPending;
@@ -101,27 +129,29 @@ final class PlayerMonitorListener implements Listener {
     private volatile long lastRosterDriftWarningAt;
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings) {
-        this(service, log, logger, settings, new HttpPlayerIdentityResolver(), System::currentTimeMillis);
+        this(service, log, logger, settings,
+                new HttpPlayerIdentityResolver(settings::thirdPartyYggdrasilBaseUrl), System::currentTimeMillis);
     }
 
     PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings,
                           PlayerIdentityResolver identityResolver, LongSupplier clock) {
+        this(service, log, logger, settings, identityResolver, clock, Bot.INSTANCE::sendCommand);
+    }
+
+    PlayerMonitorListener(PlayerMonitorService service, PluginLog log, Logger logger, MonitorSettingsStore settings,
+                          PlayerIdentityResolver identityResolver, LongSupplier clock,
+                          Consumer<String> statCommandSender) {
         this.service = service;
         this.log = log;
         this.logger = logger;
         this.settings = settings;
         this.identityResolver = identityResolver;
         this.clock = clock;
+        this.statCommandSender = statCommandSender;
         statQueue = new StatQueue(
                 () -> gameActive,
-                name -> onlinePlayers.containsKey(normalize(name)),
                 settings::statSendIntervalMillis,
-                command -> {
-                    String playerName = command.substring("stat ".length());
-                    beginStatCycle(playerName);
-                    pendingStatDispatches.add(normalize(playerName));
-                    Bot.INSTANCE.sendCommand(command);
-                },
+                this::dispatchStat,
                 ignored -> {
                 },
                 this::handleStatSendFailure);
@@ -153,16 +183,22 @@ final class PlayerMonitorListener implements Listener {
                 connectionWatchdog = null;
             }
         }
+        gameGeneration.incrementAndGet();
+        cancelEntryRosterWait();
         statQueue.close();
         clearStatTracking();
         invalidateUuidChecks();
         uuidExecutor.shutdownNow();
+        identityExecutor.shutdownNow();
         retryExecutor.shutdown();
         waitForPendingStatWrites();
         retryExecutor.shutdownNow();
         try {
             if (!uuidExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
                 log.warn("UUID refresh executor did not terminate cleanly");
+            }
+            if (!identityExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                log.warn("identity lookup executor did not terminate cleanly");
             }
             if (!retryExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
                 log.warn("stat retry executor did not terminate cleanly");
@@ -239,6 +275,9 @@ final class PlayerMonitorListener implements Listener {
     @EventHandler
     public void onServerChange(ServerChangeEvent event) {
         boolean enteringGame = event.getServer() == Server.Game;
+        long generation = gameGeneration.incrementAndGet();
+        cancelEntryRosterWait();
+        cancelStatWork();
         if (!enteringGame) {
             invalidateUuidChecks();
             if (event.getCurrentServer() == Server.Game) {
@@ -254,6 +293,7 @@ final class PlayerMonitorListener implements Listener {
         }
 
         long gameEntryAt = System.currentTimeMillis();
+        boolean waitForStableEntryRoster = settings.scanOnEntry() && settings.statEnabled();
         boolean resumed = reconcileAfterReconnect(gameEntryAt);
         if (!resumed) {
             boolean recoverStaleSessions;
@@ -271,7 +311,11 @@ final class PlayerMonitorListener implements Listener {
             clearStatTracking();
             try {
                 if (gameActive) {
-                    recordFreshRoster(gameEntryAt, recoverStaleSessions);
+                    if (waitForStableEntryRoster) {
+                        recoverStaleSessions(gameEntryAt, recoverStaleSessions);
+                    } else {
+                        recordFreshRoster(gameEntryAt, recoverStaleSessions);
+                    }
                 }
             } finally {
                 synchronized (connectionStateLock) {
@@ -279,7 +323,6 @@ final class PlayerMonitorListener implements Listener {
                 }
             }
         }
-        observeUuidRoster(Bot.INSTANCE.players.values());
         log.info(resumed
                 ? "reconnected to Game; reconciled player roster"
                 : "entered Game; monitoring enabled");
@@ -287,7 +330,7 @@ final class PlayerMonitorListener implements Listener {
                 ? "Reconnected to Game; reconciled player roster."
                 : "Entered Game; player monitoring enabled.");
 
-        if (resumed && settings.statEnabled() && settings.scanOnJoin()) {
+        if (resumed && !waitForStableEntryRoster && settings.statEnabled() && settings.scanOnJoin()) {
             for (String playerName : reconnectedNewPlayers) {
                 enqueueAutomaticJoinStat(playerName, reconnectedBrandNewPlayers.contains(normalize(playerName)));
             }
@@ -295,11 +338,10 @@ final class PlayerMonitorListener implements Listener {
         reconnectedNewPlayers.clear();
         reconnectedBrandNewPlayers.clear();
 
-        if (settings.scanOnEntry() && settings.statEnabled()) {
-            StatScanResult result = queueStatScan(Bot.INSTANCE.players.values(), true, StatQueue.PRIORITY_ENTRY);
-            log.info("queued automatic stat scan for " + result.queued() + " online players");
-            logger.info("Queued automatic stat scan for {} online players; skipped {} in cooldown.",
-                    result.queued(), result.cooldownSkipped());
+        if (waitForStableEntryRoster) {
+            scheduleStableEntryScan(generation);
+        } else {
+            observeUuidRoster(Bot.INSTANCE.players.values());
         }
     }
 
@@ -309,14 +351,27 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         String playerName = nameOf(event.getPlayerProfile());
-        boolean scanJoinStat = settings.statEnabled() && settings.scanOnJoin();
-        boolean brandNew = scanJoinStat && isBrandNewPlayer(playerName);
+        boolean statEnabled = settings.statEnabled();
+        boolean scanJoinStat = statEnabled && settings.scanOnJoin();
+        boolean batchActive;
+        synchronized (statBatchLock) {
+            batchActive = activeStatBatch != null;
+        }
+        boolean brandNew = statEnabled && (scanJoinStat || batchActive) && hasNeverRecordedStat(playerName);
         if (onlinePlayers.put(normalize(playerName), playerName) == null) {
             recordLogin(playerName, System.currentTimeMillis());
         }
         observeUuid(event.getPlayerProfile());
-        if (scanJoinStat) {
-            enqueueAutomaticJoinStat(playerName, brandNew);
+        if (statEnabled) {
+            synchronized (statBatchLock) {
+                if (activeStatBatch != null) {
+                    if (brandNew) {
+                        addTargetLocked(activeStatBatch, playerName, StatQueue.PRIORITY_NEW_PLAYER, false);
+                    }
+                } else if (scanJoinStat) {
+                    enqueueAutomaticJoinStat(playerName, brandNew);
+                }
+            }
         }
     }
 
@@ -328,10 +383,11 @@ final class PlayerMonitorListener implements Listener {
         String playerName = nameOf(event.getPlayerProfile());
         cancelUuidCheck(playerName);
         onlineServerUuids.remove(normalize(playerName));
+        cancelStatCheck(playerName);
         statResponses.cancel(playerName);
         statAttempts.remove(normalize(playerName));
         pendingStatDispatches.remove(normalize(playerName));
-        finishStatCycle(playerName);
+        terminalStatTarget(playerName, StatOutcome.OFFLINE);
         if (onlinePlayers.remove(normalize(playerName)) == null) {
             return;
         }
@@ -389,11 +445,11 @@ final class PlayerMonitorListener implements Listener {
                         statResponses.accept(event.getText()).ifPresent(captured -> {
                             statOutputSuppressionUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
                             String normalizedName = normalize(captured.playerName());
+                            long token = currentStatToken(captured.playerName());
                             statQueue.cancel(captured.playerName());
                             statAttempts.remove(normalizedName);
                             pendingStatDispatches.remove(normalizedName);
-                            finishStatCycle(captured.playerName());
-                            scheduleStatWrite(captured);
+                            scheduleStatWrite(captured, token);
                         });
                     }
                     retryTimedOutStats();
@@ -446,11 +502,11 @@ final class PlayerMonitorListener implements Listener {
         }
     }
 
-    private void scheduleStatWrite(StatResponseCollector.CapturedStat captured) {
+    private void scheduleStatWrite(StatResponseCollector.CapturedStat captured, long token) {
         synchronized (statWriteLock) {
             pendingStatWrites++;
         }
-        Runnable write = () -> persistCapturedStat(captured);
+        Runnable write = () -> persistCapturedStat(captured, token);
         try {
             retryExecutor.schedule(write, STAT_WRITE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException error) {
@@ -458,13 +514,17 @@ final class PlayerMonitorListener implements Listener {
         }
     }
 
-    private void persistCapturedStat(StatResponseCollector.CapturedStat captured) {
+    private void persistCapturedStat(StatResponseCollector.CapturedStat captured, long token) {
         try {
             service.recordStat(captured.playerName(), captured.snapshot());
+            service.flush();
             log.info("queued stat write for " + captured.playerName());
             logger.info("\u001B[94mQueued stat write for {}.\u001B[0m", captured.playerName());
+            terminalStatTarget(captured.playerName(), token, StatOutcome.SUCCESS);
+            scheduleNextStatCheck(captured.playerName(), captured.snapshot().capturedAt);
         } catch (IOException error) {
             log.warn("failed to record stat for " + captured.playerName() + ": " + error.getMessage());
+            terminalStatTarget(captured.playerName(), token, StatOutcome.RETRIES_EXHAUSTED);
         } finally {
             synchronized (statWriteLock) {
                 pendingStatWrites--;
@@ -481,19 +541,43 @@ final class PlayerMonitorListener implements Listener {
         }
         String playerName = command.substring("stat ".length()).trim();
         String normalizedName = normalize(playerName);
-        if (!pendingStatDispatches.contains(normalizedName)) {
+        Long token = pendingStatDispatches.get(normalizedName);
+        if (token == null || !isCurrentStatTarget(normalizedName, token)) {
             return;
         }
         if (event.isDefaultActionCancelled()) {
-            pendingStatDispatches.remove(normalizedName);
+            pendingStatDispatches.remove(normalizedName, token);
             log.warn("stat command cancelled for " + playerName);
             handleStatSendFailure(playerName);
             return;
         }
-        if (pendingStatDispatches.remove(normalizedName)) {
-            statAttempts.merge(normalizedName, 1, Integer::sum);
+        if (pendingStatDispatches.remove(normalizedName, token)) {
+            int attempts = statAttempts.merge(normalizedName, 1, Integer::sum);
+            synchronized (statBatchLock) {
+                StatTarget target = currentStatTarget(normalizedName);
+                if (target != null && target.token == token) {
+                }
+            }
             statResponses.expect(playerName, settings.statTimeoutMillis());
             logger.info("Sent stat for {}.", playerName);
+        }
+    }
+
+    private void dispatchStat(StatQueue.Dispatch dispatch) {
+        beforeStatSend.run();
+        String normalized = normalize(dispatch.playerName());
+        synchronized (statBatchLock) {
+            if (closed || !gameActive || reconnectPending
+                    || !isCurrentStatTargetLocked(normalized, dispatch.token())) {
+                return;
+            }
+            if (!onlinePlayers.containsKey(normalized)) {
+                terminalStatTargetLocked(activeStatBatch.targets.get(normalized), StatOutcome.OFFLINE);
+                completeBatchIfDoneLocked(activeStatBatch);
+                return;
+            }
+            pendingStatDispatches.put(normalized, dispatch.token());
+            statCommandSender.accept("stat " + dispatch.playerName());
         }
     }
 
@@ -547,6 +631,9 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private boolean beginReconnectWindow(long now) {
+        gameGeneration.incrementAndGet();
+        cancelEntryRosterWait();
+        cancelStatWork();
         synchronized (connectionStateLock) {
             if (closed || reconnectPending || rosterReconciling) {
                 return false;
@@ -573,11 +660,19 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private void recordFreshRoster(long gameEntryAt, boolean recoverStaleSessions) {
+        recoverStaleSessions(gameEntryAt, recoverStaleSessions);
         Set<String> currentPlayers = Bot.INSTANCE.players.values().stream()
                 .map(PlayerMonitorListener::nameOf)
                 .filter(name -> name != null && !name.isBlank())
                 .collect(java.util.stream.Collectors.toSet());
-        if (recoverStaleSessions) {
+        for (String playerName : currentPlayers) {
+            onlinePlayers.put(normalize(playerName), playerName);
+            recordLogin(playerName, gameEntryAt);
+        }
+    }
+
+    private void recoverStaleSessions(long gameEntryAt, boolean recover) {
+        if (recover) {
             try {
                 int recovered = service.recoverOpenSessions(gameEntryAt);
                 if (recovered > 0) {
@@ -589,22 +684,29 @@ final class PlayerMonitorListener implements Listener {
                 logger.warn("Unable to recover stale open sessions before roster recording.", error);
             }
         }
-        for (String playerName : currentPlayers) {
-            onlinePlayers.put(normalize(playerName), playerName);
-            recordLogin(playerName, gameEntryAt);
-        }
     }
 
     private void clearStatTracking() {
+        cancelStatWork();
+    }
+
+    private void cancelStatWork() {
+        synchronized (statBatchLock) {
+            if (activeStatBatch != null) {
+                activeStatBatch.cancelled = true;
+                activeStatBatch = null;
+                settings.endStatOperation();
+            }
+            for (ScheduledStatCheck scheduled : scheduledStatChecks.values()) {
+                scheduled.future().cancel(false);
+            }
+            scheduledStatChecks.clear();
+        }
         statQueue.clear();
         statResponses.clear();
         statAttempts.clear();
         pendingStatDispatches.clear();
-        for (String normalizedKey : Set.copyOf(activeStatCycles)) {
-            if (activeStatCycles.remove(normalizedKey)) {
-                settings.endStatOperation();
-            }
-        }
+        activeStatCycles.clear();
     }
 
     private boolean reconcileAfterReconnect(long gameEntryAt) {
@@ -648,7 +750,7 @@ final class PlayerMonitorListener implements Listener {
             boolean trackBrandNewPlayers = settings.statEnabled() && settings.scanOnJoin();
             for (String playerName : currentPlayers) {
                 if (!containsIgnoreCase(previousPlayers, playerName)) {
-                    boolean brandNew = trackBrandNewPlayers && isBrandNewPlayer(playerName);
+                    boolean brandNew = trackBrandNewPlayers && hasNeverRecordedStat(playerName);
                     recordLogin(playerName, gameEntryAt);
                     reconnectedNewPlayers.add(playerName);
                     if (brandNew) {
@@ -821,6 +923,76 @@ final class PlayerMonitorListener implements Listener {
         }
     }
 
+    private void scheduleStableEntryScan(long generation) {
+        synchronized (statBatchLock) {
+            cancelEntryRosterWaitLocked();
+            entryRosterWait = new StableRosterWait(System.currentTimeMillis());
+            scheduleEntryRosterPollLocked(generation);
+        }
+    }
+
+    private void scheduleEntryRosterPollLocked(long generation) {
+        try {
+            entryRosterPoll = retryExecutor.schedule(() -> pollEntryRoster(generation),
+                    ENTRY_ROSTER_POLL_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) {
+            entryRosterWait = null;
+            entryRosterPoll = null;
+        }
+    }
+
+    private void pollEntryRoster(long generation) {
+        List<GameProfile> snapshot = List.copyOf(Bot.INSTANCE.players.values());
+        Set<String> roster = snapshot.stream()
+                .filter(profile -> profile != null && nameOf(profile) != null && !nameOf(profile).isBlank())
+                .map(profile -> normalize(nameOf(profile)) + "|" + profile.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        boolean ready;
+        synchronized (statBatchLock) {
+            if (closed || generation != gameGeneration.get() || !gameActive || reconnectPending
+                    || !settings.get().statEnabled || !settings.get().scanOnEntry || entryRosterWait == null) {
+                cancelEntryRosterWaitLocked();
+                return;
+            }
+            ready = entryRosterWait.sample(roster, System.currentTimeMillis(),
+                    ENTRY_ROSTER_STABLE_MILLIS, ENTRY_ROSTER_TIMEOUT_MILLIS);
+            if (!ready) {
+                scheduleEntryRosterPollLocked(generation);
+                return;
+            }
+            entryRosterWait = null;
+            entryRosterPoll = null;
+        }
+        if (roster.isEmpty()) {
+            log.info("automatic stat scan skipped because the Game roster stayed empty");
+            return;
+        }
+        synchronized (statBatchLock) {
+            if (generation != gameGeneration.get() || closed || !gameActive || reconnectPending) {
+                return;
+            }
+            observeUuidRoster(snapshot);
+        }
+        StatScanResult result = queueStatScan(snapshot, true, StatQueue.PRIORITY_ENTRY, generation);
+        log.info("queued automatic stat scan for " + result.queued() + " online players");
+        logger.info("Queued automatic stat scan for {} online players; skipped {} in cooldown.",
+                result.queued(), result.cooldownSkipped());
+    }
+
+    private void cancelEntryRosterWait() {
+        synchronized (statBatchLock) {
+            cancelEntryRosterWaitLocked();
+        }
+    }
+
+    private void cancelEntryRosterWaitLocked() {
+        if (entryRosterPoll != null) {
+            entryRosterPoll.cancel(false);
+        }
+        entryRosterPoll = null;
+        entryRosterWait = null;
+    }
+
     void applyUuidSettingsNow() {
         invalidateUuidChecks();
         if (gameActive && settings.uuidRecordEnable() && settings.uuidRecordCooldown() > 0) {
@@ -906,7 +1078,7 @@ final class PlayerMonitorListener implements Listener {
 
         long now = clock.getAsLong();
         try {
-            PlayerIdentity previous = service.playerIdentity(playerName).orElse(null);
+            StoredPlayerIdentity previous = service.playerIdentity(playerName).orElse(null);
             long cooldownMillis = TimeUnit.HOURS.toMillis(settings.uuidRecordCooldown());
             boolean serverUuidChanged = previous == null || previous.serverUuid() == null
                     || !currentServerUuid.toString().equalsIgnoreCase(previous.serverUuid());
@@ -918,22 +1090,113 @@ final class PlayerMonitorListener implements Listener {
                 return;
             }
 
-            IdentityResolution resolution = identityResolver.resolve(playerName, currentServerUuid, previous);
-            if (!uuidContextValid(normalized, currentServerUuid, generation)) {
-                return;
-            }
-            PlayerIdentity updated = service.recordIdentityCheck(playerName, resolution, now);
-            if (resolution.successful() && updated.uuidLastCheckedAt() != null) {
-                long nextAt = saturatedAdd(updated.uuidLastCheckedAt(),
-                        TimeUnit.HOURS.toMillis(settings.uuidRecordCooldown()));
-                scheduleUuidCheck(playerName, currentServerUuid, Math.max(0L, nextAt - clock.getAsLong()), false);
-            } else {
-                scheduleUuidCheck(playerName, currentServerUuid, UUID_REFRESH_RETRY_MILLIS, false);
-            }
+            resolveIdentity(playerName, currentServerUuid, previous).whenComplete((resolution, failure) ->
+                    completeUuidCheck(playerName, currentServerUuid, normalized, generation, now,
+                            resolution, failure));
         } catch (IOException | RuntimeException error) {
             log.warn("failed to refresh UUID identity for " + playerName + ": " + error.getMessage());
             scheduleUuidCheck(playerName, currentServerUuid, UUID_REFRESH_RETRY_MILLIS, false);
         }
+    }
+
+    private void completeUuidCheck(String playerName, UUID serverUuid, String normalized, long generation,
+                                   long checkedAt, IdentityResolution resolution, Throwable failure) {
+        if (failure != null) {
+            log.warn("failed to refresh UUID identity for " + playerName + ": " + rootMessage(failure));
+            if (uuidContextValid(normalized, serverUuid, generation)) {
+                scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS, false);
+            }
+            return;
+        }
+        if (!uuidContextValid(normalized, serverUuid, generation)) {
+            return;
+        }
+        try {
+            StoredPlayerIdentity updated = service.recordIdentityCheck(playerName, resolution, checkedAt);
+            if (resolution.successful() && updated.uuidLastCheckedAt() != null) {
+                long nextAt = saturatedAdd(updated.uuidLastCheckedAt(),
+                        TimeUnit.HOURS.toMillis(settings.uuidRecordCooldown()));
+                scheduleUuidCheck(playerName, serverUuid, Math.max(0L, nextAt - clock.getAsLong()), false);
+            } else {
+                scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS, false);
+            }
+        } catch (IOException | RuntimeException error) {
+            log.warn("failed to refresh UUID identity for " + playerName + ": " + error.getMessage());
+            scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS, false);
+        }
+    }
+
+    private CompletableFuture<IdentityResolution> resolveIdentity(String playerName, UUID serverUuid,
+                                                                   StoredPlayerIdentity previous) {
+        String key = normalize(playerName) + "|" + (serverUuid == null ? "" : serverUuid);
+        return inFlightIdentityLookups.computeIfAbsent(key, ignored -> {
+            CompletableFuture<IdentityResolution> created = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return identityResolver.resolve(playerName, serverUuid, previous);
+                } catch (IOException error) {
+                    throw new CompletionException(error);
+                }
+            }, identityExecutor);
+            created.whenComplete((result, failure) -> inFlightIdentityLookups.remove(key, created));
+            return created;
+        });
+    }
+
+    CompletableFuture<PlayerIdentity> resolve(String playerName) {
+        if (closed) {
+            return CompletableFuture.failedFuture(new IllegalStateException("XinPlayerMonitor is disabled"));
+        }
+        if (playerName == null || playerName.isBlank()) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("Player name cannot be blank"));
+        }
+        String requestedName = playerName.trim();
+        String key = normalize(requestedName);
+        return inFlightPublicResolves.computeIfAbsent(key, ignored -> {
+            CompletableFuture<PlayerIdentity> created = CompletableFuture.supplyAsync(() -> {
+                try {
+                    StoredPlayerIdentity stored = service.playerIdentity(requestedName).orElse(null);
+                    UUID current = onlineServerUuids.get(key);
+                    UUID target = current != null ? current : uuid(stored == null ? null : stored.serverUuid());
+                    return new ResolveContext(stored, target, current != null);
+                } catch (IOException error) {
+                    throw new CompletionException(error);
+                }
+            }, identityExecutor).thenCompose(context ->
+                    resolveIdentity(requestedName, context.serverUuid(), context.stored())
+                            .thenApply(resolution -> persistPublicIdentity(requestedName, context, resolution)));
+            created.whenComplete((result, failure) -> inFlightPublicResolves.remove(key, created));
+            return created;
+        });
+    }
+
+    private PlayerIdentity persistPublicIdentity(String playerName, ResolveContext context,
+                                                  IdentityResolution resolution) {
+        try {
+            StoredPlayerIdentity stored = service.recordIdentityCheck(playerName, resolution, clock.getAsLong());
+            java.util.OptionalLong lastSeen = service.playerLastSeenAt(playerName);
+            return new PlayerIdentity(stored.playerName(), uuid(stored.serverUuid()), uuid(stored.offlineUuid()),
+                    uuid(stored.mojangUuid()), uuid(stored.thirdPartyUuid()),
+                    stored.identityType() == null ? PlayerIdentityType.UNKNOWN : stored.identityType(),
+                    context.online(), lastSeen.isEmpty() ? null : Instant.ofEpochMilli(lastSeen.getAsLong()));
+        } catch (IOException error) {
+            throw new CompletionException(error);
+        }
+    }
+
+    private static UUID uuid(String value) {
+        try {
+            return value == null ? null : UUID.fromString(value);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    private static String rootMessage(Throwable failure) {
+        Throwable current = failure;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current.getMessage();
     }
 
     private boolean uuidContextValid(String normalizedPlayerName, UUID serverUuid, long generation) {
@@ -1012,95 +1275,142 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private StatScanResult queueStatScan(Collection<GameProfile> profiles, boolean applyCooldown, int priority) {
+        return queueStatScan(profiles, applyCooldown, priority, -1L);
+    }
+
+    private StatScanResult queueStatScan(Collection<GameProfile> profiles, boolean applyCooldown, int priority,
+                                         long expectedGeneration) {
         List<String> playerNames = profiles.stream()
                 .map(PlayerMonitorListener::nameOf)
                 .filter(name -> name != null && !name.isBlank())
+                .collect(java.util.stream.Collectors.toMap(PlayerMonitorListener::normalize,
+                        name -> name, (first, second) -> second, LinkedHashMap::new))
+                .values().stream()
                 .toList();
-        long now = System.currentTimeMillis();
-        for (String playerName : playerNames) {
-            if (onlinePlayers.put(normalize(playerName), playerName) == null) {
-                recordLogin(playerName, now);
-            }
-        }
-
-        Set<String> cooldownPlayers = Set.of();
-        if (applyCooldown && settings.statCooldownHours() > 0 && !playerNames.isEmpty()) {
-            long cutoffAt = now - TimeUnit.HOURS.toMillis(settings.statCooldownHours());
-            try {
-                cooldownPlayers = service.playersWithStatCapturedAtOrAfter(playerNames, cutoffAt);
-            } catch (IOException error) {
-                log.warn("failed to check batched stat cooldown: " + error.getMessage());
-            }
+        long now = clock.getAsLong();
+        Map<String, Long> latestStats;
+        try {
+            latestStats = service.latestStatCapturedAt(playerNames);
+        } catch (IOException error) {
+            log.warn("failed to read batched Stat timestamps: " + error.getMessage());
+            latestStats = Map.of();
         }
 
         int queued = 0;
         int cooldownSkipped = 0;
-        for (String playerName : playerNames) {
-            if (cooldownPlayers.contains(normalize(playerName))) {
-                cooldownSkipped++;
-                continue;
+        synchronized (statBatchLock) {
+            if (expectedGeneration >= 0L && (expectedGeneration != gameGeneration.get()
+                    || closed || !gameActive || reconnectPending)) {
+                return new StatScanResult(0, 0);
             }
-            if (enqueueStatIfAvailable(playerName, priority)) {
-                queued++;
+            for (String playerName : playerNames) {
+                if (onlinePlayers.put(normalize(playerName), playerName) == null) {
+                    recordLogin(playerName, now);
+                }
             }
+            StatBatch batch = activeStatBatch;
+            if (batch == null) {
+                batch = new StatBatch(gameGeneration.get());
+                activeStatBatch = batch;
+                settings.beginStatOperation();
+            }
+            for (String playerName : playerNames) {
+                Long lastStatAt = latestStats.get(normalize(playerName));
+                boolean cooldownActive = isStatCooldownActive(lastStatAt, now);
+                int targetPriority = statPriority(lastStatAt, now)
+                        + (priority == StatQueue.PRIORITY_MANUAL ? 1 : 0);
+                if (applyCooldown && cooldownActive) {
+                    if (addTargetLocked(batch, playerName, targetPriority, true)) {
+                        cooldownSkipped++;
+                        scheduleNextStatCheck(playerName, lastStatAt);
+                    }
+                } else if (addTargetLocked(batch, playerName, targetPriority, false)) {
+                    queued++;
+                } else {
+                    StatTarget target = batch.targets.get(normalize(playerName));
+                    if (target != null && !target.terminal) {
+                        target.priority = Math.max(target.priority, targetPriority);
+                        statQueue.enqueue(target.playerName, target.priority, target.token);
+                    }
+                }
+            }
+            completeBatchIfDoneLocked(batch);
         }
         return new StatScanResult(queued, cooldownSkipped);
     }
 
     private void enqueueAutomaticJoinStat(String playerName, boolean brandNew) {
-        if (isAutomaticStatCooldownActive(playerName)) {
+        Long lastStatAt = latestStatAt(playerName);
+        if (isStatCooldownActive(lastStatAt, clock.getAsLong())) {
+            scheduleNextStatCheck(playerName, lastStatAt);
             return;
         }
-        int priority;
-        if (brandNew) {
-            priority = StatQueue.PRIORITY_NEW_PLAYER;
-        } else if (settings.prioritizeJoinStat()) {
-            priority = StatQueue.PRIORITY_JOIN;
+        synchronized (statBatchLock) {
+            StatBatch batch = activeStatBatch;
+            if (batch == null) {
+                batch = new StatBatch(gameGeneration.get());
+                activeStatBatch = batch;
+                settings.beginStatOperation();
+            }
+            int priority = brandNew ? StatQueue.PRIORITY_NEW_PLAYER : StatQueue.PRIORITY_JOIN;
+            addTargetLocked(batch, playerName, priority, false);
+        }
+    }
+
+    private boolean addTargetLocked(StatBatch batch, String playerName, int priority, boolean cooldownSkipped) {
+        String key = normalize(playerName);
+        if (batch.targets.containsKey(key)) {
+            return false;
+        }
+        StatTarget target = new StatTarget(playerName, statTargetSequence.incrementAndGet(), priority);
+        batch.targets.put(key, target);
+        if (cooldownSkipped) {
+            target.terminal = true;
+            batch.skipped++;
         } else {
-            priority = StatQueue.PRIORITY_ENTRY;
+            activeStatCycles.add(key);
+            statQueue.enqueue(playerName, priority, target.token);
         }
-        enqueueStatIfAvailable(playerName, priority);
+        return true;
     }
 
-    private boolean enqueueStatIfAvailable(String playerName, int priority) {
-        String normalizedName = normalize(playerName);
-        if (activeStatCycles.contains(normalizedName)
-                || pendingStatDispatches.contains(normalizedName)
-                || statResponses.isExpecting(normalizedName)) {
-            return false;
-        }
-        return statQueue.enqueue(playerName, priority);
-    }
-
-    private boolean isAutomaticStatCooldownActive(String playerName) {
-        int cooldownHours = settings.statCooldownHours();
-        if (cooldownHours <= 0) {
-            return false;
-        }
+    private Long latestStatAt(String playerName) {
         try {
-            return service.hasStatCapturedAtOrAfter(
-                    playerName,
-                    System.currentTimeMillis() - TimeUnit.HOURS.toMillis(cooldownHours));
+            return service.latestStat(playerName).map(snapshot -> snapshot.capturedAt).orElse(null);
         } catch (IOException error) {
-            log.warn("failed to check stat cooldown for " + playerName + ": " + error.getMessage());
-            return false;
+            log.warn("failed to read latest stat for " + playerName + ": " + error.getMessage());
+            return null;
         }
+    }
+
+    private boolean isStatCooldownActive(Long lastStatAt, long now) {
+        int cooldownHours = settings.statCooldownHours();
+        return cooldownHours > 0 && lastStatAt != null
+                && now < saturatedAdd(lastStatAt, TimeUnit.HOURS.toMillis(cooldownHours));
+    }
+
+    private int statPriority(Long lastStatAt, long now) {
+        if (lastStatAt == null) {
+            return StatQueue.PRIORITY_NEW_PLAYER;
+        }
+        return isStatCooldownActive(lastStatAt, now) ? StatQueue.PRIORITY_ENTRY : StatQueue.PRIORITY_JOIN;
     }
 
     private void retryTimedOutStats() {
         for (String playerName : statResponses.expire()) {
             String normalizedName = normalize(playerName);
             int attempts = statAttempts.getOrDefault(normalizedName, 0);
-            evaluateStatAttempt(playerName, attempts, "timed out");
+            evaluateStatAttempt(playerName, attempts, currentStatToken(playerName), "timed out");
         }
     }
 
     private void handleStatSendFailure(String playerName) {
         String normalizedName = normalize(playerName);
-        pendingStatDispatches.remove(normalizedName);
+        Long token = pendingStatDispatches.remove(normalizedName);
         statResponses.cancel(playerName);
         int attempts = statAttempts.merge(normalizedName, 1, Integer::sum);
-        evaluateStatAttempt(playerName, attempts, "failed to send");
+        evaluateStatAttempt(playerName, attempts, token == null ? currentStatToken(playerName) : token,
+                "failed to send");
     }
 
     private void handleStatPlayerNotFound(String playerName) {
@@ -1109,48 +1419,230 @@ final class PlayerMonitorListener implements Listener {
         statAttempts.remove(normalizedName);
         pendingStatDispatches.remove(normalizedName);
         statResponses.cancel(playerName);
-        finishStatCycle(playerName);
+        terminalStatTarget(playerName, StatOutcome.NOT_FOUND);
         log.warn("skipping stat for " + playerName + ": system reported player does not exist");
         logger.warn("Skipping stat for {}: system reported player does not exist.", playerName);
     }
 
-    private void evaluateStatAttempt(String playerName, int attempts, String reason) {
+    private void evaluateStatAttempt(String playerName, int attempts, long token, String reason) {
         String normalizedName = normalize(playerName);
         int maximumAttempts = settings.statAttempts();
-        if (gameActive && onlinePlayers.containsKey(normalizedName) && attempts < maximumAttempts) {
+        if (gameActive && onlinePlayers.containsKey(normalizedName) && attempts < maximumAttempts
+                && isCurrentStatTarget(normalizedName, token)) {
             log.warn("stat request " + reason + " for " + playerName
                     + "; retrying (" + attempts + "/" + maximumAttempts + ")");
             logger.warn("Stat request {} for {}; retrying ({}/{}).",
                     reason, playerName, attempts, maximumAttempts);
-            statQueue.enqueue(playerName, StatQueue.PRIORITY_MANUAL);
+            StatTarget target = currentStatTarget(normalizedName);
+            if (target != null) {
+                statQueue.enqueue(playerName, target.priority, token);
+            }
         } else if (attempts > 0) {
             log.warn("stat scan failed for " + playerName + " after " + attempts + " attempt(s)");
             logger.warn("Stat scan failed for {} after {} attempt(s).", playerName, attempts);
             statAttempts.remove(normalizedName);
             pendingStatDispatches.remove(normalizedName);
             statResponses.cancel(playerName);
-            finishStatCycle(playerName);
+            terminalStatTarget(playerName, onlinePlayers.containsKey(normalizedName)
+                    ? StatOutcome.RETRIES_EXHAUSTED : StatOutcome.OFFLINE);
         }
     }
 
     private void beginStatCycle(String playerName) {
-        if (activeStatCycles.add(normalize(playerName))) {
-            settings.beginStatOperation();
+        synchronized (statBatchLock) {
+            if (activeStatBatch == null) {
+                activeStatBatch = new StatBatch(gameGeneration.get());
+                settings.beginStatOperation();
+            }
+            String normalized = normalize(playerName);
+            if (!activeStatBatch.targets.containsKey(normalized)) {
+                activeStatBatch.targets.put(normalized, new StatTarget(
+                        playerName, statTargetSequence.incrementAndGet(), StatQueue.PRIORITY_JOIN));
+                activeStatCycles.add(normalized);
+            }
         }
     }
 
-    private void finishStatCycle(String playerName) {
-        if (activeStatCycles.remove(normalize(playerName))) {
-            settings.endStatOperation();
-        }
-    }
-
-    private boolean isBrandNewPlayer(String playerName) {
+    private boolean hasNeverRecordedStat(String playerName) {
         try {
-            return !service.playerExists(playerName);
+            return service.latestStat(playerName).isEmpty();
         } catch (IOException error) {
-            log.warn("failed to check whether player is new " + playerName + ": " + error.getMessage());
+            log.warn("failed to check whether player has Stat " + playerName + ": " + error.getMessage());
             return false;
+        }
+    }
+
+    private long currentStatToken(String playerName) {
+        synchronized (statBatchLock) {
+            StatTarget target = currentStatTarget(normalize(playerName));
+            return target == null ? 0L : target.token;
+        }
+    }
+
+    private StatTarget currentStatTarget(String normalizedName) {
+        return activeStatBatch == null ? null : activeStatBatch.targets.get(normalizedName);
+    }
+
+    private boolean isCurrentStatTarget(String normalizedName, long token) {
+        synchronized (statBatchLock) {
+            return isCurrentStatTargetLocked(normalizedName, token);
+        }
+    }
+
+    private boolean isCurrentStatTargetLocked(String normalizedName, long token) {
+        StatTarget target = currentStatTarget(normalizedName);
+        return activeStatBatch != null && !activeStatBatch.cancelled
+                && activeStatBatch.gameGeneration == gameGeneration.get()
+                && target != null && !target.terminal && target.token == token;
+    }
+
+    private void terminalStatTarget(String playerName, StatOutcome outcome) {
+        terminalStatTarget(playerName, currentStatToken(playerName), outcome);
+    }
+
+    private void terminalStatTarget(String playerName, long token, StatOutcome outcome) {
+        String normalized = normalize(playerName);
+        synchronized (statBatchLock) {
+            StatBatch batch = activeStatBatch;
+            if (batch == null) {
+                return;
+            }
+            StatTarget target = batch.targets.get(normalized);
+            if (target == null || target.token != token || target.terminal) {
+                return;
+            }
+            terminalStatTargetLocked(target, outcome);
+            completeBatchIfDoneLocked(batch);
+        }
+    }
+
+    private void terminalStatTargetLocked(StatTarget target, StatOutcome outcome) {
+        if (target.terminal) {
+            return;
+        }
+        target.terminal = true;
+        String normalized = normalize(target.playerName);
+        statQueue.cancel(target.playerName);
+        statResponses.cancel(target.playerName);
+        statAttempts.remove(normalized);
+        pendingStatDispatches.remove(normalized);
+        activeStatCycles.remove(normalized);
+        switch (outcome) {
+            case SUCCESS -> activeStatBatch.succeeded++;
+            case NOT_FOUND, RETRIES_EXHAUSTED -> activeStatBatch.failed++;
+            case COOLDOWN, OFFLINE -> activeStatBatch.skipped++;
+        }
+    }
+
+    private void completeBatchIfDoneLocked(StatBatch batch) {
+        if (batch == null || batch != activeStatBatch || batch.cancelled || batch.completionEmitted
+                || batch.targets.values().stream().anyMatch(target -> !target.terminal)) {
+            return;
+        }
+        batch.completionEmitted = true;
+        activeStatBatch = null;
+        settings.endStatOperation();
+        logger.info("\u001B[93mStat scan completed: total={}, succeeded={}, failed={}, skipped={}\u001B[0m",
+                batch.targets.size(), batch.succeeded, batch.failed, batch.skipped);
+    }
+
+    private void scheduleNextStatCheck(String playerName, long lastStatAt) {
+        MonitorSettings configured = settings.get();
+        int cooldownHours = configured.statCooldownHours;
+        if (cooldownHours <= 0 || closed || !gameActive) {
+            cancelStatCheck(playerName);
+            return;
+        }
+        long dueAt = saturatedAdd(lastStatAt, TimeUnit.HOURS.toMillis(cooldownHours));
+        scheduleStatCheck(playerName, dueAt, gameGeneration.get());
+    }
+
+    private void scheduleStatCheck(String playerName, long dueAt, long generation) {
+        String normalized = normalize(playerName);
+        synchronized (statBatchLock) {
+            cancelStatCheckLocked(normalized);
+            long token = statTargetSequence.incrementAndGet();
+            try {
+                ScheduledFuture<?> future = retryExecutor.schedule(
+                        () -> runScheduledStatCheck(playerName, generation, token),
+                        Math.max(0L, dueAt - clock.getAsLong()), TimeUnit.MILLISECONDS);
+                scheduledStatChecks.put(normalized, new ScheduledStatCheck(token, future));
+            } catch (RejectedExecutionException ignored) {
+                // Shutdown invalidates scheduled Stat work.
+            }
+        }
+    }
+
+    private void runScheduledStatCheck(String playerName, long generation, long token) {
+        String normalized = normalize(playerName);
+        synchronized (statBatchLock) {
+            ScheduledStatCheck scheduled = scheduledStatChecks.get(normalized);
+            if (scheduled == null || scheduled.token() != token
+                    || !scheduledStatChecks.remove(normalized, scheduled)) {
+                return;
+            }
+        }
+        if (closed || generation != gameGeneration.get() || !gameActive || reconnectPending
+                || !settings.get().statEnabled || !onlinePlayers.containsKey(normalized)) {
+            return;
+        }
+        int cooldownHours = settings.get().statCooldownHours;
+        if (cooldownHours <= 0) {
+            return;
+        }
+        Long latest = latestStatAt(playerName);
+        if (latest == null) {
+            enqueueScheduledStat(playerName);
+            return;
+        }
+        long dueAt = saturatedAdd(latest, TimeUnit.HOURS.toMillis(cooldownHours));
+        if (clock.getAsLong() < dueAt) {
+            scheduleStatCheck(playerName, dueAt, generation);
+            return;
+        }
+        enqueueScheduledStat(playerName);
+    }
+
+    private void enqueueScheduledStat(String playerName) {
+        synchronized (statBatchLock) {
+            if (activeStatBatch == null) {
+                activeStatBatch = new StatBatch(gameGeneration.get());
+                settings.beginStatOperation();
+            }
+            addTargetLocked(activeStatBatch, playerName, StatQueue.PRIORITY_JOIN, false);
+        }
+    }
+
+    private void cancelStatCheck(String playerName) {
+        synchronized (statBatchLock) {
+            cancelStatCheckLocked(normalize(playerName));
+        }
+    }
+
+    private void cancelStatCheckLocked(String normalized) {
+        ScheduledStatCheck scheduled = scheduledStatChecks.remove(normalized);
+        if (scheduled != null) {
+            scheduled.future().cancel(false);
+        }
+    }
+
+    void applyStatSettingsNow() {
+        cancelEntryRosterWait();
+        for (String playerName : Set.copyOf(scheduledStatChecks.keySet())) {
+            cancelStatCheck(playerName);
+        }
+        MonitorSettings configured = settings.get();
+        if (!configured.statEnabled) {
+            cancelStatWork();
+            return;
+        }
+        if (gameActive && configured.statCooldownHours > 0) {
+            for (String playerName : onlinePlayers.values()) {
+                Long latest = latestStatAt(playerName);
+                if (latest != null) {
+                    scheduleNextStatCheck(playerName, latest);
+                }
+            }
         }
     }
 
@@ -1164,7 +1656,7 @@ final class PlayerMonitorListener implements Listener {
     boolean isProtectedFromEviction(String normalizedPlayerName) {
         String normalized = normalize(normalizedPlayerName);
         if (onlinePlayers.containsKey(normalized)
-                || pendingStatDispatches.contains(normalized)
+                || pendingStatDispatches.containsKey(normalized)
                 || statAttempts.containsKey(normalized)
                 || activeStatCycles.contains(normalized)
                 || statQueue.contains(normalized)) {
@@ -1185,16 +1677,59 @@ final class PlayerMonitorListener implements Listener {
         onlinePlayers.put(normalize(playerName), playerName);
     }
 
+    void markOnlineForTesting(GameProfile profile) {
+        markOnlineForTesting(nameOf(profile));
+        observeUuid(profile);
+    }
+
+    StatScanResult queueStatScanForTesting(Collection<GameProfile> profiles, boolean automatic) {
+        return queueStatScan(profiles, automatic, automatic
+                ? StatQueue.PRIORITY_ENTRY : StatQueue.PRIORITY_MANUAL);
+    }
+
+    int activeStatBatchTotalForTesting() {
+        synchronized (statBatchLock) {
+            return activeStatBatch == null ? 0 : activeStatBatch.targets.size();
+        }
+    }
+
+    int statPriorityForTesting(String playerName) {
+        synchronized (statBatchLock) {
+            StatTarget target = currentStatTarget(normalize(playerName));
+            return target == null ? Integer.MIN_VALUE : target.priority;
+        }
+    }
+
+    int scheduledStatCheckCountForTesting() {
+        return scheduledStatChecks.size();
+    }
+
+    void scheduleNextStatCheckForTesting(String playerName, long lastStatAt) {
+        scheduleNextStatCheck(playerName, lastStatAt);
+    }
+
+    void setBeforeStatSendForTesting(Runnable action) {
+        beforeStatSend = action;
+    }
+
+    void pollTimedOutEntryRosterForTesting() {
+        synchronized (statBatchLock) {
+            entryRosterWait = new StableRosterWait(System.currentTimeMillis() - ENTRY_ROSTER_TIMEOUT_MILLIS);
+        }
+        pollEntryRoster(gameGeneration.get());
+    }
+
     int statAttemptsForTesting(String playerName) {
         return statAttempts.getOrDefault(normalize(playerName), 0);
     }
 
     boolean isPendingStatDispatchForTesting(String playerName) {
-        return pendingStatDispatches.contains(normalize(playerName));
+        return pendingStatDispatches.containsKey(normalize(playerName));
     }
 
     void markPendingStatDispatchForTesting(String playerName) {
-        pendingStatDispatches.add(normalize(playerName));
+        beginStatCycle(playerName);
+        pendingStatDispatches.put(normalize(playerName), currentStatToken(playerName));
     }
 
     void handleStatSendFailureForTesting(String playerName) {
@@ -1204,7 +1739,7 @@ final class PlayerMonitorListener implements Listener {
 
     void evaluateStatAttemptForTesting(String playerName, int attempts) {
         beginStatCycle(playerName);
-        evaluateStatAttempt(playerName, attempts, "test");
+        evaluateStatAttempt(playerName, attempts, currentStatToken(playerName), "test");
     }
 
     boolean hasActiveStatCycleForTesting(String playerName) {
@@ -1226,8 +1761,8 @@ final class PlayerMonitorListener implements Listener {
         onlinePlayers.put(normalize(playerName), playerName);
         onlineServerUuids.put(normalize(playerName), profile.getId());
         try {
-            PlayerIdentity previous = service.playerIdentity(playerName).orElse(null);
-            IdentityResolution resolution = identityResolver.resolve(playerName, profile.getId(), previous);
+            StoredPlayerIdentity previous = service.playerIdentity(playerName).orElse(null);
+            IdentityResolution resolution = resolveIdentity(playerName, profile.getId(), previous).join();
             service.recordIdentityCheck(playerName, resolution, clock.getAsLong());
         } catch (IOException error) {
             throw new IllegalStateException(error);
@@ -1270,13 +1805,81 @@ final class PlayerMonitorListener implements Listener {
                           long chatDbFailed) {
     }
 
-    private record StatScanResult(int queued, int cooldownSkipped) {
+    record StatScanResult(int queued, int cooldownSkipped) {
     }
 
     private record RosterDrift(int botRoster, int monitorRoster, int missingFromMonitor, int extraInMonitor) {
     }
 
     private record ScheduledUuidCheck(UUID serverUuid, long token, ScheduledFuture<?> future) {
+    }
+
+    private record ResolveContext(StoredPlayerIdentity stored, UUID serverUuid, boolean online) {
+    }
+
+    private record ScheduledStatCheck(long token, ScheduledFuture<?> future) {
+    }
+
+    private enum StatOutcome {
+        SUCCESS,
+        NOT_FOUND,
+        RETRIES_EXHAUSTED,
+        COOLDOWN,
+        OFFLINE
+    }
+
+    private static final class StatTarget {
+        private final String playerName;
+        private final long token;
+        private int priority;
+        private boolean terminal;
+
+        private StatTarget(String playerName, long token, int priority) {
+            this.playerName = playerName;
+            this.token = token;
+            this.priority = priority;
+        }
+    }
+
+    private static final class StatBatch {
+        private final long gameGeneration;
+        private final Map<String, StatTarget> targets = new LinkedHashMap<>();
+        private int succeeded;
+        private int failed;
+        private int skipped;
+        private boolean cancelled;
+        private boolean completionEmitted;
+
+        private StatBatch(long gameGeneration) {
+            this.gameGeneration = gameGeneration;
+        }
+    }
+
+    static final class StableRosterWait {
+        private final long startedAt;
+        private Set<String> previous = Set.of();
+        private long stableSince;
+
+        StableRosterWait(long startedAt) {
+            this.startedAt = startedAt;
+        }
+
+        boolean sample(Set<String> roster, long now, long stableMillis, long timeoutMillis) {
+            if (now - startedAt >= timeoutMillis) {
+                return true;
+            }
+            if (roster.isEmpty()) {
+                previous = Set.of();
+                stableSince = 0L;
+                return false;
+            }
+            if (!roster.equals(previous)) {
+                previous = Set.copyOf(roster);
+                stableSince = now;
+                return false;
+            }
+            return now - stableSince >= stableMillis;
+        }
     }
 
     private static final class SystemChatContext {

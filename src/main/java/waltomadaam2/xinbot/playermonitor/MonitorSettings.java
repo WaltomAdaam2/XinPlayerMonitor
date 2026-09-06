@@ -15,6 +15,7 @@ final class MonitorSettings {
     static final int DEFAULT_BACKUP_INTERVAL_HOURS = 168;
     static final int DEFAULT_BACKUP_MAX_COUNT = 3;
     static final int DEFAULT_UUID_RECORD_COOLDOWN_HOURS = 168;
+    static final String DEFAULT_THIRD_PARTY_YGGDRASIL_BASE_URL = "https://littleskin.cn/api/yggdrasil";
 
     static final class Database {
         static final String DEFAULT_PATH = "xinpm.db";
@@ -77,6 +78,7 @@ final class MonitorSettings {
     int backupMaxCount = DEFAULT_BACKUP_MAX_COUNT;
     boolean uuidRecordEnable = false;
     int uuidRecordCooldown = DEFAULT_UUID_RECORD_COOLDOWN_HOURS;
+    String thirdPartyYggdrasilBaseUrl = DEFAULT_THIRD_PARTY_YGGDRASIL_BASE_URL;
     Database database = new Database();
 
     MonitorSettings copy() {
@@ -100,6 +102,7 @@ final class MonitorSettings {
         copy.backupMaxCount = backupMaxCount;
         copy.uuidRecordEnable = uuidRecordEnable;
         copy.uuidRecordCooldown = uuidRecordCooldown;
+        copy.thirdPartyYggdrasilBaseUrl = thirdPartyYggdrasilBaseUrl;
         copy.database = database == null ? new Database() : database.copy();
         return copy;
     }

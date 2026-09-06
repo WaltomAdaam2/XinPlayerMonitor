@@ -53,6 +53,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String HOUR_PLACEHOLDER = "<hour>";
     private static final String COUNT_PLACEHOLDER = "<count>";
     private static final String TIMEZONE_PLACEHOLDER = "<timezone>";
+    private static final String URL_PLACEHOLDER = "<url>";
 
     private static final List<String> PLAYER_ACTIONS = List.of("stat", "uuid", "latestlogin", "recentlogin", "chat");
     private static final List<String> BOOLEAN_VALUES = List.of("true", "false");
@@ -72,6 +73,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             "chat-count",
             "uuidRecordEnable",
             "uuidRecordCooldown",
+            "thirdPartyYggdrasilBaseUrl",
             "backup-interval");
 
     private static final List<String> TIMEZONE_VALUES = MonitorSettingsStore.SUPPORTED_TIMEZONES;
@@ -287,6 +289,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             switch (action) {
                 case "scan-on-entry" -> {
                     settings.setScanOnEntry(parseBoolean(value));
+                    listener.applyStatSettingsNow();
                     statSettingSaved("进入 Game 自动扫描已设置为 " + value.toLowerCase(Locale.ROOT));
                 }
                 case "disconnect-timeout" -> {
@@ -297,6 +300,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 }
                 case "stat-enabled" -> {
                     settings.setStatEnabled(parseBoolean(value));
+                    listener.applyStatSettingsNow();
                     statSettingSaved("Stat 自动扫描总开关已设置为 " + value.toLowerCase(Locale.ROOT));
                 }
                 case "stat-send-interval" -> {
@@ -311,6 +315,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 case "stat-cooldown" -> {
                     int parsed = parseInt(value, HOUR_PLACEHOLDER);
                     settings.setStatCooldownHours(parsed);
+                    listener.applyStatSettingsNow();
                     statSettingSaved("自动 Stat 冷却时间已设置为 " + parsed + " 小时");
                 }
                 case "stat-timeout" -> {
@@ -360,6 +365,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                         listener.applyUuidSettingsNow();
                     }
                     print("UUID 记录冷却时间已设置为 " + parsed + " 小时，已立即生效。");
+                }
+                case "thirdpartyyggdrasilbaseurl", "third-party-yggdrasil-base-url" -> {
+                    settings.setThirdPartyYggdrasilBaseUrl(value);
+                    print("第三方 Yggdrasil 地址已设置为 " + settings.thirdPartyYggdrasilBaseUrl() + "，已立即生效。");
                 }
                 case "cache-idle", "max-cached-history" ->
                         print("该设置仅用于旧版内存存储，SQLite 后端不使用它，未修改设置。");
@@ -536,6 +545,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 case "chat-count" -> List.of(Integer.toString(settings.chatCount()));
                 case "uuidrecordenable", "uuid-record-enable" -> BOOLEAN_VALUES;
                 case "uuidrecordcooldown", "uuid-record-cooldown" -> List.of(HOUR_PLACEHOLDER);
+                case "thirdpartyyggdrasilbaseurl", "third-party-yggdrasil-base-url" -> List.of(URL_PLACEHOLDER);
                 default -> List.of();
             };
             return matching(args[2], candidates);
@@ -635,6 +645,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 "聊天默认数量: " + current.chatCount,
                 "uuidRecordEnable=" + current.uuidRecordEnable,
                 "uuidRecordCooldown=" + current.uuidRecordCooldown,
+                "thirdPartyYggdrasilBaseUrl=" + current.thirdPartyYggdrasilBaseUrl,
                 "自动备份间隔: " + current.backupInterval + " h");
     }
 
@@ -961,7 +972,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(CYAN + label + RESET + COUNT_COLOR + value + RESET);
     }
 
-    private void playerDataUuidField(String label, PlayerIdentity identity) {
+    private void playerDataUuidField(String label, StoredPlayerIdentity identity) {
         print(CYAN + label + RESET + uuidValue(identity));
     }
 
@@ -990,7 +1001,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print(SectionFormatter.divider("Player stat"));
     }
 
-    private void uuid(String playerName, Optional<PlayerIdentity> identity) {
+    private void uuid(String playerName, Optional<StoredPlayerIdentity> identity) {
         report("uuid", List.of(
                 "玩家: " + playerName,
                 "uuid: " + uuidValue(identity.orElse(null))));
@@ -999,7 +1010,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
     }
 
-    private String uuidValue(PlayerIdentity identity) {
+    private String uuidValue(StoredPlayerIdentity identity) {
         if (identity == null || identity.serverUuid() == null || identity.serverUuid().isBlank()) {
             return "无";
         }
@@ -1136,6 +1147,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             case "stat-send-interval", "stat-timeout" -> MS_PLACEHOLDER;
             case "stat-cooldown", "backup-interval", "uuidRecordCooldown" -> HOUR_PLACEHOLDER;
             case "display-timezone" -> TIMEZONE_PLACEHOLDER;
+            case "thirdPartyYggdrasilBaseUrl" -> URL_PLACEHOLDER;
             default -> COUNT_PLACEHOLDER;
         };
     }

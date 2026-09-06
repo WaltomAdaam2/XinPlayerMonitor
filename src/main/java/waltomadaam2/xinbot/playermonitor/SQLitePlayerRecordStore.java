@@ -32,12 +32,15 @@ import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -289,7 +292,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     @Override
-    public PlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution, long checkedAt)
+    public StoredPlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution, long checkedAt)
             throws IOException {
         validatePlayerName(playerName);
         submit(new IdentityEvent(playerName, Objects.requireNonNull(resolution, "resolution"), checkedAt));
@@ -299,7 +302,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     }
 
     @Override
-    public Optional<PlayerIdentity> playerIdentity(String playerName) throws IOException {
+    public Optional<StoredPlayerIdentity> playerIdentity(String playerName) throws IOException {
         validatePlayerName(playerName);
         flush();
         try (Connection connection = openConnection()) {
@@ -307,6 +310,22 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             return playerId == null ? Optional.empty() : Optional.of(readIdentity(connection, playerId));
         } catch (SQLException error) {
             throw SQLiteSchema.toIo("read player UUID identity " + playerName, error);
+        }
+    }
+
+    @Override
+    public OptionalLong playerLastSeenAt(String playerName) throws IOException {
+        validatePlayerName(playerName);
+        flush();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT last_seen_at FROM players WHERE normalized_name = ?")) {
+            statement.setString(1, normalize(playerName));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? OptionalLong.of(resultSet.getLong(1)) : OptionalLong.empty();
+            }
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("read last seen for " + playerName, error);
         }
     }
 
@@ -974,6 +993,49 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         }
     }
 
+    @Override
+    public Map<String, Long> latestStatCapturedAt(Collection<String> names) throws IOException {
+        Objects.requireNonNull(names, "names");
+        Set<String> normalizedNames = new HashSet<>();
+        for (String name : names) {
+            validatePlayerName(name);
+            normalizedNames.add(normalize(name));
+        }
+        if (normalizedNames.isEmpty()) {
+            return Map.of();
+        }
+        flush();
+        Map<String, Long> result = new HashMap<>();
+        List<String> allNames = List.copyOf(normalizedNames);
+        final int chunkSize = 400;
+        try (Connection connection = openConnection()) {
+            for (int start = 0; start < allNames.size(); start += chunkSize) {
+                List<String> chunk = allNames.subList(start, Math.min(allNames.size(), start + chunkSize));
+                String placeholders = String.join(",", java.util.Collections.nCopies(chunk.size(), "?"));
+                String sql = """
+                        SELECT p.normalized_name, MAX(stats.timestamp)
+                        FROM stat_snapshots stats
+                        JOIN players p ON p.id = stats.player_id
+                        WHERE p.normalized_name IN (%s)
+                        GROUP BY p.normalized_name
+                        """.formatted(placeholders);
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    for (int index = 0; index < chunk.size(); index++) {
+                        statement.setString(index + 1, chunk.get(index));
+                    }
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        while (resultSet.next()) {
+                            result.put(resultSet.getString(1), resultSet.getLong(2));
+                        }
+                    }
+                }
+            }
+            return Map.copyOf(result);
+        } catch (SQLException error) {
+            throw SQLiteSchema.toIo("read latest Stat timestamps", error);
+        }
+    }
+
     private static long countRows(Connection connection, long playerId, String tableName) throws SQLException {
         String sql = "SELECT COUNT(*) FROM " + tableName + " WHERE player_id = ?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -1621,10 +1683,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private void writeIdentity(WriterSql sql, String playerName, IdentityResolution resolution, long checkedAt)
             throws SQLException {
         long playerId = ensurePlayer(sql, playerName, checkedAt);
-        PlayerIdentity previous = readIdentity(sql.connection, playerId);
+        StoredPlayerIdentity previous = readIdentity(sql.connection, playerId);
         String mojangUuid = resolvedUuid(previous.mojangUuid(), resolution.mojang());
         String thirdPartyUuid = resolvedUuid(previous.thirdPartyUuid(), resolution.thirdParty());
-        IdentityType identityType = resolution.identityType() == null
+        PlayerIdentityType identityType = resolution.identityType() == null
                 ? previous.identityType() : resolution.identityType();
 
         List<String> assignments = new ArrayList<>();
@@ -1822,7 +1884,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         return record;
     }
 
-    private PlayerIdentity readIdentity(Connection connection, long playerId) throws SQLException {
+    private StoredPlayerIdentity readIdentity(Connection connection, long playerId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT display_name, server_uuid, offline_uuid, mojang_uuid, third_party_uuid,
                        identity_type, mojang_checked_at, third_party_checked_at,
@@ -1835,13 +1897,13 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                     throw new SQLException("Player id disappeared while reading identity: " + playerId);
                 }
                 String type = resultSet.getString("identity_type");
-                IdentityType identityType;
+                PlayerIdentityType identityType;
                 try {
-                    identityType = type == null ? null : IdentityType.valueOf(type);
+                    identityType = type == null ? null : PlayerIdentityType.valueOf(type);
                 } catch (IllegalArgumentException ignored) {
-                    identityType = IdentityType.UNKNOWN;
+                    identityType = PlayerIdentityType.UNKNOWN;
                 }
-                return new PlayerIdentity(
+                return new StoredPlayerIdentity(
                         resultSet.getString("display_name"),
                         resultSet.getString("server_uuid"),
                         resultSet.getString("offline_uuid"),

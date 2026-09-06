@@ -14,13 +14,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
-import java.util.function.Predicate;
 
 final class StatQueue {
-    static final int PRIORITY_ENTRY = 0;
-    static final int PRIORITY_JOIN = 10;
-    static final int PRIORITY_NEW_PLAYER = 20;
-    static final int PRIORITY_MANUAL = 30;
+    static final int PRIORITY_ENTRY = 100;
+    static final int PRIORITY_JOIN = 200;
+    static final int PRIORITY_NEW_PLAYER = 300;
+    static final int PRIORITY_MANUAL = 400;
 
     private final PriorityBlockingQueue<QueuedPlayer> pending = new PriorityBlockingQueue<>(32,
             Comparator.comparingInt(QueuedPlayer::priority).reversed()
@@ -35,16 +34,14 @@ final class StatQueue {
     private final AtomicBoolean draining = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final BooleanSupplier gameActive;
-    private final Predicate<String> online;
     private final LongSupplier intervalMillis;
-    private final Consumer<String> sender;
+    private final Consumer<Dispatch> sender;
     private final Consumer<String> dispatched;
     private final Consumer<String> sendFailed;
 
-    StatQueue(BooleanSupplier gameActive, Predicate<String> online, LongSupplier intervalMillis,
-              Consumer<String> sender, Consumer<String> dispatched, Consumer<String> sendFailed) {
+    StatQueue(BooleanSupplier gameActive, LongSupplier intervalMillis,
+              Consumer<Dispatch> sender, Consumer<String> dispatched, Consumer<String> sendFailed) {
         this.gameActive = gameActive;
-        this.online = online;
         this.intervalMillis = intervalMillis;
         this.sender = sender;
         this.dispatched = dispatched;
@@ -60,6 +57,10 @@ final class StatQueue {
     }
 
     boolean enqueue(String playerName, int priority) {
+        return enqueue(playerName, priority, 0L);
+    }
+
+    boolean enqueue(String playerName, int priority, long token) {
         if (closed.get()) {
             return false;
         }
@@ -69,13 +70,13 @@ final class StatQueue {
             if (closed.get()) {
                 return existing;
             }
-            if (existing != null && existing.priority() >= priority) {
+            if (existing != null && existing.token() == token && existing.priority() >= priority) {
                 return existing;
             }
             if (existing != null) {
                 existing.cancel();
             }
-            QueuedPlayer replacement = new QueuedPlayer(key, playerName, priority, sequence.getAndIncrement());
+            QueuedPlayer replacement = new QueuedPlayer(key, playerName, priority, token, sequence.getAndIncrement());
             pending.add(replacement);
             added.set(true);
             return replacement;
@@ -146,8 +147,8 @@ final class StatQueue {
             return;
         }
         try {
-            if (gameActive.getAsBoolean() && online.test(item.playerName())) {
-                sender.accept("stat " + item.playerName());
+            if (gameActive.getAsBoolean()) {
+                sender.accept(new Dispatch(item.playerName(), item.token()));
                 dispatched.accept(item.playerName());
             }
         } catch (RuntimeException error) {
@@ -190,17 +191,22 @@ final class StatQueue {
         return playerName.toLowerCase(Locale.ROOT);
     }
 
+    record Dispatch(String playerName, long token) {
+    }
+
     private static final class QueuedPlayer {
         private final String normalizedKey;
         private final String playerName;
         private final int priority;
+        private final long token;
         private final long sequence;
         private volatile boolean cancelled;
 
-        private QueuedPlayer(String normalizedKey, String playerName, int priority, long sequence) {
+        private QueuedPlayer(String normalizedKey, String playerName, int priority, long token, long sequence) {
             this.normalizedKey = normalizedKey;
             this.playerName = playerName;
             this.priority = priority;
+            this.token = token;
             this.sequence = sequence;
         }
 
@@ -214,6 +220,10 @@ final class StatQueue {
 
         int priority() {
             return priority;
+        }
+
+        long token() {
+            return token;
         }
 
         long sequence() {

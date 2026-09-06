@@ -10,7 +10,9 @@ import java.nio.file.Path;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -78,13 +80,17 @@ public final class PlayerMonitorService {
         store.recordStat(playerName, snapshot);
     }
 
-    PlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution, long checkedAt)
+    StoredPlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution, long checkedAt)
             throws IOException {
         return store.recordIdentityCheck(playerName, resolution, checkedAt);
     }
 
-    Optional<PlayerIdentity> playerIdentity(String playerName) throws IOException {
+    Optional<StoredPlayerIdentity> playerIdentity(String playerName) throws IOException {
         return store.playerIdentity(playerName);
+    }
+
+    OptionalLong playerLastSeenAt(String playerName) throws IOException {
+        return store.playerLastSeenAt(playerName);
     }
 
     /** @deprecated Prefer summary and bounded query methods. */
@@ -172,6 +178,10 @@ public final class PlayerMonitorService {
 
     public DatabaseStats databaseStats() throws IOException {
         return store.databaseStats();
+    }
+
+    public Map<String, Long> latestStatCapturedAt(Collection<String> playerNames) throws IOException {
+        return store.latestStatCapturedAt(playerNames);
     }
 
     public DatabaseStats databaseStatsSnapshot() throws IOException {

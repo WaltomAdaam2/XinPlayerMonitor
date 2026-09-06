@@ -5,7 +5,7 @@ record IdentityResolution(
         String offlineUuid,
         Lookup mojang,
         Lookup thirdParty,
-        IdentityType identityType,
+        PlayerIdentityType identityType,
         boolean successful) {
 
     enum LookupStatus {

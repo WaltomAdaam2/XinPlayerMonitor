@@ -7,6 +7,7 @@ import com.google.gson.JsonParseException;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -252,6 +253,10 @@ final class MonitorSettingsStore {
         return settings.uuidRecordCooldown;
     }
 
+    synchronized String thirdPartyYggdrasilBaseUrl() {
+        return settings.thirdPartyYggdrasilBaseUrl;
+    }
+
     synchronized MonitorSettings.Database database() {
         return settings.database == null ? new MonitorSettings.Database() : settings.database.copy();
     }
@@ -354,6 +359,11 @@ final class MonitorSettingsStore {
             throw new IllegalArgumentException("UUID record cooldown must be 0 or greater");
         }
         updateSetting(updated -> updated.uuidRecordCooldown = value);
+    }
+
+    synchronized void setThirdPartyYggdrasilBaseUrl(String value) throws IOException {
+        String normalized = normalizeThirdPartyYggdrasilBaseUrl(value);
+        updateSetting(updated -> updated.thirdPartyYggdrasilBaseUrl = normalized);
     }
 
     private void updateStatSetting(Consumer<MonitorSettings> update) throws IOException {
@@ -483,6 +493,14 @@ final class MonitorSettingsStore {
                     + "; using default " + MonitorSettings.DEFAULT_UUID_RECORD_COOLDOWN_HOURS + ".");
             value.uuidRecordCooldown = MonitorSettings.DEFAULT_UUID_RECORD_COOLDOWN_HOURS;
         }
+        try {
+            value.thirdPartyYggdrasilBaseUrl = normalizeThirdPartyYggdrasilBaseUrl(
+                    value.thirdPartyYggdrasilBaseUrl);
+        } catch (IllegalArgumentException error) {
+            warningSink.accept("Invalid thirdPartyYggdrasilBaseUrl=" + value.thirdPartyYggdrasilBaseUrl
+                    + "; using default " + MonitorSettings.DEFAULT_THIRD_PARTY_YGGDRASIL_BASE_URL + ".");
+            value.thirdPartyYggdrasilBaseUrl = MonitorSettings.DEFAULT_THIRD_PARTY_YGGDRASIL_BASE_URL;
+        }
         value.displayTimezone = canonicalTimezone(value.displayTimezone);
         normalizeDatabaseSettings(value);
     }
@@ -552,5 +570,27 @@ final class MonitorSettingsStore {
         if (value < minimum || value > maximum) {
             throw new IllegalArgumentException(message);
         }
+    }
+
+    static String normalizeThirdPartyYggdrasilBaseUrl(String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("Third-party Yggdrasil base URL cannot be empty");
+        }
+        URI uri;
+        try {
+            uri = URI.create(value.trim());
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("Invalid third-party Yggdrasil base URL", error);
+        }
+        String scheme = uri.getScheme();
+        if ((scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https")))
+                || !uri.isAbsolute() || uri.getHost() == null || uri.getQuery() != null || uri.getFragment() != null) {
+            throw new IllegalArgumentException("Third-party Yggdrasil base URL must be an absolute HTTP/HTTPS URL");
+        }
+        String normalized = uri.toString();
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
     }
 }

@@ -1,9 +1,9 @@
 package waltomadaam2.xinbot.playermonitor;
 
-enum IdentityType {
+public enum PlayerIdentityType {
     OFFLINE,
     PREMIUM,
     THIRD_PARTY,
-    AMBIGUOUS,
-    UNKNOWN
+    UNKNOWN,
+    AMBIGUOUS
 }

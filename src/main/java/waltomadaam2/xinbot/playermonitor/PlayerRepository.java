@@ -11,7 +11,9 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -46,13 +48,17 @@ interface PlayerRepository extends AutoCloseable {
 
     void recordStat(String playerName, StatSnapshot snapshot) throws IOException;
 
-    default PlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution,
+    default StoredPlayerIdentity recordIdentityCheck(String playerName, IdentityResolution resolution,
                                                long checkedAt) throws IOException {
         throw new UnsupportedOperationException("identity storage not supported");
     }
 
-    default Optional<PlayerIdentity> playerIdentity(String playerName) throws IOException {
+    default Optional<StoredPlayerIdentity> playerIdentity(String playerName) throws IOException {
         return Optional.empty();
+    }
+
+    default OptionalLong playerLastSeenAt(String playerName) throws IOException {
+        return OptionalLong.empty();
     }
 
     /**
@@ -190,6 +196,15 @@ interface PlayerRepository extends AutoCloseable {
             }
         }
         return Set.copyOf(result);
+    }
+
+    default Map<String, Long> latestStatCapturedAt(Collection<String> playerNames) throws IOException {
+        java.util.HashMap<String, Long> result = new java.util.HashMap<>();
+        for (String playerName : playerNames) {
+            latestStat(playerName).ifPresent(snapshot -> result.put(
+                    playerName.toLowerCase(Locale.ROOT), snapshot.capturedAt));
+        }
+        return Map.copyOf(result);
     }
 
     /**
