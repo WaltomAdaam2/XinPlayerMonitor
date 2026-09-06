@@ -9,6 +9,8 @@ import xin.bbtt.mcbot.plugin.Plugin;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.io.InputStream;
+import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
@@ -21,6 +23,19 @@ public final class XinPlayerMonitor implements Plugin {
     private LoggerContext loggerContext;
     private StatChatLogFilter statChatLogFilter;
     private SQLiteBackupManager backupManager;
+
+    static String pluginVersion() {
+        try (InputStream resource = XinPlayerMonitor.class.getResourceAsStream("/plugin.yml")) {
+            Properties properties = new Properties();
+            if (resource != null) {
+                properties.load(resource);
+                return properties.getProperty("version", "unknown");
+            }
+        } catch (IOException ignored) {
+            // Status remains available even when packaged metadata cannot be read.
+        }
+        return "unknown";
+    }
 
     @Override
     public void onLoad() {
@@ -100,7 +115,7 @@ public final class XinPlayerMonitor implements Plugin {
             commandMayBeRegistered = true;
             Bot.INSTANCE.getPluginManager().registerCommand(
                     new Command(COMMAND_NAME, new String[]{"xpm"}, "Query player monitoring data and configure stat scanning",
-                            "playermonitor setting|scan-stat|status|backup|<player> [stat|uuid|latestlogin|recentlogin|chat]"),
+                            "playermonitor setting|scan stat|scan uuid|status|backup|<player> [playerinfo|stat|uuid|latestlogin|recentlogin|chat]"),
                     command,
                     this);
             log.info("plugin enabled");

@@ -32,6 +32,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private static final String ROOT_COMMAND = "\u001B[38;5;183m"; // xterm-256 approximation of #E0B0FF
     private static final String PLAYER_COLOR = "\u001B[38;5;29m";  // compatible green approximation of #2E6F40
+    private static final String UUID_VALUE_COLOR = "\u001B[38;5;29m";
     private static final String SETTING_NAME = "\u001B[38;5;151m"; // xterm-256 approximation of #ADEBB3
     private static final String SETTING_VALUE = "\u001B[38;5;215m"; // xterm-256 approximation of #FFC067
     private static final String PLAYER_ACTION = "\u001B[38;5;183m"; // xterm-256 approximation of #E0B0FF
@@ -114,7 +115,17 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         if ("scan-stat".equalsIgnoreCase(args[0])) {
             if (args.length == 1) {
-                scan();
+                scanStat();
+            } else {
+                help();
+            }
+            return;
+        }
+        if ("scan".equalsIgnoreCase(args[0]) && args.length == 2) {
+            if ("stat".equalsIgnoreCase(args[1])) {
+                scanStat();
+            } else if ("uuid".equalsIgnoreCase(args[1])) {
+                scanUuid();
             } else {
                 help();
             }
@@ -141,13 +152,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     @Override
     public List<String> onTabComplete(Command command, String label, String[] args) {
         if (args == null || args.length == 0) {
-            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan", "status", "backup", PLAYER_PLACEHOLDER);
         }
         if ("setting".equalsIgnoreCase(args[0])) {
             return completeSetting(args);
         }
         if ("scan-stat".equalsIgnoreCase(args[0]) && args.length > 1) {
             return List.of();
+        }
+        if ("scan".equalsIgnoreCase(args[0])) {
+            return args.length == 1 ? List.of("stat", "uuid") : List.of();
         }
         if ("status".equalsIgnoreCase(args[0]) && args.length == 2) {
             return matching(args[1], List.of("full"));
@@ -193,7 +207,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         String value = lower(args[index]);
         if (index == 0) {
             if ("setting".equals(value)
-                    || "scan-stat".equals(value) || "status".equals(value)
+                    || "scan-stat".equals(value) || "scan".equals(value) || "status".equals(value)
                     || "db-stat".equals(value) || "backup".equals(value)) {
                 return ROOT_COMMAND_STYLE;
             }
@@ -206,6 +220,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         if ("scan-stat".equals(root)
                 || "status".equals(root) || "db-stat".equals(root)) {
             return AttributedStyle.DEFAULT;
+        }
+        if ("scan".equals(root)) {
+            return index == 1 && ("stat".equals(value) || "uuid".equals(value))
+                    ? PLAYER_ACTION_STYLE : AttributedStyle.DEFAULT;
         }
         if ("backup".equals(root)) {
             return index == 1 ? PLAYER_ACTION_STYLE : AttributedStyle.DEFAULT;
@@ -242,9 +260,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     + SETTING_NAME + settingName + RESET
                     + (remainder.isEmpty() ? "" : " " + SETTING_VALUE + remainder + RESET);
         }
-        if (usage.equals("Usage: playermonitor scan-stat")) {
+        if (usage.equals("Usage: playermonitor scan stat") || usage.equals("Usage: playermonitor scan uuid")) {
+            String action = usage.substring("Usage: playermonitor scan ".length());
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
-                    + ROOT_COMMAND + "scan-stat" + RESET;
+                    + ROOT_COMMAND + "scan" + RESET + " " + PLAYER_ACTION + action + RESET;
         }
         if (usage.startsWith("Usage: playermonitor status")) {
             String remainder = usage.substring("Usage: playermonitor status".length());
@@ -586,7 +605,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private List<String> completePlayerNames(String input) {
         if (input == null || input.isEmpty()) {
-            return List.of("setting", "scan-stat", "status", "backup", PLAYER_PLACEHOLDER);
+            return List.of("setting", "scan", "status", "backup", PLAYER_PLACEHOLDER);
         }
         try {
             TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -597,8 +616,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             if ("setting".startsWith(prefix)) {
                 matches.add("setting");
             }
-            if ("scan-stat".startsWith(prefix)) {
-                matches.add("scan-stat");
+            if ("scan".startsWith(prefix)) {
+                matches.add("scan");
             }
             if ("status".startsWith(prefix)) {
                 matches.add("status");
@@ -646,13 +665,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 "显示时区: " + current.displayTimezone,
                 "近期登录默认数量: " + current.recentLoginCount,
                 "聊天默认数量: " + current.chatCount,
-                "uuidRecordEnable=" + current.uuidRecordEnable,
-                "uuidRecordCooldown=" + current.uuidRecordCooldown,
-                "thirdPartyYggdrasilBaseUrl=" + current.thirdPartyYggdrasilBaseUrl,
+                "UUID 记录启用: " + current.uuidRecordEnable,
+                "UUID 记录冷却: " + current.uuidRecordCooldown + " h",
+                "第三方 Yggdrasil 地址: " + current.thirdPartyYggdrasilBaseUrl,
                 "自动备份间隔: " + current.backupInterval + " h");
     }
 
-    private void scan() {
+    private void scanStat() {
         int queued = listener.scanAllOnlinePlayers();
         if (queued < 0) {
             print("只有处于 Game 状态时才能手动扫描 Stat。");
@@ -661,18 +680,30 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print("已将 " + queued + " 名在线玩家加入 Stat 扫描队列。");
     }
 
+    private void scanUuid() {
+        int queued = listener.scanAllOnlineUuidPlayers();
+        if (queued == -1) {
+            print("只有处于 Game 状态时才能手动扫描 UUID。");
+        } else if (queued == -2) {
+            print("UUID 扫描正在运行。");
+        } else {
+            print("已将 " + queued + " 名在线玩家加入 UUID 扫描队列。");
+        }
+    }
+
     private void status(boolean full) {
         List<String> lines = new ArrayList<>();
+        lines.add("Plugin Version: " + XinPlayerMonitor.pluginVersion());
         PlayerMonitorListener.StatScanStatus scan = listener.statScanStatus();
         if (full) {
-            lines.add("Game Active: " + scan.gameActive());
-            lines.add("Reconnect Pending: " + scan.reconnectPending());
-            lines.add("Roster Reconciling: " + scan.rosterReconciling());
-            lines.add("Force Fresh Roster: " + scan.forceFreshRoster());
-            lines.add("Reconnect Generation: " + scan.reconnectGeneration());
+            lines.add("Game Active: " + countValue(scan.gameActive()));
+            lines.add("Reconnect Pending: " + countValue(scan.reconnectPending()));
+            lines.add("Roster Reconciling: " + countValue(scan.rosterReconciling()));
+            lines.add("Force Fresh Roster: " + countValue(scan.forceFreshRoster()));
+            lines.add("Reconnect Generation: " + countValue(scan.reconnectGeneration()));
             lines.add("Last Disconnect: " + statusTime(scan.lastDisconnectAt()));
-            lines.add("Bot Roster: " + scan.botRoster());
-            lines.add("Monitor Roster: " + scan.monitorRoster());
+            lines.add("Bot Roster: " + countValue(scan.botRoster()));
+            lines.add("Monitor Roster: " + countValue(scan.monitorRoster()));
             lines.add("Roster Drift: " + statusValue("missing", scan.missingFromMonitor())
                     + ", " + statusValue("extra", scan.extraInMonitor()));
             lines.add("Stat 扫描: " + statusValue("online", scan.onlinePlayers())
@@ -681,12 +712,12 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     + ", " + statusValue("active", scan.activeCycles())
                     + ", " + statusValue("waiting-response", scan.waitingResponse()));
             lines.add("Chat Pipeline:");
-            lines.add("  system received:   " + scan.systemChatReceived());
-            lines.add("  public parsed:     " + scan.publicChatParsed());
-            lines.add("  monitor accepted:  " + scan.chatAcceptedByPlayerMonitor());
-            lines.add("  rejected:          " + scan.chatRejected());
-            lines.add("  parse failed:      " + scan.chatParseFailed());
-            lines.add("  db failed:         " + scan.chatDbFailed());
+            lines.add("  system received:   " + countValue(scan.systemChatReceived()));
+            lines.add("  public parsed:     " + countValue(scan.publicChatParsed()));
+            lines.add("  monitor accepted:  " + countValue(scan.chatAcceptedByPlayerMonitor()));
+            lines.add("  rejected:          " + countValue(scan.chatRejected()));
+            lines.add("  parse failed:      " + countValue(scan.chatParseFailed()));
+            lines.add("  db failed:         " + countValue(scan.chatDbFailed()));
         } else {
             lines.add("连接状态: " + statusValue("游戏活跃", scan.gameActive())
                     + ", " + statusValue("等待重连", scan.reconnectPending())
@@ -713,7 +744,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         try {
             DatabaseHealth health = service.databaseHealth();
             if (full) {
-                lines.add("  db committed:      " + health.chatCommitted());
+                lines.add("  db committed:      " + countValue(health.chatCommitted()));
             } else {
                 lines.add("Chat Writes: " + statusValue("db committed", health.chatCommitted())
                         + ", " + statusValue("queue rejected", health.chatQueueRejected()));
@@ -743,8 +774,9 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                         + " / " + statusValue("alive", health.writerAlive())
                         + " / " + statusValue("recovering", health.writerRecovering())
                         + " / " + statusValue("stalled", health.writerStalled()));
-                lines.add("SQLite queue: " + health.queueSize() + " / " + health.queueCapacity());
-                lines.add("Peak queue: " + health.queueHighWaterMark());
+                lines.add("SQLite queue: " + countValue(health.queueSize()) + " / "
+                        + countValue(health.queueCapacity()));
+                lines.add("Peak queue: " + countValue(health.queueHighWaterMark()));
                 lines.add("Queue growth: " + statusValue("1m", signed(health.queueDelta1m()))
                         + ", " + statusValue("5m", signed(health.queueDelta5m())));
             } else {
@@ -753,7 +785,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                         + ", " + statusValue("recovering", health.writerRecovering())
                         + ", " + statusValue("stalled", health.writerStalled())
                         + ", " + statusValue("recoveries", health.writerRecoveryCount()));
-                lines.add("SQLite queue: " + health.queueSize() + " / " + health.queueCapacity()
+                lines.add("SQLite queue: " + countValue(health.queueSize()) + " / " + countValue(health.queueCapacity())
                         + ", " + statusValue("peak", health.queueHighWaterMark())
                         + ", " + statusValue("1m", signed(health.queueDelta1m()))
                         + ", " + statusValue("5m", signed(health.queueDelta5m())));
@@ -766,10 +798,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 lines.add("最近UUID写入: " + statusTime(health.lastUuidWrittenAt()));
             } else {
                 lines.add("最近写入：");
-                lines.add("聊天=" + statusTime(health.lastChatCommittedAt()));
-                lines.add("会话=" + statusTime(health.lastSessionCommittedAt()));
-                lines.add("Stat=" + statusTime(health.lastStatCommittedAt()));
-                lines.add("UUID=" + statusTime(health.lastUuidWrittenAt()));
+                lines.add("> 聊天=" + statusTime(health.lastChatCommittedAt()));
+                lines.add("> 会话=" + statusTime(health.lastSessionCommittedAt()));
+                lines.add("> Stat=" + statusTime(health.lastStatCommittedAt()));
+                lines.add("> UUID=" + statusTime(health.lastUuidWrittenAt()));
             }
             lines.add("最近失败: " + statusTime(health.lastFailureAt()));
             if (health.lastFailureAt() > 0 && health.lastFailureMessage() != null
@@ -780,7 +812,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 lines.add("Chat 写入: " + statusValue("db committed", health.chatCommitted())
                         + ", " + statusValue("db failed", health.chatDbFailed())
                         + ", " + statusValue("queue rejected", health.chatQueueRejected()));
-                lines.add("Writer recoveries: " + health.writerRecoveryCount());
+                lines.add("Writer recoveries: " + countValue(health.writerRecoveryCount()));
             }
             lines.add((full ? "失败事件: " : "Failed events: ")
                     + statusValue("pending", health.pendingFailedEvents())
@@ -791,6 +823,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             lines.add("数据库文件: " + (full ? "db=" : "主库=") + humanBytes(health.databaseBytes())
                     + ", " + (full ? "wal=" : "WAL=") + humanBytes(health.walBytes())
                     + ", " + (full ? "shm=" : "SHM=") + humanBytes(health.shmBytes()));
+            lines.add("Database Version: v" + SQLiteSchema.VERSION);
         } catch (IOException error) {
             lines.add("数据库健康信息: 无法读取 - " + error.getMessage());
         }
@@ -812,7 +845,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                         + statusValue(full ? "running" : "运行", backup.schedulerRunning())
                         + ", " + statusValue(full ? "in-progress" : "进行中", backup.backupInProgress())
                         + ", " + statusValue(full ? "interval" : "间隔", backup.intervalHours()) + " h");
-                lines.add("备份数量: " + backup.backupCount() + " / " + backup.maxBackupCount());
+                lines.add("备份数量: " + countValue(backup.backupCount()) + " / " + countValue(backup.maxBackupCount()));
                 lines.add("最近备份: " + (backup.lastBackupAt() <= 0
                         ? "无" : backup.lastBackupFile() + " @ " + statusTime(backup.lastBackupAt())));
                 lines.add("下次备份: " + statusTime(backup.nextBackupAt()));
@@ -976,7 +1009,11 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void playerDataUuidField(String label, StoredPlayerIdentity identity) {
-        print(CYAN + label + RESET + uuidValue(identity));
+        if (identity == null || identity.serverUuid() == null || identity.serverUuid().isBlank()) {
+            print(CYAN + label + RESET + "无");
+            return;
+        }
+        print(CYAN + label + RESET + UUID_VALUE_COLOR + identity.serverUuid() + RESET);
     }
 
     private void playerDataPlainField(String label, String value) {
@@ -1005,9 +1042,14 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private void uuid(String playerName, Optional<StoredPlayerIdentity> identity) {
-        report("uuid", List.of(
-                "玩家: " + playerName,
-                "uuid: " + uuidValue(identity.orElse(null))));
+        StoredPlayerIdentity value = identity.orElse(null);
+        print(SectionFormatter.header("uuid"));
+        print("");
+        print("  " + CYAN + "玩家: " + RESET + PLAYER_COLOR + playerName + RESET);
+        print("  " + CYAN + "uuid: " + RESET + uuidValue(value));
+        print("    " + CYAN + "记录时间: " + RESET + uuidTime(value == null ? null : value.uuidLastWrittenAt()));
+        print("    " + CYAN + "最后检查时间: " + RESET + uuidTime(value == null ? null : value.uuidLastCheckedAt()));
+        print(SectionFormatter.divider("uuid"));
         if (listener != null) {
             listener.refreshUuidIfEligible(playerName);
         }
@@ -1017,10 +1059,11 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         if (identity == null || identity.serverUuid() == null || identity.serverUuid().isBlank()) {
             return "无";
         }
-        if (identity.uuidLastWrittenAt() == null || identity.uuidLastWrittenAt() <= 0L) {
-            return identity.serverUuid();
-        }
-        return identity.serverUuid() + " (" + YELLOW + format(identity.uuidLastWrittenAt()) + RESET + ")";
+        return identity.serverUuid();
+    }
+
+    private String uuidTime(Long timestamp) {
+        return timestamp == null || timestamp <= 0L ? "无" : YELLOW + format(timestamp) + RESET;
     }
 
     private void statField(String label, String value) {
@@ -1121,7 +1164,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     private void help() {
         print(colorUsage("Usage: playermonitor setting <option> <value>"));
-        print(colorUsage("Usage: playermonitor scan-stat"));
+        print(colorUsage("Usage: playermonitor scan stat"));
+        print(colorUsage("Usage: playermonitor scan uuid"));
         print(colorUsage("Usage: playermonitor status [full]"));
         print(colorUsage("Usage: playermonitor backup [now|status|list|verify <filename>|limit <count>]"));
         playerHelp();
@@ -1302,7 +1346,11 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     }
 
     private static String statusValue(String label, Object value) {
-        return label + "=" + COUNT_COLOR + value + RESET;
+        return label + "=" + countValue(value);
+    }
+
+    private static String countValue(Object value) {
+        return COUNT_COLOR + value + RESET;
     }
 
     private static String kd(Integer kills, Integer deaths) {

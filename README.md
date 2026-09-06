@@ -2,7 +2,7 @@
 
 XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人进入 `Game` 状态后，插件会记录玩家登录、登出、公共聊天和 Stat，并将数据持续写入 SQLite。
 
-当前版本：**v1.5.6**
+当前版本：**v1.5.7**
 
 ## 主要功能
 
@@ -31,7 +31,7 @@ XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人�
 
 1. 停止 XinBot。
 2. 备份完整的 `playermonitor/` 目录。
-3. 将 `XinPlayerMonitor-v1.5.6.jar` 放入 XinBot 插件目录并替换旧版本。
+3. 将 `XinPlayerMonitor-v1.5.7.jar` 放入 XinBot 插件目录并替换旧版本。
 4. 启动 XinBot。
 5. 执行 `playermonitor status` 检查数据库、writer、失败事件和备份状态。
 6. 执行 `playermonitor backup now` 创建一份升级后的人工备份。
@@ -54,7 +54,8 @@ xpm setting
 ### 手动扫描在线玩家 Stat
 
 ```text
-playermonitor scan-stat
+playermonitor scan stat
+playermonitor scan uuid
 ```
 
 手动扫描只会在机器人处于 `Game` 状态时执行。它不受 `stat-enabled` 和自动扫描冷却限制影响；已有批次运行时会合并、去重并提高尚未完成目标的优先级。
@@ -283,7 +284,7 @@ SQLite schema v4 在 `players` 中分别保存服务器、离线、Mojang 和第
 2. 普通加入玩家；
 3. 进入 `Game` 时扫描到的在线玩家。
 
-手动 `scan-stat` 优先级最高。
+手动 `scan stat` 优先级最高；`scan uuid` 会忽略 UUID 冷却，按 10 ms 间隔逐个调度当前 Game 在线玩家，重叠的完整 UUID 扫描会被忽略。
 
 ## 自动备份
 
@@ -353,7 +354,7 @@ mvn clean test package
 生成文件：
 
 ```text
-target/XinPlayerMonitor-v1.5.6.jar
+target/XinPlayerMonitor-v1.5.7.jar
 ```
 
 升级发布前至少验证：

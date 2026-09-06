@@ -42,16 +42,18 @@ class PlayerMonitorManagementCommandTest {
 
     @Test
     void highlightsScanStatAsLavenderRootCommand() {
-        String[] args = {"scan-stat"};
+        String[] args = {"scan"};
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(args, 0));
+        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(
+                new String[]{"scan", "stat"}, 1));
     }
 
 
     @Test
     void scanStatDoesNotOfferPlayerActionsAfterTheCompleteCommand() {
-        String[] invalidExtraArgument = {"scan-stat", "stat"};
+        String[] invalidExtraArgument = {"scan", "stat", "extra"};
         assertEquals(AttributedStyle.DEFAULT.getStyle(),
-                PlayerMonitorManagementCommand.styleForArgument(invalidExtraArgument, 1).getStyle());
+                PlayerMonitorManagementCommand.styleForArgument(invalidExtraArgument, 2).getStyle());
     }
 
     @Test
@@ -75,8 +77,9 @@ class PlayerMonitorManagementCommandTest {
 
     @Test
     void scanStatUsageUsesLavender() {
-        String colored = PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor scan-stat");
-        assertEquals(1, count(colored, "38;5;183mscan-stat"));
+        String colored = PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor scan stat");
+        assertEquals(1, count(colored, "38;5;183mscan"));
+        assertEquals(1, count(colored, "38;5;183mstat"));
     }
 
     @Test
@@ -335,9 +338,9 @@ class PlayerMonitorManagementCommandTest {
                 "显示时区: UTC+08:00",
                 "近期登录默认数量: 15",
                 "聊天默认数量: 10",
-                "uuidRecordEnable=false",
-                "uuidRecordCooldown=168",
-                "thirdPartyYggdrasilBaseUrl=https://littleskin.cn/api/yggdrasil",
+                "UUID 记录启用: false",
+                "UUID 记录冷却: 168 h",
+                "第三方 Yggdrasil 地址: https://littleskin.cn/api/yggdrasil",
                 "自动备份间隔: 168 h"),
                 PlayerMonitorManagementCommand.settingStatusLines(current));
     }
@@ -426,7 +429,7 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(output.contains(SectionFormatter.header("Player Data")));
             assertTrue(output.contains(SectionFormatter.divider("Player Data")));
             String cachedValue = storedIdentity
-                    ? serverUuid + " (\u001B[33m1970-01-01 00:00:01\u001B[0m)" : "无";
+                    ? "\u001B[38;5;29m" + serverUuid + "\u001B[0m" : "无";
             assertTrue(output.contains("\u001B[36muuid：\u001B[0m" + cachedValue));
             assertEquals(List.of("playerinfo"), command.onTabComplete(null, "playermonitor",
                     new String[]{"Steve", "playerinfo"}));
@@ -471,8 +474,9 @@ class PlayerMonitorManagementCommandTest {
             command.onCommand(null, "playermonitor", new String[]{"setting"});
             String rendered = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
                     .reduce("", (left, right) -> left + "\n" + right);
-            assertTrue(rendered.contains("uuidRecordEnable=true"));
-            assertTrue(rendered.contains("uuidRecordCooldown=72"));
+            String plain = rendered.replaceAll("\\u001B\\[[0-9;]*m", "");
+            assertTrue(plain.contains("UUID 记录启用: true"));
+            assertTrue(plain.contains("UUID 记录冷却: 72 h"));
 
             MonitorSettingsStore reloaded = new MonitorSettingsStore(directory);
             reloaded.initialize();
@@ -505,9 +509,11 @@ class PlayerMonitorManagementCommandTest {
             String rendered = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
                     .reduce("", (left, right) -> left + "\n" + right);
             assertTrue(rendered.contains(SectionFormatter.header("uuid")));
-            assertTrue(rendered.contains("\u001B[36m玩家:\u001B[0m \u001B[38;5;29mSteve\u001B[0m"));
-            assertTrue(rendered.contains("\u001B[36muuid:\u001B[0m "
-                    + "98465ebe-e619-3b1d-8b25-98352b6abbb9 (\u001B[33m1970-01-01 00:00:05\u001B[0m)"));
+            assertTrue(rendered.contains("\u001B[36m玩家: \u001B[0m\u001B[38;5;29mSteve\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36muuid: \u001B[0m"
+                    + "98465ebe-e619-3b1d-8b25-98352b6abbb9"));
+            assertTrue(rendered.contains("\u001B[36m记录时间: \u001B[0m\u001B[33m1970-01-01 00:00:05\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m最后检查时间: \u001B[0m\u001B[33m1970-01-01 00:00:05\u001B[0m"));
             assertFalse(rendered.contains("\u001B[38;5;215m98465ebe"));
             assertTrue(rendered.contains(SectionFormatter.divider("uuid")));
 
@@ -516,7 +522,7 @@ class PlayerMonitorManagementCommandTest {
             command.onCommand(null, "playermonitor", new String[]{"Steve", "uuid"});
             String missing = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
                     .reduce("", (left, right) -> left + "\n" + right);
-            assertTrue(missing.contains("\u001B[36muuid:\u001B[0m 无"));
+            assertTrue(missing.contains("\u001B[36muuid: \u001B[0m无"));
             assertFalse(missing.contains("\u001B[33m无"));
         } finally {
             service.close();
@@ -551,7 +557,7 @@ class PlayerMonitorManagementCommandTest {
 
             assertTrue(rendered.contains("\u001B[36m玩家：\u001B[0m\u001B[33mSteve\u001B[0m"));
             assertTrue(rendered.contains("\u001B[36muuid：\u001B[0m"
-                    + "98465ebe-e619-3b1d-8b25-98352b6abbb9 (\u001B[33m1970-01-01 00:00:05\u001B[0m)"));
+                    + "\u001B[38;5;29m98465ebe-e619-3b1d-8b25-98352b6abbb9\u001B[0m"));
             assertFalse(rendered.contains("\u001B[38;5;215m98465ebe"));
             assertTrue(rendered.contains("\u001B[36m> 发言次数：\u001B[0m\u001B[38;5;215m4次\u001B[0m"));
             assertTrue(rendered.contains("\u001B[36m> 击杀数：\u001B[0m\u001B[38;5;215m1人\u001B[0m"));
@@ -613,7 +619,12 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(compactRendered.contains(
                     "聊天=\u001B[33m1970-01-01 00:00:02\u001B[0m"));
             assertTrue(compactRendered.contains(
-                    "Stat=\u001B[33m1970-01-01 00:00:04\u001B[0m\n  UUID=\u001B[33m1970-01-01 00:00:04\u001B[0m"));
+                    "> 聊天=\u001B[33m1970-01-01 00:00:02\u001B[0m"));
+            String compactPlain = compactRendered.replaceAll("\\u001B\\[[0-9;]*m", "");
+            assertTrue(compactPlain.contains("Plugin Version: v1.5.7"));
+            assertTrue(compactPlain.contains("Database Version: v4"));
+            assertTrue(compactRendered.contains(
+                    "> Stat=\u001B[33m1970-01-01 00:00:04\u001B[0m\n  > UUID=\u001B[33m1970-01-01 00:00:04\u001B[0m"));
             assertTrue(compactRendered.contains(
                     "\u001B[36m最近提交:\u001B[0m \u001B[33m1970-01-01 00:00:01\u001B[0m"));
             assertTrue(compactRendered.contains(
@@ -654,6 +665,10 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(fullRendered.contains(
                     "\u001B[36mLast Disconnect:\u001B[0m \u001B[33m1970-01-01 00:00:06\u001B[0m"));
             assertFalse(fullRendered.contains("\u001B[33mLast Disconnect"));
+            assertTrue(fullRendered.contains(
+                    "\u001B[36mGame Active:\u001B[0m \u001B[38;5;215mfalse\u001B[0m"));
+            assertTrue(fullRendered.contains(
+                    "\u001B[36mBot Roster:\u001B[0m \u001B[38;5;215m0\u001B[0m"));
             assertTrue(fullRendered.contains(
                     "missing=\u001B[38;5;215m0\u001B[0m, extra=\u001B[38;5;215m0\u001B[0m"));
             assertTrue(fullRendered.contains(
