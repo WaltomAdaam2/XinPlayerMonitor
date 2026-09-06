@@ -9,12 +9,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.helpers.NOPLogger;
+import xin.bbtt.mcbot.Bot;
 import xin.bbtt.mcbot.Server;
 import xin.bbtt.mcbot.events.DisconnectEvent;
 import xin.bbtt.mcbot.events.PlayerJoinEvent;
 import xin.bbtt.mcbot.events.PlayerLeaveEvent;
 import xin.bbtt.mcbot.events.ServerChangeEvent;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,8 +27,10 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -43,6 +47,121 @@ class PlayerMonitorListenerUuidTest {
     void tearDown() {
         listeners.forEach(PlayerMonitorListener::close);
         services.forEach(PlayerMonitorService::close);
+        Bot.INSTANCE.players.clear();
+    }
+
+    @Test
+    void disabledManualUuidScanKeepsRetryForced() throws Exception {
+        TestContext context = context(false, 0, 1_000L);
+        GameProfile profile = profile("ManualDisabled", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        Bot.INSTANCE.players.put(profile.getId(), profile);
+        context.resolver.failNextLookup();
+
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> context.resolver.calls.get() == 1
+                && context.listener.scheduledUuidCheckCountForTesting() == 1);
+        assertTrue(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()));
+        assertTrue(context.listener.manualUuidScanActiveForTesting());
+        assertEquals(-2, context.listener.scanAllOnlineUuidPlayers());
+
+        context.listener.runScheduledUuidCheckForTesting(profile.getName());
+        waitUntil(() -> context.resolver.calls.get() == 2
+                && !context.listener.manualUuidScanActiveForTesting());
+
+        assertEquals(profile.getId().toString(),
+                context.service.playerIdentity(profile.getName()).orElseThrow().serverUuid());
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+    }
+
+    @Test
+    void manualUuidRetryIgnoresActiveNormalCooldown() throws Exception {
+        TestContext context = context(true, 168, 1_000L);
+        GameProfile profile = profile("ManualCooldown", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        context.service.recordIdentityCheck(profile.getName(),
+                context.resolver.resolve(profile.getName(), profile.getId(), null), 1_000L);
+        context.resolver.calls.set(0);
+        context.resolver.failNextLookup();
+        Bot.INSTANCE.players.put(profile.getId(), profile);
+
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> context.resolver.calls.get() == 1
+                && context.listener.scheduledUuidCheckCountForTesting() == 1);
+        assertTrue(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()));
+
+        context.listener.runScheduledUuidCheckForTesting(profile.getName());
+        waitUntil(() -> context.resolver.calls.get() == 2
+                && !context.listener.manualUuidScanActiveForTesting());
+
+        assertEquals(1, context.listener.scheduledUuidCheckCountForTesting());
+        assertFalse(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()),
+                "the next periodic refresh must return to automatic semantics");
+    }
+
+    @Test
+    void serverUuidChangeDuringManualScanKeepsReplacementForced() throws Exception {
+        TestContext context = context(false, 168, 1_000L);
+        GameProfile initial = profile("ManualChanged", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        GameProfile changed = profile("ManualChanged", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        Bot.INSTANCE.players.put(initial.getId(), initial);
+        context.resolver.pause();
+
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        assertTrue(context.resolver.called.await(2, TimeUnit.SECONDS));
+        Bot.INSTANCE.players.clear();
+        Bot.INSTANCE.players.put(changed.getId(), changed);
+        context.listener.markOnlineForTesting(changed);
+        assertTrue(context.listener.scheduledUuidCheckForcedForTesting(changed.getName()));
+        assertEquals(changed.getId(), context.listener.scheduledServerUuidForTesting(changed.getName()));
+        assertEquals(changed.getId(), context.listener.onlineServerUuidForTesting(changed.getName()));
+        assertTrue(context.listener.manualUuidScanActiveForTesting());
+
+        context.listener.runScheduledUuidCheckForTesting(changed.getName());
+        context.resolver.resume();
+        waitUntil(() -> context.resolver.calls.get() >= 2);
+        waitUntil(() -> !context.listener.manualUuidScanActiveForTesting());
+
+        assertEquals(2, context.resolver.calls.get());
+        assertEquals(changed.getId().toString(),
+                context.service.playerIdentity(changed.getName()).orElseThrow().serverUuid());
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+    }
+
+    @Test
+    void manualForceDoesNotLeakIntoLaterAutomaticRefresh() throws Exception {
+        TestContext context = context(false, 168, 1_000L);
+        GameProfile manual = profile("NoForceLeak", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        Bot.INSTANCE.players.put(manual.getId(), manual);
+
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> context.resolver.calls.get() == 1
+                && !context.listener.manualUuidScanActiveForTesting());
+
+        GameProfile changed = profile("NoForceLeak", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        context.listener.onPlayerJoin(new PlayerJoinEvent(changed));
+
+        assertEquals(1, context.resolver.calls.get());
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+    }
+
+    @Test
+    void leaveDisconnectServerSwitchAndShutdownCancelManualUuidRetries() throws Exception {
+        TestContext leave = manualRetryContext("ManualLeave");
+        leave.listener.onPlayerLeave(new PlayerLeaveEvent(
+                profile("ManualLeave", "98465ebe-e619-3b1d-8b25-98352b6abbb9")));
+        assertManualRetryCancelled(leave, "ManualLeave");
+
+        TestContext disconnect = manualRetryContext("ManualDisconnect");
+        disconnect.listener.onDisconnect(new DisconnectEvent(Component.text("network")));
+        assertManualRetryCancelled(disconnect, "ManualDisconnect");
+
+        TestContext switchServer = manualRetryContext("ManualSwitch");
+        switchServer.listener.onServerChange(new ServerChangeEvent(Server.Login, Server.Game));
+        assertManualRetryCancelled(switchServer, "ManualSwitch");
+
+        TestContext shutdown = manualRetryContext("ManualShutdown");
+        shutdown.listener.close();
+        listeners.remove(shutdown.listener);
+        assertManualRetryCancelled(shutdown, "ManualShutdown");
     }
 
     @Test
@@ -55,6 +174,22 @@ class PlayerMonitorListenerUuidTest {
         awaitUuidTasks(context);
         assertEquals(0, context.resolver.calls.get());
         assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+    }
+
+    @Test
+    void automaticUuidRefreshStillWaitsForActiveCooldown() throws Exception {
+        TestContext context = context(true, 168, 1_000L);
+        GameProfile profile = profile("AutomaticCooldown", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        context.service.recordIdentityCheck(profile.getName(),
+                context.resolver.resolve(profile.getName(), profile.getId(), null), 1_000L);
+        context.resolver.calls.set(0);
+
+        context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        awaitUuidTasks(context);
+
+        assertEquals(0, context.resolver.calls.get());
+        assertEquals(1, context.listener.scheduledUuidCheckCountForTesting());
+        assertFalse(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()));
     }
 
     @Test
@@ -369,6 +504,26 @@ class PlayerMonitorListenerUuidTest {
         return context;
     }
 
+    private TestContext manualRetryContext(String name) throws Exception {
+        Bot.INSTANCE.players.clear();
+        TestContext context = context(false, 168, 1_000L);
+        GameProfile profile = profile(name, "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        Bot.INSTANCE.players.put(profile.getId(), profile);
+        context.resolver.failNextLookup();
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> context.resolver.calls.get() == 1
+                && context.listener.scheduledUuidCheckCountForTesting() == 1);
+        assertTrue(context.listener.scheduledUuidCheckForcedForTesting(name));
+        return context;
+    }
+
+    private static void assertManualRetryCancelled(TestContext context, String playerName) throws Exception {
+        waitUntil(() -> !context.listener.manualUuidScanActiveForTesting());
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+        context.listener.runScheduledUuidCheckForTesting(playerName);
+        assertEquals(1, context.resolver.calls.get());
+    }
+
     private TestContext context(boolean enabled, int cooldown, long now) throws Exception {
         return context(enabled, cooldown, new AtomicLong(now));
     }
@@ -400,6 +555,16 @@ class PlayerMonitorListenerUuidTest {
         context.listener.awaitUuidTasksForTesting().get(2, TimeUnit.SECONDS);
     }
 
+    private static void waitUntil(BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() >= deadline) {
+                throw new AssertionError("condition was not met before timeout");
+            }
+            Thread.sleep(10L);
+        }
+    }
+
     private record TestContext(PlayerMonitorService service, PlayerMonitorListener listener,
                                MonitorSettingsStore settings,
                                FakeResolver resolver) {
@@ -410,9 +575,11 @@ class PlayerMonitorListenerUuidTest {
         private volatile CountDownLatch called = new CountDownLatch(1);
         private volatile CountDownLatch finished = new CountDownLatch(1);
         private volatile CountDownLatch release;
+        private final AtomicInteger failuresRemaining = new AtomicInteger();
 
         @Override
-        public IdentityResolution resolve(String playerName, UUID serverUuid, StoredPlayerIdentity previous) {
+        public IdentityResolution resolve(String playerName, UUID serverUuid, StoredPlayerIdentity previous)
+                throws IOException {
             calls.incrementAndGet();
             called.countDown();
             CountDownLatch blocker = release;
@@ -422,6 +589,10 @@ class PlayerMonitorListenerUuidTest {
                 } catch (InterruptedException error) {
                     Thread.currentThread().interrupt();
                 }
+            }
+            if (failuresRemaining.getAndUpdate(remaining -> Math.max(0, remaining - 1)) > 0) {
+                finished.countDown();
+                throw new IOException("test lookup failure");
             }
             String server = serverUuid.toString();
             IdentityResolution resolution = new IdentityResolution(server,
@@ -435,6 +606,11 @@ class PlayerMonitorListenerUuidTest {
         private void resetLatch() {
             called = new CountDownLatch(1);
             finished = new CountDownLatch(1);
+        }
+
+        private void failNextLookup() {
+            failuresRemaining.incrementAndGet();
+            resetLatch();
         }
 
         private void pause() {
