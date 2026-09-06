@@ -71,7 +71,7 @@ class PlayerMonitorListenerStatTest {
         assertEquals(1, status.onlinePlayers());
         assertEquals(0, status.queued());
         assertEquals(1, status.pendingDispatches());
-        assertEquals(0, status.activeCycles());
+        assertEquals(1, status.activeCycles());
         assertFalse(status.waitingResponse());
     }
 

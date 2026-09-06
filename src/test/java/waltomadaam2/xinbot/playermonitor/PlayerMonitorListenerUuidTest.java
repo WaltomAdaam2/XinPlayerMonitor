@@ -17,6 +17,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,6 +26,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PlayerMonitorListenerUuidTest {
     @TempDir
@@ -58,7 +62,7 @@ class PlayerMonitorListenerUuidTest {
 
         assertTrue(context.resolver.called.await(2, TimeUnit.SECONDS));
         waitUntil(() -> context.listener.scheduledUuidCheckCountForTesting() == 1);
-        PlayerIdentity identity = context.service.playerIdentity("Eligible").orElseThrow();
+        StoredPlayerIdentity identity = context.service.playerIdentity("Eligible").orElseThrow();
         assertEquals(1_000L, identity.uuidLastCheckedAt());
         assertEquals(1_000L, identity.uuidLastWrittenAt());
         assertEquals(1, context.resolver.calls.get());
@@ -74,7 +78,7 @@ class PlayerMonitorListenerUuidTest {
         now.set(2_000L);
         context.listener.runUuidCheckForTesting(profile);
 
-        PlayerIdentity identity = context.service.playerIdentity("Unchanged").orElseThrow();
+        StoredPlayerIdentity identity = context.service.playerIdentity("Unchanged").orElseThrow();
         assertEquals(2_000L, identity.uuidLastCheckedAt());
         assertEquals(1_000L, identity.uuidLastWrittenAt());
     }
@@ -93,7 +97,7 @@ class PlayerMonitorListenerUuidTest {
         context.listener.onPlayerJoin(new PlayerJoinEvent(changed));
 
         assertTrue(context.resolver.called.await(2, TimeUnit.SECONDS));
-        PlayerIdentity identity = context.service.playerIdentity("Changed").orElseThrow();
+        StoredPlayerIdentity identity = context.service.playerIdentity("Changed").orElseThrow();
         assertEquals(changed.getId().toString(), identity.serverUuid());
         assertEquals(2_000L, identity.uuidLastWrittenAt());
     }
@@ -147,7 +151,7 @@ class PlayerMonitorListenerUuidTest {
         context.resolver.resume();
         assertTrue(context.resolver.finished.await(2, TimeUnit.SECONDS));
 
-        PlayerIdentity identity = context.service.playerIdentity("InFlight").orElseThrow();
+        StoredPlayerIdentity identity = context.service.playerIdentity("InFlight").orElseThrow();
         assertEquals(null, identity.serverUuid());
         assertEquals(null, identity.uuidLastWrittenAt());
     }
@@ -175,6 +179,71 @@ class PlayerMonitorListenerUuidTest {
 
         assertFalse(context.resolver.called.await(200, TimeUnit.MILLISECONDS));
         assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+    }
+
+    @Test
+    void publicResolveReturnsRequiredRecordAndCoalescesSameName() throws Exception {
+        TestContext context = context(false, 168, 1_000L);
+        GameProfile profile = profile("PublicApi", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        context.listener.markOnlineForTesting(profile);
+        context.resolver.pause();
+
+        CompletableFuture<PlayerIdentity> first = context.listener.resolve("PublicApi");
+        CompletableFuture<PlayerIdentity> second = context.listener.resolve("publicapi");
+
+        assertSame(first, second);
+        assertTrue(context.resolver.called.await(2, TimeUnit.SECONDS));
+        context.resolver.resume();
+        PlayerIdentity identity = first.get(2, TimeUnit.SECONDS);
+        assertEquals("PublicApi", identity.name());
+        assertEquals(profile.getId(), identity.serverUuid());
+        assertEquals(PlayerIdentityType.PREMIUM, identity.type());
+        assertTrue(identity.online());
+        assertEquals(1, context.resolver.calls.get());
+    }
+
+    @Test
+    void publicResolveRejectsBlankNameAndDisabledPlugin() {
+        XinPlayerMonitor plugin = new XinPlayerMonitor();
+
+        assertThrows(CompletionException.class, () -> plugin.resolve("Alice").join());
+        TestContext context;
+        try {
+            context = context(false, 168, 1_000L);
+        } catch (Exception error) {
+            throw new AssertionError(error);
+        }
+        assertThrows(CompletionException.class, () -> context.listener.resolve(" ").join());
+    }
+
+    @Test
+    void externalIdentityConcurrencyIsBoundedToFour() throws Exception {
+        Path directory = temporaryDirectory.resolve("bounded-concurrency");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setUuidRecordEnable(false);
+        PlayerMonitorService service = new PlayerMonitorService(directory, settings);
+        service.initialize();
+        services.add(service);
+        ConcurrencyResolver resolver = new ConcurrencyResolver();
+        PlayerMonitorListener listener = new PlayerMonitorListener(service,
+                new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings, resolver,
+                System::currentTimeMillis);
+        listener.setGameActiveForTesting(true);
+        listeners.add(listener);
+        List<CompletableFuture<PlayerIdentity>> futures = new ArrayList<>();
+        for (int index = 0; index < 12; index++) {
+            String name = "Concurrent" + index;
+            GameProfile profile = new GameProfile(UUID.nameUUIDFromBytes(name.getBytes()), name);
+            listener.markOnlineForTesting(profile);
+            futures.add(listener.resolve(name));
+        }
+
+        assertTrue(resolver.fourStarted.await(2, TimeUnit.SECONDS));
+        assertEquals(4, resolver.maximum.get());
+        resolver.release.countDown();
+        CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).get(5, TimeUnit.SECONDS);
+        assertTrue(resolver.maximum.get() <= 4);
     }
 
     private TestContext scheduledContext(String name) throws Exception {
@@ -237,7 +306,7 @@ class PlayerMonitorListenerUuidTest {
         private volatile CountDownLatch release;
 
         @Override
-        public IdentityResolution resolve(String playerName, UUID serverUuid, PlayerIdentity previous) {
+        public IdentityResolution resolve(String playerName, UUID serverUuid, StoredPlayerIdentity previous) {
             calls.incrementAndGet();
             called.countDown();
             CountDownLatch blocker = release;
@@ -252,7 +321,7 @@ class PlayerMonitorListenerUuidTest {
             IdentityResolution resolution = new IdentityResolution(server,
                     UUID.nameUUIDFromBytes(("OfflinePlayer:" + playerName).getBytes()).toString(),
                     IdentityResolution.Lookup.found(server), IdentityResolution.Lookup.notFound(),
-                    IdentityType.PREMIUM, true);
+                    PlayerIdentityType.PREMIUM, true);
             finished.countDown();
             return resolution;
         }
@@ -269,6 +338,31 @@ class PlayerMonitorListenerUuidTest {
         private void resume() {
             release.countDown();
             release = null;
+        }
+    }
+
+    private static final class ConcurrencyResolver implements PlayerIdentityResolver {
+        private final AtomicInteger active = new AtomicInteger();
+        private final AtomicInteger maximum = new AtomicInteger();
+        private final CountDownLatch fourStarted = new CountDownLatch(4);
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public IdentityResolution resolve(String playerName, UUID serverUuid, StoredPlayerIdentity previous) {
+            int concurrent = active.incrementAndGet();
+            maximum.accumulateAndGet(concurrent, Math::max);
+            fourStarted.countDown();
+            try {
+                release.await(3, TimeUnit.SECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } finally {
+                active.decrementAndGet();
+            }
+            String value = serverUuid.toString();
+            return new IdentityResolution(value, value,
+                    IdentityResolution.Lookup.notChecked(), IdentityResolution.Lookup.notChecked(),
+                    PlayerIdentityType.OFFLINE, true);
         }
     }
 }

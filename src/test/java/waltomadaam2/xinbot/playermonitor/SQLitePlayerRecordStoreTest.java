@@ -1066,30 +1066,30 @@ class SQLitePlayerRecordStoreTest {
         String offlineUuid = "11111111-1111-3111-8111-111111111111";
         IdentityResolution initial = new IdentityResolution(serverUuid, offlineUuid,
                 IdentityResolution.Lookup.found(serverUuid), IdentityResolution.Lookup.notFound(),
-                IdentityType.PREMIUM, true);
+                PlayerIdentityType.PREMIUM, true);
 
-        PlayerIdentity first = service.recordIdentityCheck("Steve", initial, 1_000L);
+        StoredPlayerIdentity first = service.recordIdentityCheck("Steve", initial, 1_000L);
         assertEquals(1_000L, first.uuidLastCheckedAt());
         assertEquals(1_000L, first.uuidLastWrittenAt());
 
-        PlayerIdentity unchanged = service.recordIdentityCheck("Steve", initial, 2_000L);
+        StoredPlayerIdentity unchanged = service.recordIdentityCheck("Steve", initial, 2_000L);
         assertEquals(2_000L, unchanged.uuidLastCheckedAt());
         assertEquals(1_000L, unchanged.uuidLastWrittenAt());
 
         String changedUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         IdentityResolution changed = new IdentityResolution(changedUuid, offlineUuid,
                 IdentityResolution.Lookup.notFound(), IdentityResolution.Lookup.found(changedUuid),
-                IdentityType.THIRD_PARTY, true);
-        PlayerIdentity updated = service.recordIdentityCheck("Steve", changed, 3_000L);
+                PlayerIdentityType.THIRD_PARTY, true);
+        StoredPlayerIdentity updated = service.recordIdentityCheck("Steve", changed, 3_000L);
         assertEquals(changedUuid, updated.serverUuid());
-        assertEquals(IdentityType.THIRD_PARTY, updated.identityType());
+        assertEquals(PlayerIdentityType.THIRD_PARTY, updated.identityType());
         assertEquals(3_000L, updated.uuidLastCheckedAt());
         assertEquals(3_000L, updated.uuidLastWrittenAt());
         service.close();
 
         PlayerMonitorService reopened = service(directory);
         reopened.initialize();
-        PlayerIdentity persisted = reopened.playerIdentity("Steve").orElseThrow();
+        StoredPlayerIdentity persisted = reopened.playerIdentity("Steve").orElseThrow();
         assertEquals(changedUuid, persisted.serverUuid());
         assertEquals(3_000L, persisted.uuidLastCheckedAt());
         assertEquals(3_000L, persisted.uuidLastWrittenAt());
@@ -1103,13 +1103,13 @@ class SQLitePlayerRecordStoreTest {
         String serverUuid = "98465ebe-e619-3b1d-8b25-98352b6abbb9";
         IdentityResolution initial = new IdentityResolution(serverUuid, "offline",
                 IdentityResolution.Lookup.found(serverUuid), IdentityResolution.Lookup.notFound(),
-                IdentityType.PREMIUM, true);
+                PlayerIdentityType.PREMIUM, true);
         service.recordIdentityCheck("Steve", initial, 1_000L);
 
         IdentityResolution failed = new IdentityResolution(serverUuid, "offline",
                 IdentityResolution.Lookup.error(), IdentityResolution.Lookup.error(),
-                IdentityType.PREMIUM, false);
-        PlayerIdentity preserved = service.recordIdentityCheck("Steve", failed, 2_000L);
+                PlayerIdentityType.PREMIUM, false);
+        StoredPlayerIdentity preserved = service.recordIdentityCheck("Steve", failed, 2_000L);
 
         assertEquals(serverUuid, preserved.mojangUuid());
         assertEquals(1_000L, preserved.mojangCheckedAt());
@@ -1138,7 +1138,7 @@ class SQLitePlayerRecordStoreTest {
         PlayerMonitorService upgraded = service(directory);
         upgraded.initialize();
         assertEquals(1, upgraded.chatCount("Historical"));
-        PlayerIdentity identity = upgraded.playerIdentity("Historical").orElseThrow();
+        StoredPlayerIdentity identity = upgraded.playerIdentity("Historical").orElseThrow();
         assertEquals(null, identity.uuidLastCheckedAt());
         assertEquals(null, identity.uuidLastWrittenAt());
         try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {

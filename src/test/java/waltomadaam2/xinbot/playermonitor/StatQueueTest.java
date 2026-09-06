@@ -22,12 +22,11 @@ class StatQueueTest {
 
         StatQueue queue = new StatQueue(
                 () -> true,
-                ignored -> true,
                 () -> 1L,
                 command -> {
-                    sent.add(command.substring("stat ".length()));
+                    sent.add(command.playerName());
                     allSent.countDown();
-                    if ("First".equals(command.substring("stat ".length()))) {
+                    if ("First".equals(command.playerName())) {
                         firstStarted.countDown();
                         try {
                             assertTrue(releaseFirst.await(2, TimeUnit.SECONDS));
@@ -65,7 +64,6 @@ class StatQueueTest {
         AtomicInteger sends = new AtomicInteger();
         StatQueue queue = new StatQueue(
                 () -> true,
-                ignored -> true,
                 () -> 1L,
                 command -> {
                     sends.incrementAndGet();
@@ -102,10 +100,9 @@ class StatQueueTest {
 
         StatQueue queue = new StatQueue(
                 () -> true,
-                ignored -> true,
                 () -> 1L,
                 command -> {
-                    String player = command.substring("stat ".length());
+                    String player = command.playerName();
                     sent.add(player);
                     allSent.countDown();
                     if ("Blocker".equals(player)) {

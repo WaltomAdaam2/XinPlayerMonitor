@@ -306,6 +306,7 @@ class PlayerMonitorManagementCommandTest {
                 "Usage: playermonitor setting chat-count <count>",
                 "Usage: playermonitor setting uuidRecordEnable <true|false>",
                 "Usage: playermonitor setting uuidRecordCooldown <hour>",
+                "Usage: playermonitor setting thirdPartyYggdrasilBaseUrl <url>",
                 "Usage: playermonitor setting backup-interval <hour>"),
                 PlayerMonitorManagementCommand.settingUsageLines());
 
@@ -331,6 +332,7 @@ class PlayerMonitorManagementCommandTest {
                 "聊天默认数量: 10",
                 "uuidRecordEnable=false",
                 "uuidRecordCooldown=168",
+                "thirdPartyYggdrasilBaseUrl=https://littleskin.cn/api/yggdrasil",
                 "自动备份间隔: 168 h"),
                 PlayerMonitorManagementCommand.settingStatusLines(current));
     }
@@ -612,7 +614,7 @@ class PlayerMonitorManagementCommandTest {
         int chatCountCalls;
         int fullFindCalls;
         int overviewCalls;
-        PlayerIdentity identity = defaultIdentity();
+        StoredPlayerIdentity identity = defaultIdentity();
         long lastUuidWrittenAt = 4_500L;
 
         @Override
@@ -682,7 +684,7 @@ class PlayerMonitorManagementCommandTest {
         }
 
         @Override
-        public Optional<PlayerIdentity> playerIdentity(String playerName) {
+        public Optional<StoredPlayerIdentity> playerIdentity(String playerName) {
             return Optional.ofNullable(identity);
         }
 
@@ -698,10 +700,10 @@ class PlayerMonitorManagementCommandTest {
                     6L, 7L, 8L, 9L, 10L, 11L, 12L, 0L, 13L, 14L, 15L, 16L);
         }
 
-        private static PlayerIdentity defaultIdentity() {
-            return new PlayerIdentity("Steve", "98465ebe-e619-3b1d-8b25-98352b6abbb9",
+        private static StoredPlayerIdentity defaultIdentity() {
+            return new StoredPlayerIdentity("Steve", "98465ebe-e619-3b1d-8b25-98352b6abbb9",
                     "11111111-1111-3111-8111-111111111111", null, null,
-                    IdentityType.UNKNOWN, null, null, 5_000L, 5_000L);
+                    PlayerIdentityType.UNKNOWN, null, null, 5_000L, 5_000L);
         }
 
         @Override

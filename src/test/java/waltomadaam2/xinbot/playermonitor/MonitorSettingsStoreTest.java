@@ -41,6 +41,7 @@ class MonitorSettingsStoreTest {
         settings.setMaxCachedHistory(350);
         settings.setUuidRecordEnable(true);
         settings.setUuidRecordCooldown(72);
+        settings.setThirdPartyYggdrasilBaseUrl("https://example.test/yggdrasil/");
 
         MonitorSettingsStore loaded = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         loaded.initialize();
@@ -63,6 +64,7 @@ class MonitorSettingsStoreTest {
         assertEquals(350, current.maxCachedHistory);
         assertTrue(current.uuidRecordEnable);
         assertEquals(72, current.uuidRecordCooldown);
+        assertEquals("https://example.test/yggdrasil", current.thirdPartyYggdrasilBaseUrl);
         assertTrue(Files.exists(temporaryDirectory.resolve("playermonitor/settings.json")));
     }
 
@@ -74,8 +76,24 @@ class MonitorSettingsStoreTest {
 
         assertFalse(settings.uuidRecordEnable());
         assertEquals(168, settings.uuidRecordCooldown());
+        assertEquals("https://littleskin.cn/api/yggdrasil", settings.thirdPartyYggdrasilBaseUrl());
         assertTrue(Files.readString(temporaryDirectory.resolve("playermonitor-uuid-defaults/settings.json"))
                 .contains("\"uuidRecordCooldown\": 168"));
+    }
+
+    @Test
+    void thirdPartyYggdrasilBaseUrlRequiresAbsoluteHttpAndNormalizesSlash() throws Exception {
+        MonitorSettingsStore settings = new MonitorSettingsStore(
+                temporaryDirectory.resolve("playermonitor-yggdrasil-url"));
+        settings.initialize();
+
+        settings.setThirdPartyYggdrasilBaseUrl("http://localhost:8080/yggdrasil///");
+
+        assertEquals("http://localhost:8080/yggdrasil", settings.thirdPartyYggdrasilBaseUrl());
+        assertThrows(IllegalArgumentException.class,
+                () -> settings.setThirdPartyYggdrasilBaseUrl("relative/path"));
+        assertThrows(IllegalArgumentException.class,
+                () -> settings.setThirdPartyYggdrasilBaseUrl("ftp://example.test/yggdrasil"));
     }
 
     @Test
