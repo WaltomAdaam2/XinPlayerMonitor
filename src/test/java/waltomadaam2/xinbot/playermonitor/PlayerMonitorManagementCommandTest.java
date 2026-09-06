@@ -121,16 +121,29 @@ class PlayerMonitorManagementCommandTest {
         service.initialize();
         PlayerMonitorListener listener = new PlayerMonitorListener(
                 service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings);
+        LoggerContext context = new LoggerContext();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger("limited-chat-output");
+        logger.addAppender(appender);
         try {
             PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
-                    service, settings, listener, NOPLogger.NOP_LOGGER);
+                    service, settings, listener, logger);
             command.onCommand(null, "playermonitor", new String[]{"Steve", "chat"});
             assertEquals(7, repository.recentChatLimit);
             assertEquals(1, repository.chatCountCalls);
             assertEquals(0, repository.fullFindCalls, "command must not load full player history for chat output");
+            String rendered = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertTrue(rendered.contains("1970-01-01 00:00:00  hello=123"));
+            assertFalse(rendered.contains("\u001B[33m1970-01-01 00:00:00\u001B[0m"));
+            assertFalse(rendered.contains("hello=\u001B[38;5;215m123\u001B[0m"));
         } finally {
             listener.close();
             service.close();
+            context.stop();
         }
     }
     @Test
@@ -353,7 +366,7 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
-    void playerDataLeavesRequestedValuesUncoloredAndUsesHyphenatedRecentChatDate() throws Exception {
+    void playerDataUsesRequestedColorsWithoutColoringHistoricalTimes() throws Exception {
         Path directory = temporaryDirectory.resolve("playermonitor-player-data-colors");
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
         settings.initialize();
@@ -378,15 +391,26 @@ class PlayerMonitorManagementCommandTest {
                     .reduce("", (left, right) -> left + "\n" + right);
 
             assertTrue(rendered.contains("\u001B[36m玩家：\u001B[0m\u001B[33mSteve\u001B[0m"));
-            assertTrue(rendered.contains("\u001B[36m> 发言次数：\u001B[0m4次"));
-            assertTrue(rendered.contains("\u001B[36m> 击杀数：\u001B[0m1人"));
-            assertTrue(rendered.contains("\u001B[36m> 死亡次数：\u001B[0m2次"));
+            assertTrue(rendered.contains("\u001B[36m> 发言次数：\u001B[0m\u001B[38;5;215m4次\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m> 击杀数：\u001B[0m\u001B[38;5;215m1人\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m> 死亡次数：\u001B[0m\u001B[38;5;215m2次\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m> KD比：\u001B[0m\u001B[38;5;215m0.500\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m[最近游玩时长]： \u001B[0m"
+                    + "\u001B[38;5;215m0小时0分0秒\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m- 总游玩时长：\u001B[0m"
+                    + "\u001B[38;5;215m1.00小时\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m- 近30天游玩时长：\u001B[0m"
+                    + "\u001B[38;5;215m1.00小时\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m- 加入游戏次数：\u001B[0m"
+                    + "\u001B[38;5;215m3次\u001B[0m"));
+            assertTrue(rendered.contains("\u001B[36m[首次记录]： \u001B[0m1970-01-01 00:00:00"));
+            assertTrue(rendered.contains("\u001B[36m[最近上线]： \u001B[0m1970-01-01 00:00:00"));
             assertTrue(rendered.contains("\u001B[36m[最近下线]： \u001B[0m1970-01-01 00:00:00"));
-            assertTrue(rendered.contains("\u001B[36m[首次记录]： \u001B[0m\u001B[33m1970-01-01 00:00:00"));
-            assertTrue(rendered.contains("\u001B[36m[最近上线]： \u001B[0m\u001B[33m1970-01-01 00:00:00"));
+            assertFalse(rendered.contains("[首次记录]： \u001B[0m\u001B["));
+            assertFalse(rendered.contains("[最近上线]： \u001B[0m\u001B["));
+            assertFalse(rendered.contains("[最近下线]： \u001B[0m\u001B["));
             assertTrue(rendered.contains("\u001B[36m最近发言 \u001B[0m(1/4)\u001B[36m:\u001B[0m"));
-            assertTrue(rendered.contains("\u001B[36m[\u001B[0m\u001B[33m1970-01-01 00:00:00\u001B[0m"
-                    + "\u001B[36m CHAT]: \u001B[0mrecent"), rendered);
+            assertTrue(rendered.contains("\u001B[92m[1970-01-01 00:00:00 CHAT]:\u001B[0m recent=123"), rendered);
             assertFalse(rendered.contains("1970 01 01"));
         } finally {
             listener.close();
@@ -405,6 +429,9 @@ class PlayerMonitorManagementCommandTest {
         service.initialize();
         PlayerMonitorListener listener = new PlayerMonitorListener(
                 service, new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings);
+        java.lang.reflect.Field disconnectAt = PlayerMonitorListener.class.getDeclaredField("disconnectAt");
+        disconnectAt.setAccessible(true);
+        disconnectAt.setLong(listener, 6_000L);
         LoggerContext context = new LoggerContext();
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.setContext(context);
@@ -415,24 +442,56 @@ class PlayerMonitorManagementCommandTest {
             PlayerMonitorManagementCommand command = new PlayerMonitorManagementCommand(
                     service, settings, listener, logger);
             command.onCommand(null, "playermonitor", new String[]{"status"});
-            String compact = appender.list.stream()
+            String compactRendered = appender.list.stream()
                     .map(ILoggingEvent::getFormattedMessage)
-                    .reduce("", (left, right) -> left + "\n" + right)
-                    .replaceAll("\u001B\\[[0-9;]*m", "");
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertTrue(compactRendered.contains(
+                    "\u001B[36m健康状态:\u001B[0m \u001B[92m正常\u001B[0m"));
+            assertFalse(compactRendered.contains("\u001B[92m健康状态"));
+            assertTrue(compactRendered.contains(
+                    "聊天=\u001B[33m1970-01-01 00:00:02\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "\u001B[36m最近提交:\u001B[0m \u001B[33m1970-01-01 00:00:01\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "bot=\u001B[38;5;215m0\u001B[0m, monitor=\u001B[38;5;215m0\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "在线=\u001B[38;5;215m0\u001B[0m, 队列=\u001B[38;5;215m0\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "等待响应=\u001B[38;5;215mfalse\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "system received=\u001B[38;5;215m0\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "\u001B[36mWriter:\u001B[0m state=RUNNING, alive=\u001B[38;5;215mtrue\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "recoveries=\u001B[38;5;215m6\u001B[0m"));
+            assertFalse(compactRendered.contains("state=\u001B[38;5;215mRUNNING\u001B[0m"));
+            String compact = compactRendered.replaceAll("\u001B\\[[0-9;]*m", "");
             assertTrue(compact.contains("Roster: bot="));
             assertTrue(compact.contains("Chat Pipeline: system received="));
             assertTrue(compact.contains("Writer: state="));
             assertTrue(compact.contains("Failed events: pending="));
             assertTrue(compact.contains("最近写入："));
-            assertTrue(compact.contains("聊天=无"));
+            assertTrue(compact.contains("聊天=1970-01-01 00:00:02"));
             assertFalse(compact.contains("Game Active:"));
 
             appender.list.clear();
             command.onCommand(null, "playermonitor", new String[]{"status", "full"});
-            String full = appender.list.stream()
+            String fullRendered = appender.list.stream()
                     .map(ILoggingEvent::getFormattedMessage)
-                    .reduce("", (left, right) -> left + "\n" + right)
-                    .replaceAll("\u001B\\[[0-9;]*m", "");
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertTrue(fullRendered.contains(
+                    "\u001B[36m健康状态:\u001B[0m \u001B[92mHEALTHY\u001B[0m"));
+            assertFalse(fullRendered.contains("\u001B[92m健康状态"));
+            assertTrue(fullRendered.contains(
+                    "\u001B[36m最近Chat写入:\u001B[0m \u001B[33m1970-01-01 00:00:02\u001B[0m"));
+            assertTrue(fullRendered.contains(
+                    "\u001B[36mLast Disconnect:\u001B[0m \u001B[33m1970-01-01 00:00:06\u001B[0m"));
+            assertFalse(fullRendered.contains("\u001B[33mLast Disconnect"));
+            assertTrue(fullRendered.contains(
+                    "missing=\u001B[38;5;215m0\u001B[0m, extra=\u001B[38;5;215m0\u001B[0m"));
+            assertTrue(fullRendered.contains(
+                    "waiting-response=\u001B[38;5;215mfalse\u001B[0m"));
+            String full = fullRendered.replaceAll("\u001B\\[[0-9;]*m", "");
             assertTrue(full.contains("Game Active:"));
             assertTrue(full.contains("Chat Pipeline:"));
             assertTrue(full.contains("Peak queue:"));
@@ -502,7 +561,7 @@ class PlayerMonitorManagementCommandTest {
         @Override
         public List<ChatEntry> recentChats(String playerName, int limit) {
             recentChatLimit = limit;
-            return List.of(new ChatEntry(200L, "hello"));
+            return List.of(new ChatEntry(200L, "hello=123"));
         }
 
         @Override
@@ -521,13 +580,20 @@ class PlayerMonitorManagementCommandTest {
             snapshot.playtimeSeconds = 3600L;
             snapshot.addedGameCount = 3;
             return Optional.of(new PlayerOverview("Steve", 100L, 4L,
-                    List.of(new ChatEntry(400L, "recent")),
+                    List.of(new ChatEntry(400L, "recent=123")),
                     200L, 300L, 100L, 3_600_000L, snapshot));
         }
 
         @Override
         public Optional<LoginSession> latestLogin(String playerName) {
             return Optional.empty();
+        }
+
+        @Override
+        public DatabaseHealth databaseHealth() {
+            return new DatabaseHealth("RUNNING", true, false, false, 2, 100, 3, 1, -2,
+                    1_000L, 2_000L, 3_000L, 4_000L, 5_000L, "test failure",
+                    6L, 7L, 8L, 9L, 10L, 11L, 12L, 0L, 13L, 14L, 15L, 16L);
         }
 
         @Override
