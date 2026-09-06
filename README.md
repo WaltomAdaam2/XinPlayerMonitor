@@ -105,6 +105,7 @@ playermonitor backup limit <count>
 
 ```text
 playermonitor <玩家名>
+playermonitor <玩家名> playerinfo
 playermonitor <玩家名> stat
 playermonitor <玩家名> uuid
 playermonitor <玩家名> latestlogin
@@ -121,7 +122,7 @@ playermonitor Steve recentlogin 10
 playermonitor Steve chat 20
 ```
 
-直接输入玩家名会显示综合玩家资料，包括已记录的服务器 UUID、发言次数、击杀、死亡、KD、首次记录、最近上下线、最近一次游玩时长、特殊付费权限、优先队列及预计到期时间、最近 5 条发言、总游玩时长、近 30 天游玩时长和加入游戏次数。`uuid` 子命令只读取 SQLite/cache，不等待远程身份服务。
+直接输入玩家名或使用 `playerinfo` 会立即显示 SQLite 中缓存的综合玩家资料，包括已记录的服务器 UUID、发言次数、击杀、死亡、KD、首次记录、最近上下线、最近一次游玩时长、特殊付费权限、优先队列及预计到期时间、最近 5 条发言、总游玩时长、近 30 天游玩时长和加入游戏次数。启用 UUID 记录后，缺失或过期的身份资料会在后台刷新，不阻塞命令输出。`uuid` 子命令同样先读取 SQLite/cache，不等待远程身份服务。
 
 `recentlogin` 和 `chat` 的临时查询数量范围为 `5–50`。不填写时，分别使用 `recentlogin-count` 和 `chat-count` 的当前设置。
 
@@ -215,7 +216,7 @@ playermonitor/
 
 玩家名使用 `Locale.ROOT` 小写形式作为内部不区分大小写的 key，同时保留显示名称。
 
-SQLite schema v4 在 `players` 中分别保存服务器、离线、Mojang 和第三方 UUID、身份分类、各外部服务检查时间，以及独立的 `uuid_last_checked_at` / `uuid_last_written_at`。冷却以成功检查时间计算；只有身份值实际变化时才推进写入时间。
+SQLite schema v4 在 `players` 中分别保存服务器、离线、Mojang 和第三方 UUID、身份分类、各外部服务检查时间，以及独立的 `uuid_last_checked_at` / `uuid_last_written_at`。Mojang 与第三方查询各自使用独立的 24 小时缓存；`uuidRecordCooldown` 只控制周期性数据库比较，设为 `0` 不创建循环任务，但服务器 UUID 变化仍会强制刷新。冷却以成功检查时间计算；只有身份值实际变化时才推进写入时间。
 
 插件公开 `CompletableFuture<PlayerIdentity> resolve(String name)` API。相同玩家名的并发请求共享一次进行中的解析，外部 HTTP 查询限制为最多 4 路并发；在线玩家使用当前 GameProfile UUID，离线玩家回退到 SQLite 中最后记录的服务器 UUID。
 
