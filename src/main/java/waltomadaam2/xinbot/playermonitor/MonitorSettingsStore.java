@@ -244,6 +244,14 @@ final class MonitorSettingsStore {
         return settings.backupMaxCount;
     }
 
+    synchronized boolean uuidRecordEnable() {
+        return settings.uuidRecordEnable;
+    }
+
+    synchronized int uuidRecordCooldown() {
+        return settings.uuidRecordCooldown;
+    }
+
     synchronized MonitorSettings.Database database() {
         return settings.database == null ? new MonitorSettings.Database() : settings.database.copy();
     }
@@ -335,6 +343,17 @@ final class MonitorSettingsStore {
     synchronized void setBackupMaxCount(int value) throws IOException {
         validatePositive(value, "Backup max count must be greater than 0");
         updateSetting(updated -> updated.backupMaxCount = value);
+    }
+
+    synchronized void setUuidRecordEnable(boolean value) throws IOException {
+        updateSetting(updated -> updated.uuidRecordEnable = value);
+    }
+
+    synchronized void setUuidRecordCooldown(int value) throws IOException {
+        if (value < 0) {
+            throw new IllegalArgumentException("UUID record cooldown must be 0 or greater");
+        }
+        updateSetting(updated -> updated.uuidRecordCooldown = value);
     }
 
     private void updateStatSetting(Consumer<MonitorSettings> update) throws IOException {
@@ -458,6 +477,11 @@ final class MonitorSettingsStore {
             warningSink.accept("Invalid backupMaxCount=" + value.backupMaxCount
                     + "; using default " + MonitorSettings.DEFAULT_BACKUP_MAX_COUNT + ".");
             value.backupMaxCount = MonitorSettings.DEFAULT_BACKUP_MAX_COUNT;
+        }
+        if (value.uuidRecordCooldown < 0) {
+            warningSink.accept("Invalid uuidRecordCooldown=" + value.uuidRecordCooldown
+                    + "; using default " + MonitorSettings.DEFAULT_UUID_RECORD_COOLDOWN_HOURS + ".");
+            value.uuidRecordCooldown = MonitorSettings.DEFAULT_UUID_RECORD_COOLDOWN_HOURS;
         }
         value.displayTimezone = canonicalTimezone(value.displayTimezone);
         normalizeDatabaseSettings(value);

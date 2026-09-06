@@ -39,6 +39,8 @@ class MonitorSettingsStoreTest {
         settings.setChatCount(12);
         settings.setCacheIdleMinutes(45);
         settings.setMaxCachedHistory(350);
+        settings.setUuidRecordEnable(true);
+        settings.setUuidRecordCooldown(72);
 
         MonitorSettingsStore loaded = new MonitorSettingsStore(temporaryDirectory.resolve("playermonitor"));
         loaded.initialize();
@@ -59,7 +61,36 @@ class MonitorSettingsStoreTest {
         assertEquals(12, current.chatCount);
         assertEquals(45, current.cacheIdleMinutes);
         assertEquals(350, current.maxCachedHistory);
+        assertTrue(current.uuidRecordEnable);
+        assertEquals(72, current.uuidRecordCooldown);
         assertTrue(Files.exists(temporaryDirectory.resolve("playermonitor/settings.json")));
+    }
+
+    @Test
+    void uuidRecordingDefaultsDisabledWithSevenDayCooldown() throws Exception {
+        MonitorSettingsStore settings = new MonitorSettingsStore(
+                temporaryDirectory.resolve("playermonitor-uuid-defaults"));
+        settings.initialize();
+
+        assertFalse(settings.uuidRecordEnable());
+        assertEquals(168, settings.uuidRecordCooldown());
+        assertTrue(Files.readString(temporaryDirectory.resolve("playermonitor-uuid-defaults/settings.json"))
+                .contains("\"uuidRecordCooldown\": 168"));
+    }
+
+    @Test
+    void zeroUuidCooldownDisablesPeriodicChecksAndPersists() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-uuid-zero");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setUuidRecordEnable(true);
+        settings.setUuidRecordCooldown(0);
+
+        MonitorSettingsStore loaded = new MonitorSettingsStore(directory);
+        loaded.initialize();
+        assertTrue(loaded.uuidRecordEnable());
+        assertEquals(0, loaded.uuidRecordCooldown());
+        assertThrows(IllegalArgumentException.class, () -> loaded.setUuidRecordCooldown(-1));
     }
 
     @Test

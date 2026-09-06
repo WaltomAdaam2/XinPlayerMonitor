@@ -14,6 +14,7 @@ final class MonitorSettings {
     static final int DEFAULT_MAX_CACHED_HISTORY = 200;
     static final int DEFAULT_BACKUP_INTERVAL_HOURS = 168;
     static final int DEFAULT_BACKUP_MAX_COUNT = 3;
+    static final int DEFAULT_UUID_RECORD_COOLDOWN_HOURS = 168;
 
     static final class Database {
         static final String DEFAULT_PATH = "xinpm.db";
@@ -74,6 +75,8 @@ final class MonitorSettings {
     int maxCachedHistory = DEFAULT_MAX_CACHED_HISTORY;
     int backupInterval = DEFAULT_BACKUP_INTERVAL_HOURS;
     int backupMaxCount = DEFAULT_BACKUP_MAX_COUNT;
+    boolean uuidRecordEnable = false;
+    int uuidRecordCooldown = DEFAULT_UUID_RECORD_COOLDOWN_HOURS;
     Database database = new Database();
 
     MonitorSettings copy() {
@@ -95,6 +98,8 @@ final class MonitorSettings {
         copy.maxCachedHistory = maxCachedHistory;
         copy.backupInterval = backupInterval;
         copy.backupMaxCount = backupMaxCount;
+        copy.uuidRecordEnable = uuidRecordEnable;
+        copy.uuidRecordCooldown = uuidRecordCooldown;
         copy.database = database == null ? new Database() : database.copy();
         return copy;
     }
