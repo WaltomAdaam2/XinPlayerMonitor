@@ -75,7 +75,7 @@ playermonitor status full
 - 总体健康状态；
 - SQLite writer 生命周期、线程状态、恢复中/卡住状态；
 - 写入队列当前长度、容量、峰值和 1m/5m 增长；
-- 最近一次成功提交、最近 Chat/Session/Stat 写入和最近一次失败；
+- 最近一次成功提交、最近 Chat/Session/Stat/UUID 写入和最近一次失败；
 - `failed-events.jsonl` 总行数、已重放、待处理和损坏数量；
 - 主数据库、WAL 和 SHM 文件大小；
 - 玩家、聊天、会话、Stat 和未结束会话数量；
@@ -106,6 +106,7 @@ playermonitor backup limit <count>
 ```text
 playermonitor <玩家名>
 playermonitor <玩家名> stat
+playermonitor <玩家名> uuid
 playermonitor <玩家名> latestlogin
 playermonitor <玩家名> recentlogin [count]
 playermonitor <玩家名> chat [count]
@@ -120,7 +121,7 @@ playermonitor Steve recentlogin 10
 playermonitor Steve chat 20
 ```
 
-直接输入玩家名会显示综合玩家资料，包括发言次数、击杀、死亡、KD、首次记录、最近上下线、最近一次游玩时长、特殊付费权限、优先队列及预计到期时间、最近 5 条发言、总游玩时长、近 30 天游玩时长和加入游戏次数。
+直接输入玩家名会显示综合玩家资料，包括已记录的服务器 UUID、发言次数、击杀、死亡、KD、首次记录、最近上下线、最近一次游玩时长、特殊付费权限、优先队列及预计到期时间、最近 5 条发言、总游玩时长、近 30 天游玩时长和加入游戏次数。`uuid` 子命令只读取 SQLite/cache，不等待远程身份服务。
 
 `recentlogin` 和 `chat` 的临时查询数量范围为 `5–50`。不填写时，分别使用 `recentlogin-count` 和 `chat-count` 的当前设置。
 
@@ -143,6 +144,8 @@ playermonitor Steve chat 20
 | `display-timezone` | 查询结果显示时间使用的 UTC 时区 | `UTC` |
 | `recentlogin-count` | 最近登录默认显示数量 | `15`，范围 `5–50` |
 | `chat-count` | 最近聊天默认显示数量 | `10`，范围 `5–50` |
+| `uuidRecordEnable` | 是否为在线玩家定期刷新并记录 UUID 身份 | `false` |
+| `uuidRecordCooldown` | 每名玩家两次成功 UUID 检查的最短间隔 | `168 h`；`0` 关闭定期复查 |
 | `backup-interval` | 自动数据库备份间隔 | `168 h`，必须大于 `0` |
 
 设置示例：
@@ -151,6 +154,8 @@ playermonitor Steve chat 20
 playermonitor setting stat-enabled false
 playermonitor setting stat-cooldown 12
 playermonitor setting display-timezone UTC+08:00
+playermonitor setting uuidRecordEnable true
+playermonitor setting uuidRecordCooldown 168
 playermonitor setting backup-interval 24
 ```
 
@@ -207,6 +212,8 @@ playermonitor/
 - `migration_state`、`legacy_migration_players`：旧数据迁移状态。
 
 玩家名使用 `Locale.ROOT` 小写形式作为内部不区分大小写的 key，同时保留显示名称。
+
+SQLite schema v4 在 `players` 中分别保存服务器、离线、Mojang 和第三方 UUID、身份分类、各外部服务检查时间，以及独立的 `uuid_last_checked_at` / `uuid_last_written_at`。冷却以成功检查时间计算；只有身份值实际变化时才推进写入时间。
 
 ### 队列与事务
 
