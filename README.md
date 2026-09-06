@@ -57,7 +57,7 @@ xpm setting
 playermonitor scan-stat
 ```
 
-手动扫描只会在机器人处于 `Game` 状态时执行。它不受 `stat-enabled` 和自动扫描冷却限制影响。
+手动扫描只会在机器人处于 `Game` 状态时执行。它不受 `stat-enabled` 和自动扫描冷却限制影响；已有批次运行时会合并、去重并提高尚未完成目标的优先级。
 
 ### 数据库健康状态
 
@@ -146,6 +146,7 @@ playermonitor Steve chat 20
 | `chat-count` | 最近聊天默认显示数量 | `10`，范围 `5–50` |
 | `uuidRecordEnable` | 是否为在线玩家定期刷新并记录 UUID 身份 | `false` |
 | `uuidRecordCooldown` | 每名玩家两次成功 UUID 检查的最短间隔 | `168 h`；`0` 关闭定期复查 |
+| `thirdPartyYggdrasilBaseUrl` | 第三方标准 Yggdrasil API 根地址 | `https://littleskin.cn/api/yggdrasil`；绝对 HTTP/HTTPS URL |
 | `backup-interval` | 自动数据库备份间隔 | `168 h`，必须大于 `0` |
 
 设置示例：
@@ -156,6 +157,7 @@ playermonitor setting stat-cooldown 12
 playermonitor setting display-timezone UTC+08:00
 playermonitor setting uuidRecordEnable true
 playermonitor setting uuidRecordCooldown 168
+playermonitor setting thirdPartyYggdrasilBaseUrl https://littleskin.cn/api/yggdrasil
 playermonitor setting backup-interval 24
 ```
 
@@ -215,6 +217,8 @@ playermonitor/
 
 SQLite schema v4 在 `players` 中分别保存服务器、离线、Mojang 和第三方 UUID、身份分类、各外部服务检查时间，以及独立的 `uuid_last_checked_at` / `uuid_last_written_at`。冷却以成功检查时间计算；只有身份值实际变化时才推进写入时间。
 
+插件公开 `CompletableFuture<PlayerIdentity> resolve(String name)` API。相同玩家名的并发请求共享一次进行中的解析，外部 HTTP 查询限制为最多 4 路并发；在线玩家使用当前 GameProfile UUID，离线玩家回退到 SQLite 中最后记录的服务器 UUID。
+
 ### 队列与事务
 
 - 所有正常写入通过有界队列交给单独的 SQLite writer；
@@ -258,7 +262,12 @@ SQLite schema v4 在 `players` 中分别保存服务器、离线、Mojang 和第
 
 ## Stat 扫描与解析
 
-- 进入 `Game` 扫描 roster 时，Stat 冷却状态使用一次批量查询，不再为每个玩家单独 flush 和创建连接；
+- 进入 `Game` 后每 100 ms 观察 roster；非空名单连续稳定 500 ms 后开始扫描，最多等待 5 秒，旧 Game generation 的延迟任务会被丢弃；
+- 自动入场与手动扫描共享一个有界批次。新加入者只有在从未成功记录 Stat 时才会扩充正在运行的批次；
+- 优先级依次为从未成功记录 Stat、冷却已到期、冷却仍有效。自动扫描跳过冷却目标，手动扫描可将其放入最低优先级；
+- 成功保存后会按 `last_stat_at + stat-cooldown` 安排在线重扫；冷却为 `0` 时不建立循环；
+- Stat 重试发送前同时校验 Game generation、批次、终态和目标 token，过期任务静默丢弃；
+- 正常完成只输出一次黄色汇总；断线、离开 Game、切服或关闭时取消批次且不输出完成信息；
 - 判断新玩家只查询 `players` 表，不再读取其全部聊天和会话历史；
 - Tab 补全使用内存玩家名快照，不再为了补全强制 flush；
 - Stat 返回字段可以调整顺序；
