@@ -1,6 +1,9 @@
 package waltomadaam2.xinbot.playermonitor;
 
 import net.kyori.adventure.text.Component;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.geysermc.mcprotocollib.auth.GameProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -68,6 +71,44 @@ class PlayerMonitorListenerUuidTest {
         assertEquals(1_000L, identity.uuidLastCheckedAt());
         assertEquals(1_000L, identity.uuidLastWrittenAt());
         assertEquals(1, context.resolver.calls.get());
+    }
+
+    @Test
+    void changedIdentityEmitsOneColoredUuidRecordWithoutRepeatSpam() throws Exception {
+        Path directory = temporaryDirectory.resolve("uuid-record-log");
+        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
+        settings.initialize();
+        settings.setUuidRecordEnable(true);
+        settings.setUuidRecordCooldown(0);
+        PlayerMonitorService service = new PlayerMonitorService(directory, settings);
+        service.initialize();
+        services.add(service);
+        LoggerContext context = new LoggerContext();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger("uuid-record-log");
+        logger.addAppender(appender);
+        PlayerMonitorListener listener = new PlayerMonitorListener(service,
+                new PluginLog(directory.resolve("log")), logger, settings, new FakeResolver(), () -> 1_000L);
+        listener.setGameActiveForTesting(true);
+        listeners.add(listener);
+        GameProfile profile = profile("Recorded", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        try {
+            listener.onPlayerJoin(new PlayerJoinEvent(profile));
+            awaitUuidTasks(new TestContext(service, listener, settings, null));
+            List<String> records = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.startsWith("Player uuid recorded for ")).toList();
+            assertEquals(List.of("Player uuid recorded for \u001B[38;5;215mRecorded\u001B[0m"
+                    + ": total=1, succeeded=1, failed=0, skipped=0"), records);
+
+            listener.onPlayerJoin(new PlayerJoinEvent(profile));
+            awaitUuidTasks(new TestContext(service, listener, settings, null));
+            assertEquals(1, appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.startsWith("Player uuid recorded for ")).count());
+        } finally {
+            context.stop();
+        }
     }
 
     @Test

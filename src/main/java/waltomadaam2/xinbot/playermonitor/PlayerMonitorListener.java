@@ -45,6 +45,10 @@ final class PlayerMonitorListener implements Listener {
     private static final long CONNECTION_WATCHDOG_PERIOD_MILLIS = TimeUnit.SECONDS.toMillis(30);
     private static final long CONNECTION_WATCHDOG_GRACE_MILLIS = TimeUnit.MINUTES.toMillis(1);
     private static final long UUID_REFRESH_RETRY_MILLIS = TimeUnit.MINUTES.toMillis(5);
+    private static final long UUID_DISPATCH_INTERVAL_MILLIS = 10L;
+    private static final String YELLOW = "\u001B[93m";
+    private static final String PLAYER_LOG_COLOR = "\u001B[38;5;215m";
+    private static final String RESET = "\u001B[0m";
     private static final long ENTRY_ROSTER_POLL_MILLIS = 100L;
     private static final long ENTRY_ROSTER_STABLE_MILLIS = 500L;
     private static final long ENTRY_ROSTER_TIMEOUT_MILLIS = 5_000L;
@@ -81,6 +85,11 @@ final class PlayerMonitorListener implements Listener {
         thread.setDaemon(true);
         return thread;
     });
+    private final ExecutorService uuidIdentityExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "XinPlayerMonitor-uuid-lookup");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final Map<String, CompletableFuture<IdentityResolution>> inFlightIdentityLookups =
             new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<PlayerIdentity>> inFlightPublicResolves =
@@ -89,6 +98,8 @@ final class PlayerMonitorListener implements Listener {
     private final Map<String, ScheduledUuidCheck> scheduledUuidChecks = new ConcurrentHashMap<>();
     private final AtomicLong uuidTaskSequence = new AtomicLong();
     private final AtomicLong uuidGeneration = new AtomicLong();
+    private long nextUuidDispatchNanos;
+    private boolean manualUuidScanActive;
     private final AtomicLong gameGeneration = new AtomicLong();
     private final AtomicLong statTargetSequence = new AtomicLong();
     private final Object statBatchLock = new Object();
@@ -193,6 +204,7 @@ final class PlayerMonitorListener implements Listener {
         invalidateUuidChecks();
         uuidExecutor.shutdownNow();
         identityExecutor.shutdownNow();
+        uuidIdentityExecutor.shutdownNow();
         retryExecutor.shutdown();
         waitForPendingStatWrites();
         retryExecutor.shutdownNow();
@@ -202,6 +214,9 @@ final class PlayerMonitorListener implements Listener {
             }
             if (!identityExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
                 log.warn("identity lookup executor did not terminate cleanly");
+            }
+            if (!uuidIdentityExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                log.warn("UUID identity lookup executor did not terminate cleanly");
             }
             if (!retryExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
                 log.warn("stat retry executor did not terminate cleanly");
@@ -552,8 +567,6 @@ final class PlayerMonitorListener implements Listener {
         try {
             service.recordStat(captured.playerName(), captured.snapshot());
             service.flush();
-            log.info("queued stat write for " + captured.playerName());
-            logger.info("\u001B[94mQueued stat write for {}.\u001B[0m", captured.playerName());
             terminalStatTarget(captured.playerName(), token, StatOutcome.SUCCESS);
             scheduleNextStatCheck(captured.playerName(), captured.snapshot().capturedAt);
         } catch (IOException error) {
@@ -634,6 +647,40 @@ final class PlayerMonitorListener implements Listener {
                 drift.botRoster(), drift.monitorRoster(), drift.missingFromMonitor(), drift.extraInMonitor(),
                 systemChatReceived.get(), publicChatParsed.get(), chatAcceptedByPlayerMonitor.get(),
                 chatRejected.get(), chatParseFailed.get(), chatDbFailed.get());
+    }
+
+    int scanAllOnlineUuidPlayers() {
+        if (!gameActive || closed) {
+            return -1;
+        }
+        List<GameProfile> roster = List.copyOf(Bot.INSTANCE.players.values());
+        List<CompletableFuture<Void>> work = new java.util.ArrayList<>();
+        Set<String> queuedPlayers = ConcurrentHashMap.newKeySet();
+        synchronized (uuidScheduleLock) {
+            if (manualUuidScanActive) {
+                return -2;
+            }
+            manualUuidScanActive = true;
+        }
+        for (GameProfile profile : roster) {
+            if (profile == null || profile.getId() == null || nameOf(profile) == null || nameOf(profile).isBlank()) {
+                continue;
+            }
+            String playerName = nameOf(profile);
+            String normalized = normalize(playerName);
+            if (!queuedPlayers.add(normalized)) {
+                continue;
+            }
+            onlinePlayers.put(normalized, playerName);
+            onlineServerUuids.put(normalized, profile.getId());
+            work.add(scheduleUuidCheck(playerName, profile.getId(), 0L, true, true));
+        }
+        CompletableFuture.allOf(work.toArray(CompletableFuture[]::new)).whenComplete((ignored, failure) -> {
+            synchronized (uuidScheduleLock) {
+                manualUuidScanActive = false;
+            }
+        });
+        return work.size();
     }
 
     List<String> onlinePlayerNames() {
@@ -1072,17 +1119,23 @@ final class PlayerMonitorListener implements Listener {
                 previous != null && !previous.equals(profile.getId()));
     }
 
-    private void scheduleUuidCheck(String playerName, UUID serverUuid, long delayMillis, boolean replace) {
-        if (closed || !gameActive || !settings.uuidRecordEnable()
+    private CompletableFuture<Void> scheduleUuidCheck(String playerName, UUID serverUuid, long delayMillis,
+                                                       boolean replace) {
+        return scheduleUuidCheck(playerName, serverUuid, delayMillis, replace, false);
+    }
+
+    private CompletableFuture<Void> scheduleUuidCheck(String playerName, UUID serverUuid, long delayMillis,
+                                                       boolean replace, boolean force) {
+        if (closed || !gameActive || (!settings.uuidRecordEnable() && !force)
                 || (delayMillis > 0 && settings.uuidRecordCooldown() <= 0)) {
-            return;
+            return CompletableFuture.completedFuture(null);
         }
         String normalized = normalize(playerName);
         synchronized (uuidScheduleLock) {
             ScheduledUuidCheck existing = scheduledUuidChecks.get(normalized);
             if (existing != null && !existing.completion().isDone()) {
                 if (!replace && existing.serverUuid().equals(serverUuid)) {
-                    return;
+                    return existing.completion();
                 }
                 existing.future().cancel(false);
                 existing.completion().complete(null);
@@ -1090,18 +1143,30 @@ final class PlayerMonitorListener implements Listener {
             long token = uuidTaskSequence.incrementAndGet();
             long generation = uuidGeneration.get();
             try {
+                long now = System.nanoTime();
+                long requestedAt = now + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, delayMillis));
+                // Only immediate work participates in the dispatch lane. A future cooldown
+                // check must not hold the lane and delay a later UUID change by hours.
+                long dispatchAt = delayMillis > 0L ? requestedAt : Math.max(requestedAt, nextUuidDispatchNanos);
+                if (delayMillis <= 0L) {
+                    nextUuidDispatchNanos = dispatchAt + TimeUnit.MILLISECONDS.toNanos(UUID_DISPATCH_INTERVAL_MILLIS);
+                }
+                long effectiveDelay = Math.max(0L, TimeUnit.NANOSECONDS.toMillis(dispatchAt - now));
+                CompletableFuture<Void> completion = new CompletableFuture<>();
                 ScheduledFuture<?> future = uuidExecutor.schedule(
-                        () -> runUuidCheck(playerName, serverUuid, generation, token),
-                        Math.max(0L, delayMillis), TimeUnit.MILLISECONDS);
+                        () -> runUuidCheck(playerName, serverUuid, generation, token, force),
+                        effectiveDelay, TimeUnit.MILLISECONDS);
                 scheduledUuidChecks.put(normalized,
-                        new ScheduledUuidCheck(serverUuid, token, future, new CompletableFuture<>()));
+                        new ScheduledUuidCheck(serverUuid, token, future, completion, force));
+                return completion;
             } catch (RejectedExecutionException ignored) {
                 // Plugin shutdown invalidates all UUID work.
+                return CompletableFuture.completedFuture(null);
             }
         }
     }
 
-    private void runUuidCheck(String playerName, UUID scheduledServerUuid, long generation, long token) {
+    private void runUuidCheck(String playerName, UUID scheduledServerUuid, long generation, long token, boolean force) {
         String normalized = normalize(playerName);
         ScheduledUuidCheck current;
         synchronized (uuidScheduleLock) {
@@ -1111,7 +1176,7 @@ final class PlayerMonitorListener implements Listener {
             }
         }
         UUID currentServerUuid = onlineServerUuids.get(normalized);
-        if (currentServerUuid == null || !uuidContextValid(normalized, currentServerUuid, generation)) {
+        if (currentServerUuid == null || !uuidContextValid(normalized, currentServerUuid, generation, force)) {
             finishUuidCheck(normalized, current, () -> { });
             return;
         }
@@ -1130,20 +1195,20 @@ final class PlayerMonitorListener implements Listener {
             long lastCheckedAt = previous == null || previous.uuidLastCheckedAt() == null
                     ? 0L : previous.uuidLastCheckedAt();
             long dueAt = lastCheckedAt <= 0L ? now : saturatedAdd(lastCheckedAt, cooldownMillis);
-            if (!serverUuidChanged && cooldownMillis <= 0) {
+            if (!force && !serverUuidChanged && cooldownMillis <= 0) {
                 finishUuidCheck(normalized, current, () -> { });
                 return;
             }
-            if (!serverUuidChanged && now < dueAt) {
+            if (!force && !serverUuidChanged && now < dueAt) {
                 finishUuidCheck(normalized, current,
                         () -> scheduleUuidCheck(playerName, currentServerUuid, dueAt - now, false));
                 return;
             }
 
-            resolveIdentity(playerName, currentServerUuid, previous).whenComplete((resolution, failure) ->
+            resolveIdentity(playerName, currentServerUuid, previous, uuidIdentityExecutor).whenComplete((resolution, failure) ->
                     finishUuidCheck(normalized, current,
                             () -> completeUuidCheck(playerName, currentServerUuid, normalized, generation,
-                                    clock.getAsLong(), resolution, failure)));
+                                    clock.getAsLong(), previous, resolution, failure, force)));
         } catch (IOException | RuntimeException error) {
             log.warn("failed to refresh UUID identity for " + playerName + ": " + error.getMessage());
             finishUuidCheck(normalized, current,
@@ -1164,19 +1229,24 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private void completeUuidCheck(String playerName, UUID serverUuid, String normalized, long generation,
-                                   long checkedAt, IdentityResolution resolution, Throwable failure) {
+                                   long checkedAt, StoredPlayerIdentity previous, IdentityResolution resolution,
+                                   Throwable failure, boolean force) {
         if (failure != null) {
             log.warn("failed to refresh UUID identity for " + playerName + ": " + rootMessage(failure));
-            if (uuidContextValid(normalized, serverUuid, generation)) {
+            if (uuidContextValid(normalized, serverUuid, generation, force)) {
                 scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS, false);
             }
             return;
         }
-        if (!uuidContextValid(normalized, serverUuid, generation)) {
+        if (!uuidContextValid(normalized, serverUuid, generation, force)) {
             return;
         }
         try {
             StoredPlayerIdentity updated = service.recordIdentityCheck(playerName, resolution, checkedAt);
+            if (identityChanged(previous, updated)) {
+                logger.info("Player uuid recorded for {}{}{}: total=1, succeeded=1, failed=0, skipped=0",
+                        PLAYER_LOG_COLOR, playerName, RESET);
+            }
             if (settings.uuidRecordCooldown() <= 0) {
                 return;
             }
@@ -1195,6 +1265,12 @@ final class PlayerMonitorListener implements Listener {
 
     private CompletableFuture<IdentityResolution> resolveIdentity(String playerName, UUID serverUuid,
                                                                    StoredPlayerIdentity previous) {
+        return resolveIdentity(playerName, serverUuid, previous, identityExecutor);
+    }
+
+    private CompletableFuture<IdentityResolution> resolveIdentity(String playerName, UUID serverUuid,
+                                                                   StoredPlayerIdentity previous,
+                                                                   ExecutorService executor) {
         String key = normalize(playerName) + "|" + (serverUuid == null ? "" : serverUuid);
         CompletableFuture<IdentityResolution> lookup = inFlightIdentityLookups.compute(key, (ignored, existing) -> {
             if (existing != null && !existing.isDone()) {
@@ -1206,7 +1282,7 @@ final class PlayerMonitorListener implements Listener {
                 } catch (IOException error) {
                     throw new CompletionException(error);
                 }
-            }, identityExecutor);
+            }, executor);
             return created;
         });
         lookup.whenComplete((result, failure) -> inFlightIdentityLookups.remove(key, lookup));
@@ -1291,6 +1367,14 @@ final class PlayerMonitorListener implements Listener {
         }
     }
 
+    private static boolean identityChanged(StoredPlayerIdentity before, StoredPlayerIdentity after) {
+        return before == null || !java.util.Objects.equals(before.serverUuid(), after.serverUuid())
+                || !java.util.Objects.equals(before.offlineUuid(), after.offlineUuid())
+                || !java.util.Objects.equals(before.mojangUuid(), after.mojangUuid())
+                || !java.util.Objects.equals(before.thirdPartyUuid(), after.thirdPartyUuid())
+                || before.identityType() != after.identityType();
+    }
+
     private static String rootMessage(Throwable failure) {
         Throwable current = failure;
         while (current.getCause() != null) {
@@ -1300,8 +1384,13 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private boolean uuidContextValid(String normalizedPlayerName, UUID serverUuid, long generation) {
+        return uuidContextValid(normalizedPlayerName, serverUuid, generation, false);
+    }
+
+    private boolean uuidContextValid(String normalizedPlayerName, UUID serverUuid, long generation,
+                                     boolean allowDisabled) {
         return !closed && generation == uuidGeneration.get() && gameActive && !reconnectPending
-                && settings.uuidRecordEnable()
+                && (allowDisabled || settings.uuidRecordEnable())
                 && onlinePlayers.containsKey(normalizedPlayerName)
                 && serverUuid.equals(onlineServerUuids.get(normalizedPlayerName));
     }
@@ -1649,8 +1738,15 @@ final class PlayerMonitorListener implements Listener {
         batch.completionEmitted = true;
         activeStatBatch = null;
         settings.endStatOperation();
-        logger.info("\u001B[93mStat scan completed: total={}, succeeded={}, failed={}, skipped={}\u001B[0m",
-                batch.targets.size(), batch.succeeded, batch.failed, batch.skipped);
+        if (batch.targets.size() == 1) {
+            String playerName = batch.targets.values().iterator().next().playerName;
+            logger.info(YELLOW + "Stat scan completed for " + PLAYER_LOG_COLOR + "{}" + RESET + YELLOW
+                            + ": total=1, succeeded={}, failed={}, skipped={}" + RESET,
+                    playerName, batch.succeeded, batch.failed, batch.skipped);
+        } else {
+            logger.info(YELLOW + "Stat scan completed: total={}, succeeded={}, failed={}, skipped={}" + RESET,
+                    batch.targets.size(), batch.succeeded, batch.failed, batch.skipped);
+        }
     }
 
     private void scheduleNextStatCheck(String playerName, long lastStatAt) {
@@ -1885,7 +1981,7 @@ final class PlayerMonitorListener implements Listener {
         return CompletableFuture.supplyAsync(() -> {
             synchronized (uuidScheduleLock) {
                 return CompletableFuture.allOf(scheduledUuidChecks.values().stream()
-                        .filter(check -> check.future().getDelay(TimeUnit.MILLISECONDS) <= 0)
+                        .filter(check -> check.future().getDelay(TimeUnit.MILLISECONDS) <= 1_000L)
                         .map(ScheduledUuidCheck::completion).toArray(CompletableFuture[]::new));
             }
         }, uuidExecutor).thenCompose(completion -> completion);
@@ -1947,7 +2043,7 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private record ScheduledUuidCheck(UUID serverUuid, long token, ScheduledFuture<?> future,
-                                      CompletableFuture<Void> completion) {
+                                      CompletableFuture<Void> completion, boolean force) {
     }
 
     private record ResolveContext(StoredPlayerIdentity stored, UUID serverUuid, boolean online) {

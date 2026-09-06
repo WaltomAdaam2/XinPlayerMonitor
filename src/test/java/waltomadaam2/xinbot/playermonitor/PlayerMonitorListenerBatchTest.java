@@ -312,7 +312,7 @@ class PlayerMonitorListenerBatchTest {
         waitUntil(() -> completionMessages(capture).size() == 1);
         context.listener.onSystemChat(response);
 
-        assertEquals(List.of("\u001B[93mStat scan completed: total=1, succeeded=1, failed=0, skipped=0\u001B[0m"),
+        assertEquals(List.of("\u001B[93mStat scan completed for \u001B[38;5;215mComplete\u001B[0m\u001B[93m: total=1, succeeded=1, failed=0, skipped=0\u001B[0m"),
                 completionMessages(capture));
     }
 
@@ -431,7 +431,7 @@ class PlayerMonitorListenerBatchTest {
 
     private static List<String> completionMessages(LoggerCapture capture) {
         return capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
-                .filter(message -> message.contains("Stat scan completed:"))
+                .filter(message -> message.contains("Stat scan completed"))
                 .toList();
     }
 
