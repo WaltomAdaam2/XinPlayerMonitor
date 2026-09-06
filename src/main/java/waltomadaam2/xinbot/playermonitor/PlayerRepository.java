@@ -161,7 +161,7 @@ interface PlayerRepository extends AutoCloseable {
     }
 
     default DatabaseStats databaseStats() throws IOException {
-        return new DatabaseStats(listPlayerNames().size(), 0, 0, 0, 0);
+        return new DatabaseStats(listPlayerNames().size(), 0, 0, 0, 0, 0);
     }
 
     default DatabaseStats databaseStatsSnapshot() throws IOException {

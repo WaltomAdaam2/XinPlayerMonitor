@@ -46,6 +46,7 @@ final class PlayerMonitorListener implements Listener {
     private static final long CONNECTION_WATCHDOG_PERIOD_MILLIS = TimeUnit.SECONDS.toMillis(30);
     private static final long CONNECTION_WATCHDOG_GRACE_MILLIS = TimeUnit.MINUTES.toMillis(1);
     private static final long UUID_REFRESH_RETRY_MILLIS = TimeUnit.MINUTES.toMillis(5);
+    private static final int UUID_MAX_ATTEMPTS = 3;
     private static final long UUID_DISPATCH_INTERVAL_MILLIS = 10L;
     private static final String YELLOW = "\u001B[93m";
     private static final String PLAYER_LOG_COLOR = "\u001B[38;5;215m";
@@ -1122,11 +1123,16 @@ final class PlayerMonitorListener implements Listener {
 
     private CompletableFuture<Void> scheduleUuidCheck(String playerName, UUID serverUuid, long delayMillis,
                                                        boolean replace) {
-        return scheduleUuidCheck(playerName, serverUuid, delayMillis, replace, false);
+        return scheduleUuidCheck(playerName, serverUuid, delayMillis, replace, false, 1);
     }
 
     private CompletableFuture<Void> scheduleUuidCheck(String playerName, UUID serverUuid, long delayMillis,
                                                        boolean replace, boolean force) {
+        return scheduleUuidCheck(playerName, serverUuid, delayMillis, replace, force, 1);
+    }
+
+    private CompletableFuture<Void> scheduleUuidCheck(String playerName, UUID serverUuid, long delayMillis,
+                                                       boolean replace, boolean force, int attempt) {
         if (closed || !gameActive) {
             return CompletableFuture.completedFuture(null);
         }
@@ -1134,11 +1140,15 @@ final class PlayerMonitorListener implements Listener {
         synchronized (uuidScheduleLock) {
             ScheduledUuidCheck existing = scheduledUuidChecks.get(normalized);
             boolean scheduledForce = force;
+            int scheduledAttempt = attempt;
             if (existing != null && !existing.completion().isDone()) {
                 if (!replace && existing.serverUuid().equals(serverUuid)) {
                     return existing.completion();
                 }
                 scheduledForce |= existing.force();
+                if (!force) {
+                    scheduledAttempt = existing.attempt();
+                }
             }
             if ((!settings.uuidRecordEnable() && !scheduledForce)
                     || (!scheduledForce && delayMillis > 0 && settings.uuidRecordCooldown() <= 0)) {
@@ -1161,11 +1171,12 @@ final class PlayerMonitorListener implements Listener {
                 long effectiveDelay = Math.max(0L, TimeUnit.NANOSECONDS.toMillis(dispatchAt - now));
                 CompletableFuture<Void> completion = new CompletableFuture<>();
                 boolean taskForce = scheduledForce;
+                int taskAttempt = scheduledAttempt;
                 ScheduledFuture<?> future = uuidExecutor.schedule(
-                        () -> runUuidCheck(playerName, serverUuid, generation, token, taskForce),
+                        () -> runUuidCheck(playerName, serverUuid, generation, token, taskForce, taskAttempt),
                         effectiveDelay, TimeUnit.MILLISECONDS);
                 scheduledUuidChecks.put(normalized,
-                        new ScheduledUuidCheck(serverUuid, token, future, completion, taskForce));
+                        new ScheduledUuidCheck(serverUuid, token, future, completion, taskForce, taskAttempt));
                 if (existing != null) {
                     if (existing.force()) {
                         completion.whenComplete((ignored, failure) -> existing.completion().complete(null));
@@ -1184,7 +1195,8 @@ final class PlayerMonitorListener implements Listener {
         }
     }
 
-    private void runUuidCheck(String playerName, UUID scheduledServerUuid, long generation, long token, boolean force) {
+    private void runUuidCheck(String playerName, UUID scheduledServerUuid, long generation, long token,
+                              boolean force, int attempt) {
         String normalized = normalize(playerName);
         ScheduledUuidCheck current;
         synchronized (uuidScheduleLock) {
@@ -1200,7 +1212,8 @@ final class PlayerMonitorListener implements Listener {
         }
         if (!currentServerUuid.equals(scheduledServerUuid)) {
             finishUuidCheck(normalized, current,
-                    () -> scheduleUuidCheck(onlinePlayers.get(normalized), currentServerUuid, 0L, true, force));
+                    () -> scheduleUuidCheck(onlinePlayers.get(normalized), currentServerUuid,
+                            0L, true, force, attempt));
             return;
         }
 
@@ -1229,11 +1242,11 @@ final class PlayerMonitorListener implements Listener {
             resolveIdentity(playerName, currentServerUuid, previous, uuidIdentityExecutor).whenComplete((resolution, failure) ->
                     finishUuidCheck(normalized, current,
                             () -> completeUuidCheck(playerName, currentServerUuid, normalized, generation,
-                                    clock.getAsLong(), previous, resolution, failure, force)));
+                                    clock.getAsLong(), previous, resolution, failure, force, attempt)));
         } catch (IOException | RuntimeException error) {
             log.warn("failed to refresh UUID identity for " + playerName + ": " + error.getMessage());
             finishUuidCheck(normalized, current,
-                    () -> scheduleUuidCheck(playerName, currentServerUuid, UUID_REFRESH_RETRY_MILLIS, false, force));
+                    () -> retryUuidCheck(playerName, currentServerUuid, force, attempt));
         }
     }
 
@@ -1256,11 +1269,11 @@ final class PlayerMonitorListener implements Listener {
     private CompletableFuture<Void> completeUuidCheck(String playerName, UUID serverUuid, String normalized,
                                                       long generation, long checkedAt,
                                                       StoredPlayerIdentity previous, IdentityResolution resolution,
-                                                      Throwable failure, boolean force) {
+                                                      Throwable failure, boolean force, int attempt) {
         if (failure != null) {
             log.warn("failed to refresh UUID identity for " + playerName + ": " + rootMessage(failure));
             if (uuidContextValid(normalized, serverUuid, generation, force)) {
-                return scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS, false, force);
+                return retryUuidCheck(playerName, serverUuid, force, attempt);
             }
             return null;
         }
@@ -1282,12 +1295,22 @@ final class PlayerMonitorListener implements Listener {
                 scheduleUuidCheck(playerName, serverUuid, Math.max(0L, nextAt - clock.getAsLong()), false);
                 return null;
             } else {
-                return scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS, false, force);
+                return retryUuidCheck(playerName, serverUuid, force, attempt);
             }
         } catch (IOException | RuntimeException error) {
             log.warn("failed to refresh UUID identity for " + playerName + ": " + error.getMessage());
-            return scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS, false, force);
+            return retryUuidCheck(playerName, serverUuid, force, attempt);
         }
+    }
+
+    private CompletableFuture<Void> retryUuidCheck(String playerName, UUID serverUuid,
+                                                   boolean force, int attempt) {
+        if (attempt >= UUID_MAX_ATTEMPTS) {
+            log.warn("UUID identity refresh failed for " + playerName + " after " + attempt + " attempts");
+            return null;
+        }
+        return scheduleUuidCheck(playerName, serverUuid, UUID_REFRESH_RETRY_MILLIS,
+                false, force, attempt + 1);
     }
 
     private CompletableFuture<IdentityResolution> resolveIdentity(String playerName, UUID serverUuid,
@@ -2009,6 +2032,11 @@ final class PlayerMonitorListener implements Listener {
         return scheduled != null && scheduled.force();
     }
 
+    int scheduledUuidCheckAttemptForTesting(String playerName) {
+        ScheduledUuidCheck scheduled = scheduledUuidChecks.get(normalize(playerName));
+        return scheduled == null ? 0 : scheduled.attempt();
+    }
+
     UUID scheduledServerUuidForTesting(String playerName) {
         ScheduledUuidCheck scheduled = scheduledUuidChecks.get(normalize(playerName));
         return scheduled == null ? null : scheduled.serverUuid();
@@ -2035,7 +2063,7 @@ final class PlayerMonitorListener implements Listener {
             scheduled.future().cancel(false);
         }
         runUuidCheck(onlinePlayers.get(normalized), scheduled.serverUuid(), uuidGeneration.get(),
-                scheduled.token(), scheduled.force());
+                scheduled.token(), scheduled.force(), scheduled.attempt());
     }
 
     CompletableFuture<Void> awaitUuidTasksForTesting() {
@@ -2104,7 +2132,7 @@ final class PlayerMonitorListener implements Listener {
     }
 
     private record ScheduledUuidCheck(UUID serverUuid, long token, ScheduledFuture<?> future,
-                                      CompletableFuture<Void> completion, boolean force) {
+                                      CompletableFuture<Void> completion, boolean force, int attempt) {
     }
 
     private record ResolveContext(StoredPlayerIdentity stored, UUID serverUuid, boolean online) {

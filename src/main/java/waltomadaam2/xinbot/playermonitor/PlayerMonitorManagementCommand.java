@@ -798,10 +798,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 lines.add("最近UUID写入: " + statusTime(health.lastUuidWrittenAt()));
             } else {
                 lines.add("最近写入：");
-                lines.add("> 聊天=" + statusTime(health.lastChatCommittedAt()));
-                lines.add("> 会话=" + statusTime(health.lastSessionCommittedAt()));
-                lines.add("> Stat=" + statusTime(health.lastStatCommittedAt()));
-                lines.add("> UUID=" + statusTime(health.lastUuidWrittenAt()));
+                lines.add("> " + greenLabel("聊天=") + statusTime(health.lastChatCommittedAt()));
+                lines.add("> " + greenLabel("会话=") + statusTime(health.lastSessionCommittedAt()));
+                lines.add("> " + greenLabel("Stat=") + statusTime(health.lastStatCommittedAt()));
+                lines.add("> " + greenLabel("UUID=") + statusTime(health.lastUuidWrittenAt()));
             }
             lines.add("最近失败: " + statusTime(health.lastFailureAt()));
             if (health.lastFailureAt() > 0 && health.lastFailureMessage() != null
@@ -1130,7 +1130,8 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         print("");
         for (String line : lines) {
             String rendered;
-            if (TIMESTAMP.matcher(line).lookingAt()) {
+            if (TIMESTAMP.matcher(line).lookingAt()
+                    || line.startsWith(BRIGHT_GREEN) || line.startsWith("> " + BRIGHT_GREEN)) {
                 rendered = line;
             } else {
                 int separator = Math.max(line.indexOf(':'), line.indexOf('：'));
@@ -1377,11 +1378,16 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
 
     static List<String> databaseStatsLines(DatabaseStats stats) {
         return List.of(
-                "玩家数: " + gold(stats.players()),
-                "聊天记录: " + gold(stats.chats()),
-                "登录会话: " + gold(stats.sessions()),
-                "玩家 Stat 信息记录: " + gold(stats.stats()),
-                "未结束会话: " + gold(stats.openSessions()));
+                greenLabel("玩家数:") + " " + gold(stats.players()),
+                greenLabel("聊天记录:") + " " + gold(stats.chats()),
+                greenLabel("登录会话:") + " " + gold(stats.sessions()),
+                greenLabel("玩家 Stat 信息记录:") + " " + gold(stats.stats()),
+                greenLabel("Player uuid 信息记录:") + " " + gold(stats.uuidRecords()),
+                greenLabel("未结束会话:") + " " + gold(stats.openSessions()));
+    }
+
+    private static String greenLabel(String label) {
+        return BRIGHT_GREEN + label + RESET;
     }
 
     private static String gold(long value) {

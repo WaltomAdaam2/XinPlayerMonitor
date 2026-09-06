@@ -443,14 +443,16 @@ class PlayerMonitorManagementCommandTest {
 
     @Test
     void databaseStatsLinesUseGoldNumbers() {
-        String rendered = String.join("\\n", PlayerMonitorManagementCommand.databaseStatsLines(
-                new DatabaseStats(2, 3, 4, 5, 1)));
+        List<String> lines = PlayerMonitorManagementCommand.databaseStatsLines(
+                new DatabaseStats(2, 3, 4, 5, 6, 1));
 
-        assertTrue(rendered.contains("玩家数: \u001B[38;5;215m2\u001B[0m"));
-        assertTrue(rendered.contains("聊天记录: \u001B[38;5;215m3\u001B[0m"));
-        assertTrue(rendered.contains("登录会话: \u001B[38;5;215m4\u001B[0m"));
-        assertTrue(rendered.contains("玩家 Stat 信息记录: \u001B[38;5;215m5\u001B[0m"));
-        assertTrue(rendered.contains("未结束会话: \u001B[38;5;215m1\u001B[0m"));
+        assertEquals(List.of(
+                "\u001B[92m玩家数:\u001B[0m \u001B[38;5;215m2\u001B[0m",
+                "\u001B[92m聊天记录:\u001B[0m \u001B[38;5;215m3\u001B[0m",
+                "\u001B[92m登录会话:\u001B[0m \u001B[38;5;215m4\u001B[0m",
+                "\u001B[92m玩家 Stat 信息记录:\u001B[0m \u001B[38;5;215m5\u001B[0m",
+                "\u001B[92mPlayer uuid 信息记录:\u001B[0m \u001B[38;5;215m6\u001B[0m",
+                "\u001B[92m未结束会话:\u001B[0m \u001B[38;5;215m1\u001B[0m"), lines);
     }
 
     @Test
@@ -617,14 +619,17 @@ class PlayerMonitorManagementCommandTest {
                     "\u001B[36m健康状态:\u001B[0m \u001B[92m正常\u001B[0m"));
             assertFalse(compactRendered.contains("\u001B[92m健康状态"));
             assertTrue(compactRendered.contains(
-                    "聊天=\u001B[33m1970-01-01 00:00:02\u001B[0m"));
+                    "\u001B[92m聊天=\u001B[0m\u001B[33m1970-01-01 00:00:02\u001B[0m"));
             assertTrue(compactRendered.contains(
-                    "> 聊天=\u001B[33m1970-01-01 00:00:02\u001B[0m"));
+                    "> \u001B[92m聊天=\u001B[0m\u001B[33m1970-01-01 00:00:02\u001B[0m"));
+            assertTrue(compactRendered.contains(
+                    "> \u001B[92m会话=\u001B[0m\u001B[33m1970-01-01 00:00:03\u001B[0m"));
             String compactPlain = compactRendered.replaceAll("\\u001B\\[[0-9;]*m", "");
             assertTrue(compactPlain.contains("Plugin Version: v1.5.7"));
             assertTrue(compactPlain.contains("Database Version: v4"));
             assertTrue(compactRendered.contains(
-                    "> Stat=\u001B[33m1970-01-01 00:00:04\u001B[0m\n  > UUID=\u001B[33m1970-01-01 00:00:04\u001B[0m"));
+                    "> \u001B[92mStat=\u001B[0m\u001B[33m1970-01-01 00:00:04\u001B[0m\n"
+                            + "  > \u001B[92mUUID=\u001B[0m\u001B[33m1970-01-01 00:00:04\u001B[0m"));
             assertTrue(compactRendered.contains(
                     "\u001B[36m最近提交:\u001B[0m \u001B[33m1970-01-01 00:00:01\u001B[0m"));
             assertTrue(compactRendered.contains(
@@ -647,6 +652,10 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(compact.contains("Failed events: pending="));
             assertTrue(compact.contains("最近写入："));
             assertTrue(compact.contains("聊天=1970-01-01 00:00:02"));
+            int statCount = compact.indexOf("玩家 Stat 信息记录: 0");
+            int uuidCount = compact.indexOf("Player uuid 信息记录: 0");
+            int openSessions = compact.indexOf("未结束会话: 0");
+            assertTrue(statCount >= 0 && statCount < uuidCount && uuidCount < openSessions);
             assertFalse(compact.contains("Game Active:"));
 
             appender.list.clear();
@@ -687,8 +696,8 @@ class PlayerMonitorManagementCommandTest {
             String missingUuid = appender.list.stream()
                     .map(ILoggingEvent::getFormattedMessage)
                     .reduce("", (left, right) -> left + "\n" + right);
-            assertTrue(missingUuid.contains("UUID=无"));
-            assertFalse(missingUuid.contains("UUID=\u001B[33m无"));
+            assertTrue(missingUuid.contains("\u001B[92mUUID=\u001B[0m无"));
+            assertFalse(missingUuid.contains("\u001B[92mUUID=\u001B[0m\u001B[33m无"));
         } finally {
             listener.close();
             service.close();

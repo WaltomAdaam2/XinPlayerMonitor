@@ -1044,6 +1044,10 @@ class SQLitePlayerRecordStoreTest {
             store.recordChat("Steve", "hello", 300L);
             store.recordStat("Steve", snapshot);
             store.recordLogin("Alex", 500L);
+            String serverUuid = "98465ebe-e619-3b1d-8b25-98352b6abbb9";
+            store.recordIdentityCheck("Steve", new IdentityResolution(serverUuid, null,
+                    IdentityResolution.Lookup.found(serverUuid), IdentityResolution.Lookup.notFound(),
+                    PlayerIdentityType.PREMIUM, true), 600L);
 
             DatabaseStats stats = store.databaseStats();
 
@@ -1051,6 +1055,7 @@ class SQLitePlayerRecordStoreTest {
             assertEquals(1, stats.chats());
             assertEquals(2, stats.sessions());
             assertEquals(1, stats.stats());
+            assertEquals(1, stats.uuidRecords());
             assertEquals(1, stats.openSessions());
         } finally {
             store.close();

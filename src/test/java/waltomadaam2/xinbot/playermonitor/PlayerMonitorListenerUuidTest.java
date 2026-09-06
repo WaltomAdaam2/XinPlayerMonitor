@@ -74,6 +74,55 @@ class PlayerMonitorListenerUuidTest {
     }
 
     @Test
+    void manualUuidFailuresStopAfterThreeAttemptsAndAllowLaterScan() throws Exception {
+        TestContext context = context(false, 0, 1_000L);
+        GameProfile profile = profile("ManualRetryLimit", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        Bot.INSTANCE.players.put(profile.getId(), profile);
+        context.resolver.failNextLookups(3);
+
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        for (int attempt = 2; attempt <= 3; attempt++) {
+            int expectedAttempt = attempt;
+            int expectedCalls = attempt - 1;
+            waitUntil(() -> context.resolver.calls.get() == expectedCalls
+                    && context.listener.scheduledUuidCheckAttemptForTesting(profile.getName()) == expectedAttempt);
+            assertTrue(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()));
+            assertTrue(context.listener.manualUuidScanActiveForTesting());
+            context.listener.runScheduledUuidCheckForTesting(profile.getName());
+        }
+        waitUntil(() -> context.resolver.calls.get() == 3
+                && !context.listener.manualUuidScanActiveForTesting());
+
+        assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> context.resolver.calls.get() == 4
+                && !context.listener.manualUuidScanActiveForTesting());
+        assertEquals(profile.getId().toString(),
+                context.service.playerIdentity(profile.getName()).orElseThrow().serverUuid());
+    }
+
+    @Test
+    void automaticUuidFailuresStopAfterThreeAttemptsWithoutBecomingForced() throws Exception {
+        TestContext context = context(true, 168, 1_000L);
+        GameProfile profile = profile("AutomaticRetryLimit", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        context.resolver.failNextLookups(3);
+
+        context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        for (int attempt = 2; attempt <= 3; attempt++) {
+            int expectedAttempt = attempt;
+            int expectedCalls = attempt - 1;
+            waitUntil(() -> context.resolver.calls.get() == expectedCalls
+                    && context.listener.scheduledUuidCheckAttemptForTesting(profile.getName()) == expectedAttempt);
+            assertFalse(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()));
+            context.listener.runScheduledUuidCheckForTesting(profile.getName());
+        }
+        waitUntil(() -> context.resolver.calls.get() == 3
+                && context.listener.scheduledUuidCheckCountForTesting() == 0);
+
+        assertFalse(context.listener.manualUuidScanActiveForTesting());
+    }
+
+    @Test
     void manualUuidRetryIgnoresActiveNormalCooldown() throws Exception {
         TestContext context = context(true, 168, 1_000L);
         GameProfile profile = profile("ManualCooldown", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
@@ -609,7 +658,11 @@ class PlayerMonitorListenerUuidTest {
         }
 
         private void failNextLookup() {
-            failuresRemaining.incrementAndGet();
+            failNextLookups(1);
+        }
+
+        private void failNextLookups(int count) {
+            failuresRemaining.addAndGet(count);
             resetLatch();
         }
 
