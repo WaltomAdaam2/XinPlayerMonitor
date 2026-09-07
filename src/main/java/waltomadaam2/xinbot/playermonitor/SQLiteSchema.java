@@ -9,7 +9,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 final class SQLiteSchema {
-    static final int VERSION = 4;
+    static final int VERSION = 5;
 
     private SQLiteSchema() {
     }
@@ -81,6 +81,12 @@ final class SQLiteSchema {
                 migrateToV4(connection, statement);
                 statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(4, 'Track player UUID identity checks and writes', "
                         + System.currentTimeMillis() + ")");
+                currentVersion = 4;
+            }
+            if (currentVersion < 5) {
+                migrateToV5(connection, statement);
+                statement.executeUpdate("INSERT INTO schema_migrations(version, description, applied_at) VALUES(5, 'Track first record time for the current server UUID', "
+                        + System.currentTimeMillis() + ")");
             }
             connection.commit();
         } catch (SQLException | IOException error) {
@@ -120,6 +126,15 @@ final class SQLiteSchema {
         addColumnIfMissing(connection, statement, "third_party_checked_at", "INTEGER");
         addColumnIfMissing(connection, statement, "uuid_last_checked_at", "INTEGER");
         addColumnIfMissing(connection, statement, "uuid_last_written_at", "INTEGER");
+    }
+
+    private static void migrateToV5(Connection connection, Statement statement) throws SQLException {
+        addColumnIfMissing(connection, statement, "uuid_first_recorded_at", "INTEGER");
+        statement.executeUpdate("""
+                UPDATE players
+                SET uuid_first_recorded_at = COALESCE(uuid_last_written_at, uuid_last_checked_at, updated_at)
+                WHERE server_uuid IS NOT NULL AND uuid_first_recorded_at IS NULL
+                """);
     }
 
     private static void addColumnIfMissing(Connection connection, Statement statement,

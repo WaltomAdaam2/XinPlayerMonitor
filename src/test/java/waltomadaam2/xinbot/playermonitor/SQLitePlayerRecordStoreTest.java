@@ -59,7 +59,7 @@ class SQLitePlayerRecordStoreTest {
             assertEquals("1", pragma(statement, "PRAGMA foreign_keys"));
             try (ResultSet resultSet = statement.executeQuery("SELECT MAX(version) FROM schema_migrations")) {
                 assertTrue(resultSet.next());
-                assertEquals(4, resultSet.getInt(1));
+                assertEquals(5, resultSet.getInt(1));
             }
         }
     }
@@ -78,7 +78,7 @@ class SQLitePlayerRecordStoreTest {
         try {
             assertEquals(1, reopened.chatCount("Steve"));
             try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
-                assertEquals(4, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
+                assertEquals(5, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
                 assertEquals(1, countRows(connection, "chat_messages"));
                 assertEquals(0, countRows(connection, "replayed_failed_events"));
             }
@@ -144,7 +144,7 @@ class SQLitePlayerRecordStoreTest {
         assertEquals(1, record.statSnapshots.size());
         assertEquals(9, record.statSnapshots.get(0).deathCount);
         try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
-            assertEquals(4, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
+            assertEquals(5, Integer.parseInt(scalar(connection, "SELECT MAX(version) FROM schema_migrations")));
             assertEquals(1, countRows(connection, "stat_snapshots"));
             SQLiteSchema.verify(connection);
         }
@@ -1074,10 +1074,12 @@ class SQLitePlayerRecordStoreTest {
                 PlayerIdentityType.PREMIUM, true);
 
         StoredPlayerIdentity first = service.recordIdentityCheck("Steve", initial, 1_000L);
+        assertEquals(1_000L, first.uuidFirstRecordedAt());
         assertEquals(1_000L, first.uuidLastCheckedAt());
         assertEquals(1_000L, first.uuidLastWrittenAt());
 
         StoredPlayerIdentity unchanged = service.recordIdentityCheck("Steve", initial, 2_000L);
+        assertEquals(1_000L, unchanged.uuidFirstRecordedAt());
         assertEquals(2_000L, unchanged.uuidLastCheckedAt());
         assertEquals(1_000L, unchanged.uuidLastWrittenAt());
 
@@ -1088,6 +1090,7 @@ class SQLitePlayerRecordStoreTest {
         StoredPlayerIdentity updated = service.recordIdentityCheck("Steve", changed, 3_000L);
         assertEquals(changedUuid, updated.serverUuid());
         assertEquals(PlayerIdentityType.THIRD_PARTY, updated.identityType());
+        assertEquals(3_000L, updated.uuidFirstRecordedAt());
         assertEquals(3_000L, updated.uuidLastCheckedAt());
         assertEquals(3_000L, updated.uuidLastWrittenAt());
         service.close();
@@ -1096,8 +1099,36 @@ class SQLitePlayerRecordStoreTest {
         reopened.initialize();
         StoredPlayerIdentity persisted = reopened.playerIdentity("Steve").orElseThrow();
         assertEquals(changedUuid, persisted.serverUuid());
+        assertEquals(3_000L, persisted.uuidFirstRecordedAt());
         assertEquals(3_000L, persisted.uuidLastCheckedAt());
         assertEquals(3_000L, persisted.uuidLastWrittenAt());
+    }
+
+    @Test
+    void migratesV4UuidRecordTimeWithoutLosingCurrentIdentity() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-v4-to-v5");
+        PlayerMonitorService initial = service(directory);
+        initial.initialize();
+        String serverUuid = "98465ebe-e619-3b1d-8b25-98352b6abbb9";
+        IdentityResolution resolution = new IdentityResolution(serverUuid, "offline",
+                IdentityResolution.Lookup.found(serverUuid), IdentityResolution.Lookup.notFound(),
+                PlayerIdentityType.PREMIUM, true);
+        initial.recordIdentityCheck("Steve", resolution, 1_000L);
+        initial.close();
+
+        try (Connection connection = openRaw(directory.resolve("xinpm.db")); Statement statement = connection.createStatement()) {
+            statement.executeUpdate("ALTER TABLE players DROP COLUMN uuid_first_recorded_at");
+            statement.executeUpdate("DELETE FROM schema_migrations WHERE version = 5");
+        }
+
+        PlayerMonitorService upgraded = service(directory);
+        upgraded.initialize();
+        StoredPlayerIdentity identity = upgraded.playerIdentity("Steve").orElseThrow();
+        assertEquals(serverUuid, identity.serverUuid());
+        assertEquals(1_000L, identity.uuidFirstRecordedAt());
+        try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
+            assertEquals("5", scalar(connection, "SELECT MAX(version) FROM schema_migrations"));
+        }
     }
 
     @Test
@@ -1123,8 +1154,8 @@ class SQLitePlayerRecordStoreTest {
     }
 
     @Test
-    void migratesV3PlayersToV4WithoutLosingHistory() throws Exception {
-        Path directory = temporaryDirectory.resolve("playermonitor-v3-to-v4");
+    void migratesV3PlayersToV5WithoutLosingHistory() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-v3-to-v5");
         PlayerMonitorService initial = service(directory);
         initial.initialize();
         initial.recordChat("Historical", "keep", 100L);
@@ -1134,10 +1165,10 @@ class SQLitePlayerRecordStoreTest {
         try (Connection connection = openRaw(directory.resolve("xinpm.db")); Statement statement = connection.createStatement()) {
             for (String column : List.of("server_uuid", "offline_uuid", "mojang_uuid", "third_party_uuid",
                     "identity_type", "mojang_checked_at", "third_party_checked_at",
-                    "uuid_last_checked_at", "uuid_last_written_at")) {
+                    "uuid_last_checked_at", "uuid_last_written_at", "uuid_first_recorded_at")) {
                 statement.executeUpdate("ALTER TABLE players DROP COLUMN " + column);
             }
-            statement.executeUpdate("DELETE FROM schema_migrations WHERE version = 4");
+            statement.executeUpdate("DELETE FROM schema_migrations WHERE version >= 4");
         }
 
         PlayerMonitorService upgraded = service(directory);
@@ -1147,7 +1178,7 @@ class SQLitePlayerRecordStoreTest {
         assertEquals(null, identity.uuidLastCheckedAt());
         assertEquals(null, identity.uuidLastWrittenAt());
         try (Connection connection = openRaw(directory.resolve("xinpm.db"))) {
-            assertEquals("4", scalar(connection, "SELECT MAX(version) FROM schema_migrations"));
+            assertEquals("5", scalar(connection, "SELECT MAX(version) FROM schema_migrations"));
             assertEquals("keep", scalar(connection, "SELECT message FROM chat_messages"));
         }
     }

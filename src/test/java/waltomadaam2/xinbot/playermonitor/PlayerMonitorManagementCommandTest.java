@@ -429,7 +429,8 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(output.contains(SectionFormatter.header("Player Data")));
             assertTrue(output.contains(SectionFormatter.divider("Player Data")));
             String cachedValue = storedIdentity
-                    ? "\u001B[38;5;29m" + serverUuid + "\u001B[0m" : "无";
+                    ? "\u001B[38;5;29m" + serverUuid + "\u001B[0m  \u001B[38;5;215m"
+                    + "(首次记录: 1970-01-01 00:00:01)\u001B[0m" : "无";
             assertTrue(output.contains("\u001B[36muuid：\u001B[0m" + cachedValue));
             assertEquals(List.of("playerinfo"), command.onTabComplete(null, "playermonitor",
                     new String[]{"Steve", "playerinfo"}));
@@ -626,7 +627,7 @@ class PlayerMonitorManagementCommandTest {
                     "> \u001B[92m会话=\u001B[0m\u001B[33m1970-01-01 00:00:03\u001B[0m"));
             String compactPlain = compactRendered.replaceAll("\\u001B\\[[0-9;]*m", "");
             assertTrue(compactPlain.contains("Plugin Version: v1.5.7"));
-            assertTrue(compactPlain.contains("Database Version: v4"));
+            assertTrue(compactPlain.contains("Database Version: v5"));
             assertTrue(compactRendered.contains(
                     "> \u001B[92mStat=\u001B[0m\u001B[33m1970-01-01 00:00:04\u001B[0m\n"
                             + "  > \u001B[92mUUID=\u001B[0m\u001B[33m1970-01-01 00:00:04\u001B[0m"));
@@ -638,6 +639,10 @@ class PlayerMonitorManagementCommandTest {
                     "在线=\u001B[38;5;215m0\u001B[0m, 队列=\u001B[38;5;215m0\u001B[0m"));
             assertTrue(compactRendered.contains(
                     "等待响应=\u001B[38;5;215mfalse\u001B[0m"));
+            assertTrue(compactRendered.contains("\u001B[36mUUID 扫描:\u001B[0m 在线=\u001B[38;5;215m0\u001B[0m"
+                    + ", 队列=\u001B[38;5;215m0\u001B[0m"
+                    + ", 活动轮次=\u001B[38;5;215m0\u001B[0m"
+                    + ", 等待响应=\u001B[38;5;215mfalse\u001B[0m"));
             assertTrue(compactRendered.contains(
                     "system received=\u001B[38;5;215m0\u001B[0m"));
             assertTrue(compactRendered.contains(
@@ -668,6 +673,10 @@ class PlayerMonitorManagementCommandTest {
             assertFalse(fullRendered.contains("\u001B[92m健康状态"));
             assertTrue(fullRendered.contains(
                     "\u001B[36m最近Chat写入:\u001B[0m \u001B[33m1970-01-01 00:00:02\u001B[0m"));
+            assertTrue(fullRendered.contains("\u001B[36mUUID 扫描:\u001B[0m 在线=\u001B[38;5;215m0\u001B[0m"
+                    + ", 队列=\u001B[38;5;215m0\u001B[0m"
+                    + ", 活动轮次=\u001B[38;5;215m0\u001B[0m"
+                    + ", 等待响应=\u001B[38;5;215mfalse\u001B[0m"));
             assertTrue(fullRendered.contains(
                     "\u001B[36m最近Stat写入:\u001B[0m \u001B[33m1970-01-01 00:00:04\u001B[0m\n"
                             + "  \u001B[36m最近UUID写入:\u001B[0m \u001B[33m1970-01-01 00:00:04\u001B[0m"));
@@ -806,7 +815,7 @@ class PlayerMonitorManagementCommandTest {
         private static StoredPlayerIdentity defaultIdentity() {
             return new StoredPlayerIdentity("Steve", "98465ebe-e619-3b1d-8b25-98352b6abbb9",
                     "11111111-1111-3111-8111-111111111111", null, null,
-                    PlayerIdentityType.UNKNOWN, null, null, 5_000L, 5_000L);
+                    PlayerIdentityType.UNKNOWN, null, null, 5_000L, 5_000L, 5_000L);
         }
 
         @Override

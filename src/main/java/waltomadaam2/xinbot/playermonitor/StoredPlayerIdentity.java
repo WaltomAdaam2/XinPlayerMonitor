@@ -9,6 +9,7 @@ record StoredPlayerIdentity(
         PlayerIdentityType identityType,
         Long mojangCheckedAt,
         Long thirdPartyCheckedAt,
+        Long uuidFirstRecordedAt,
         Long uuidLastCheckedAt,
         Long uuidLastWrittenAt) {
 }

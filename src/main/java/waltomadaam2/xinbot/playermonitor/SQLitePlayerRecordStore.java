@@ -1700,8 +1700,9 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
 
         List<String> assignments = new ArrayList<>();
         List<Object> values = new ArrayList<>();
-        boolean identityChanged = addChanged(assignments, values, "server_uuid",
+        boolean serverUuidChanged = addChanged(assignments, values, "server_uuid",
                 previous.serverUuid(), resolution.serverUuid());
+        boolean identityChanged = serverUuidChanged;
         identityChanged |= addChanged(assignments, values, "offline_uuid",
                 previous.offlineUuid(), resolution.offlineUuid());
         identityChanged |= addChanged(assignments, values, "mojang_uuid", previous.mojangUuid(), mojangUuid);
@@ -1721,6 +1722,10 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         if (resolution.successful()) {
             assignments.add("uuid_last_checked_at = ?");
             values.add(checkedAt);
+        }
+        if (serverUuidChanged) {
+            assignments.add("uuid_first_recorded_at = ?");
+            values.add(resolution.serverUuid() == null || resolution.serverUuid().isBlank() ? null : checkedAt);
         }
         if (identityChanged) {
             assignments.add("uuid_last_written_at = ?");
@@ -1897,7 +1902,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT display_name, server_uuid, offline_uuid, mojang_uuid, third_party_uuid,
                        identity_type, mojang_checked_at, third_party_checked_at,
-                       uuid_last_checked_at, uuid_last_written_at
+                       uuid_first_recorded_at, uuid_last_checked_at, uuid_last_written_at
                 FROM players WHERE id = ?
                 """)) {
             statement.setLong(1, playerId);
@@ -1921,6 +1926,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
                         identityType,
                         nullableLong(resultSet, "mojang_checked_at"),
                         nullableLong(resultSet, "third_party_checked_at"),
+                        nullableLong(resultSet, "uuid_first_recorded_at"),
                         nullableLong(resultSet, "uuid_last_checked_at"),
                         nullableLong(resultSet, "uuid_last_written_at"));
             }

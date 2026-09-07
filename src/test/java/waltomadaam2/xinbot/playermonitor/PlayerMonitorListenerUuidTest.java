@@ -8,6 +8,7 @@ import org.geysermc.mcprotocollib.auth.GameProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.Logger;
 import org.slf4j.helpers.NOPLogger;
 import xin.bbtt.mcbot.Bot;
 import xin.bbtt.mcbot.Server;
@@ -42,11 +43,13 @@ class PlayerMonitorListenerUuidTest {
 
     private final List<PlayerMonitorListener> listeners = new ArrayList<>();
     private final List<PlayerMonitorService> services = new ArrayList<>();
+    private final List<LoggerContext> loggerContexts = new ArrayList<>();
 
     @AfterEach
     void tearDown() {
         listeners.forEach(PlayerMonitorListener::close);
         services.forEach(PlayerMonitorService::close);
+        loggerContexts.forEach(LoggerContext::stop);
         Bot.INSTANCE.players.clear();
     }
 
@@ -75,7 +78,8 @@ class PlayerMonitorListenerUuidTest {
 
     @Test
     void manualUuidFailuresStopAfterThreeAttemptsAndAllowLaterScan() throws Exception {
-        TestContext context = context(false, 0, 1_000L);
+        LoggerCapture capture = loggerCapture("manual-uuid-retry-limit");
+        TestContext context = context(false, 0, new AtomicLong(1_000L), capture.logger);
         GameProfile profile = profile("ManualRetryLimit", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
         Bot.INSTANCE.players.put(profile.getId(), profile);
         context.resolver.failNextLookups(3);
@@ -94,6 +98,12 @@ class PlayerMonitorListenerUuidTest {
                 && !context.listener.manualUuidScanActiveForTesting());
 
         assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+        assertEquals(3, capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("Requested uuid for ")).count());
+        assertEquals(List.of("\u001B[93mUUID record completed for \u001B[38;5;215mManualRetryLimit"
+                        + "\u001B[0m\u001B[93m: total=1, succeeded=0, failed=1, skipped=0\u001B[0m"),
+                capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("UUID record completed")).toList());
         assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
         waitUntil(() -> context.resolver.calls.get() == 4
                 && !context.listener.manualUuidScanActiveForTesting());
@@ -258,41 +268,81 @@ class PlayerMonitorListenerUuidTest {
     }
 
     @Test
-    void changedIdentityEmitsOneColoredUuidRecordWithoutRepeatSpam() throws Exception {
-        Path directory = temporaryDirectory.resolve("uuid-record-log");
-        MonitorSettingsStore settings = new MonitorSettingsStore(directory);
-        settings.initialize();
-        settings.setUuidRecordEnable(true);
-        settings.setUuidRecordCooldown(0);
-        PlayerMonitorService service = new PlayerMonitorService(directory, settings);
-        service.initialize();
-        services.add(service);
-        LoggerContext context = new LoggerContext();
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.setContext(context);
-        appender.start();
-        ch.qos.logback.classic.Logger logger = context.getLogger("uuid-record-log");
-        logger.addAppender(appender);
-        PlayerMonitorListener listener = new PlayerMonitorListener(service,
-                new PluginLog(directory.resolve("log")), logger, settings, new FakeResolver(), () -> 1_000L);
-        listener.setGameActiveForTesting(true);
-        listeners.add(listener);
+    void firstAndUnchangedManualChecksEachLogRequestAndCompletion() throws Exception {
+        AtomicLong now = new AtomicLong(1_000L);
+        LoggerCapture capture = loggerCapture("uuid-record-log");
+        TestContext context = context(false, 0, now, capture.logger);
         GameProfile profile = profile("Recorded", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
-        try {
-            listener.onPlayerJoin(new PlayerJoinEvent(profile));
-            awaitUuidTasks(new TestContext(service, listener, settings, null));
-            List<String> records = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
-                    .filter(message -> message.startsWith("Player uuid recorded for ")).toList();
-            assertEquals(List.of("Player uuid recorded for \u001B[38;5;215mRecorded\u001B[0m"
-                    + ": total=1, succeeded=1, failed=0, skipped=0"), records);
+        Bot.INSTANCE.players.put(profile.getId(), profile);
 
-            listener.onPlayerJoin(new PlayerJoinEvent(profile));
-            awaitUuidTasks(new TestContext(service, listener, settings, null));
-            assertEquals(1, appender.list.stream().map(ILoggingEvent::getFormattedMessage)
-                    .filter(message -> message.startsWith("Player uuid recorded for ")).count());
-        } finally {
-            context.stop();
-        }
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> !context.listener.manualUuidScanActiveForTesting());
+        assertUuidCycleMessages(capture, "Recorded", 1, 0, 0);
+        StoredPlayerIdentity first = context.service.playerIdentity("Recorded").orElseThrow();
+        assertEquals(1_000L, first.uuidFirstRecordedAt());
+
+        capture.appender.list.clear();
+        now.set(2_000L);
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> !context.listener.manualUuidScanActiveForTesting());
+        assertUuidCycleMessages(capture, "Recorded", 1, 0, 0);
+        StoredPlayerIdentity unchanged = context.service.playerIdentity("Recorded").orElseThrow();
+        assertEquals(profile.getId().toString(), unchanged.serverUuid());
+        assertEquals(1_000L, unchanged.uuidFirstRecordedAt());
+        assertEquals(2_000L, unchanged.uuidLastCheckedAt());
+    }
+
+    @Test
+    void multiPlayerManualScanLogsRequestsOnceAndReportsLiveStatus() throws Exception {
+        LoggerCapture capture = loggerCapture("multi-uuid-scan");
+        TestContext context = context(false, 0, new AtomicLong(1_000L), capture.logger);
+        GameProfile first = profile("FirstUuid", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        GameProfile second = profile("SecondUuid", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        Bot.INSTANCE.players.put(first.getId(), first);
+        Bot.INSTANCE.players.put(second.getId(), second);
+        context.resolver.pause();
+
+        assertEquals(2, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> context.listener.uuidScanStatus().queued() == 0);
+        PlayerMonitorListener.UuidScanStatus active = context.listener.uuidScanStatus();
+        assertEquals(2, active.onlinePlayers());
+        assertEquals(0, active.queued());
+        assertEquals(1, active.activeCycles());
+        assertTrue(active.waitingResponse());
+
+        context.resolver.resume();
+        waitUntil(() -> !context.listener.manualUuidScanActiveForTesting());
+        List<String> requests = capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("Requested uuid for ")).toList();
+        assertEquals(2, requests.size());
+        assertTrue(requests.contains("Requested uuid for \u001B[38;5;215mFirstUuid\u001B[0m."));
+        assertTrue(requests.contains("Requested uuid for \u001B[38;5;215mSecondUuid\u001B[0m."));
+        assertEquals(List.of("\u001B[93mUUID record completed: total=2, succeeded=2, failed=0, skipped=0\u001B[0m"),
+                capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("UUID record completed")).toList());
+        PlayerMonitorListener.UuidScanStatus complete = context.listener.uuidScanStatus();
+        assertEquals(0, complete.activeCycles());
+        assertFalse(complete.waitingResponse());
+    }
+
+    @Test
+    void playerLeavingDuringManualRetryCompletesBatchAsSkipped() throws Exception {
+        LoggerCapture capture = loggerCapture("skipped-uuid-scan");
+        TestContext context = context(false, 168, new AtomicLong(1_000L), capture.logger);
+        GameProfile profile = profile("SkippedUuid", "98465ebe-e619-3b1d-8b25-98352b6abbb9");
+        Bot.INSTANCE.players.put(profile.getId(), profile);
+        context.resolver.failNextLookup();
+
+        assertEquals(1, context.listener.scanAllOnlineUuidPlayers());
+        waitUntil(() -> context.resolver.calls.get() == 1
+                && context.listener.scheduledUuidCheckAttemptForTesting(profile.getName()) == 2);
+        context.listener.onPlayerLeave(new PlayerLeaveEvent(profile));
+        waitUntil(() -> !context.listener.manualUuidScanActiveForTesting());
+
+        assertEquals(List.of("\u001B[93mUUID record completed for \u001B[38;5;215mSkippedUuid"
+                        + "\u001B[0m\u001B[93m: total=1, succeeded=0, failed=0, skipped=1\u001B[0m"),
+                capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("UUID record completed")).toList());
     }
 
     @Test
@@ -327,6 +377,7 @@ class PlayerMonitorListenerUuidTest {
         awaitUuidTasks(context);
         StoredPlayerIdentity identity = context.service.playerIdentity("Changed").orElseThrow();
         assertEquals(changed.getId().toString(), identity.serverUuid());
+        assertEquals(2_000L, identity.uuidFirstRecordedAt());
         assertEquals(2_000L, identity.uuidLastWrittenAt());
     }
 
@@ -578,6 +629,10 @@ class PlayerMonitorListenerUuidTest {
     }
 
     private TestContext context(boolean enabled, int cooldown, AtomicLong now) throws Exception {
+        return context(enabled, cooldown, now, NOPLogger.NOP_LOGGER);
+    }
+
+    private TestContext context(boolean enabled, int cooldown, AtomicLong now, Logger logger) throws Exception {
         Path directory = temporaryDirectory.resolve("context-" + services.size());
         MonitorSettingsStore settings = new MonitorSettingsStore(directory);
         settings.initialize();
@@ -590,10 +645,33 @@ class PlayerMonitorListenerUuidTest {
         services.add(service);
         FakeResolver resolver = new FakeResolver();
         PlayerMonitorListener listener = new PlayerMonitorListener(service,
-                new PluginLog(directory.resolve("log")), NOPLogger.NOP_LOGGER, settings, resolver, now::get);
+                new PluginLog(directory.resolve("log")), logger, settings, resolver, now::get);
         listener.setGameActiveForTesting(true);
         listeners.add(listener);
         return new TestContext(service, listener, settings, resolver);
+    }
+
+    private LoggerCapture loggerCapture(String name) {
+        LoggerContext context = new LoggerContext();
+        loggerContexts.add(context);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.setContext(context);
+        appender.start();
+        ch.qos.logback.classic.Logger logger = context.getLogger(name);
+        logger.addAppender(appender);
+        return new LoggerCapture(logger, appender);
+    }
+
+    private static void assertUuidCycleMessages(LoggerCapture capture, String playerName,
+                                                int succeeded, int failed, int skipped) {
+        List<String> messages = capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.contains("uuid for ") || message.contains("UUID record completed"))
+                .toList();
+        assertEquals(List.of(
+                "Requested uuid for \u001B[38;5;215m" + playerName + "\u001B[0m.",
+                "\u001B[93mUUID record completed for \u001B[38;5;215m" + playerName
+                        + "\u001B[0m\u001B[93m: total=1, succeeded=" + succeeded + ", failed=" + failed
+                        + ", skipped=" + skipped + "\u001B[0m"), messages);
     }
 
     private static GameProfile profile(String name, String uuid) {
@@ -617,6 +695,9 @@ class PlayerMonitorListenerUuidTest {
     private record TestContext(PlayerMonitorService service, PlayerMonitorListener listener,
                                MonitorSettingsStore settings,
                                FakeResolver resolver) {
+    }
+
+    private record LoggerCapture(Logger logger, ListAppender<ILoggingEvent> appender) {
     }
 
     private static final class FakeResolver implements PlayerIdentityResolver {

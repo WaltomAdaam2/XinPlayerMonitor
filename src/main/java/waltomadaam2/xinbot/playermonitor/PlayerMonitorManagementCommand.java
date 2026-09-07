@@ -695,6 +695,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         List<String> lines = new ArrayList<>();
         lines.add("Plugin Version: " + XinPlayerMonitor.pluginVersion());
         PlayerMonitorListener.StatScanStatus scan = listener.statScanStatus();
+        PlayerMonitorListener.UuidScanStatus uuidScan = listener.uuidScanStatus();
         if (full) {
             lines.add("Game Active: " + countValue(scan.gameActive()));
             lines.add("Reconnect Pending: " + countValue(scan.reconnectPending()));
@@ -711,6 +712,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     + ", " + statusValue("pending", scan.pendingDispatches())
                     + ", " + statusValue("active", scan.activeCycles())
                     + ", " + statusValue("waiting-response", scan.waitingResponse()));
+            lines.add(uuidScanStatusLine(uuidScan));
             lines.add("Chat Pipeline:");
             lines.add("  system received:   " + countValue(scan.systemChatReceived()));
             lines.add("  public parsed:     " + countValue(scan.publicChatParsed()));
@@ -734,6 +736,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                     + ", " + statusValue("待发送", scan.pendingDispatches())
                     + ", " + statusValue("活动轮次", scan.activeCycles())
                     + ", " + statusValue("等待响应", scan.waitingResponse()));
+            lines.add(uuidScanStatusLine(uuidScan));
             lines.add("Chat Pipeline: " + statusValue("system received", scan.systemChatReceived())
                     + ", " + statusValue("public parsed", scan.publicChatParsed())
                     + ", " + statusValue("monitor accepted", scan.chatAcceptedByPlayerMonitor()));
@@ -1013,7 +1016,10 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
             print(CYAN + label + RESET + "无");
             return;
         }
-        print(CYAN + label + RESET + UUID_VALUE_COLOR + identity.serverUuid() + RESET);
+        String firstRecorded = identity.uuidFirstRecordedAt() == null || identity.uuidFirstRecordedAt() <= 0L
+                ? "无" : format(identity.uuidFirstRecordedAt());
+        print(CYAN + label + RESET + UUID_VALUE_COLOR + identity.serverUuid() + RESET + "  "
+                + COUNT_COLOR + "(首次记录: " + firstRecorded + ")" + RESET);
     }
 
     private void playerDataPlainField(String label, String value) {
@@ -1384,6 +1390,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
                 greenLabel("玩家 Stat 信息记录:") + " " + gold(stats.stats()),
                 greenLabel("Player uuid 信息记录:") + " " + gold(stats.uuidRecords()),
                 greenLabel("未结束会话:") + " " + gold(stats.openSessions()));
+    }
+
+    private static String uuidScanStatusLine(PlayerMonitorListener.UuidScanStatus scan) {
+        return "UUID 扫描: " + statusValue("在线", scan.onlinePlayers())
+                + ", " + statusValue("队列", scan.queued())
+                + ", " + statusValue("活动轮次", scan.activeCycles())
+                + ", " + statusValue("等待响应", scan.waitingResponse());
     }
 
     private static String greenLabel(String label) {
