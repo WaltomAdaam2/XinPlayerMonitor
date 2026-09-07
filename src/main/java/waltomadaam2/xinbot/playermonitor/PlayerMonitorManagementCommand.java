@@ -36,6 +36,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final String SETTING_NAME = "\u001B[38;5;151m"; // xterm-256 approximation of #ADEBB3
     private static final String SETTING_VALUE = "\u001B[38;5;215m"; // xterm-256 approximation of #FFC067
     private static final String PLAYER_ACTION = "\u001B[38;5;183m"; // xterm-256 approximation of #E0B0FF
+    private static final String SUBCOMMAND_COLOR = "\u001B[38;5;115m"; // #87D7AF
     private static final String COMMAND_NAME = "\u001B[38;5;145m"; // xterm-256 approximation of #A6ADB4
     private static final String COUNT_COLOR = "\u001B[38;5;215m"; // xterm-256 approximation of #ffb343
     private static final String BRIGHT_GREEN = "\u001B[92m";
@@ -45,6 +46,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
     private static final AttributedStyle SETTING_NAME_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xADEBB3);
     private static final AttributedStyle SETTING_VALUE_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFC067);
     private static final AttributedStyle PLAYER_ACTION_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xE0B0FF);
+    private static final AttributedStyle SUBCOMMAND_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0x87D7AF);
     private static final AttributedStyle COUNT_ARG_STYLE = AttributedStyle.DEFAULT.foregroundRgb(0xFFB343);
 
     static final String PLAYER_PLACEHOLDER = "<玩家名>";
@@ -215,7 +217,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         String root = lower(args[0]);
         if ("status".equals(root) && index == 1 && "full".equals(value)) {
-            return PLAYER_ACTION_STYLE;
+            return SUBCOMMAND_STYLE;
         }
         if ("scan-stat".equals(root)
                 || "status".equals(root) || "db-stat".equals(root)) {
@@ -223,7 +225,7 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         }
         if ("scan".equals(root)) {
             return index == 1 && ("stat".equals(value) || "uuid".equals(value))
-                    ? PLAYER_ACTION_STYLE : AttributedStyle.DEFAULT;
+                    ? SUBCOMMAND_STYLE : AttributedStyle.DEFAULT;
         }
         if ("backup".equals(root)) {
             return index == 1 ? PLAYER_ACTION_STYLE : AttributedStyle.DEFAULT;
@@ -263,12 +265,13 @@ final class PlayerMonitorManagementCommand extends TabExecutor {
         if (usage.equals("Usage: playermonitor scan stat") || usage.equals("Usage: playermonitor scan uuid")) {
             String action = usage.substring("Usage: playermonitor scan ".length());
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
-                    + ROOT_COMMAND + "scan" + RESET + " " + PLAYER_ACTION + action + RESET;
+                    + ROOT_COMMAND + "scan" + RESET + " " + SUBCOMMAND_COLOR + action + RESET;
         }
         if (usage.startsWith("Usage: playermonitor status")) {
             String remainder = usage.substring("Usage: playermonitor status".length());
             return "Usage: " + COMMAND_NAME + "playermonitor" + RESET + " "
-                    + ROOT_COMMAND + "status" + RESET + PLAYER_ACTION + remainder + RESET;
+                    + ROOT_COMMAND + "status" + RESET
+                    + remainder.replace("full", SUBCOMMAND_COLOR + "full" + RESET);
         }
         if (usage.startsWith("Usage: playermonitor backup")) {
             String remainder = usage.substring("Usage: playermonitor backup".length());

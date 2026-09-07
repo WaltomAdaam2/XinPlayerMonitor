@@ -41,11 +41,15 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
-    void highlightsScanStatAsLavenderRootCommand() {
+    void highlightsOnlyScanAndStatusSubcommandsWithMintColor() {
         String[] args = {"scan"};
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(args, 0));
-        assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(
+        assertStyle(0x87D7AF, PlayerMonitorManagementCommand.styleForArgument(
                 new String[]{"scan", "stat"}, 1));
+        assertStyle(0x87D7AF, PlayerMonitorManagementCommand.styleForArgument(
+                new String[]{"scan", "uuid"}, 1));
+        assertStyle(0x87D7AF, PlayerMonitorManagementCommand.styleForArgument(
+                new String[]{"status", "full"}, 1));
     }
 
 
@@ -76,10 +80,16 @@ class PlayerMonitorManagementCommandTest {
     }
 
     @Test
-    void scanStatUsageUsesLavender() {
-        String colored = PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor scan stat");
-        assertEquals(1, count(colored, "38;5;183mscan"));
-        assertEquals(1, count(colored, "38;5;183mstat"));
+    void scanAndStatusUsageColorsOnlySubcommandWordsWithMint() {
+        assertEquals("Usage: \u001B[38;5;145mplayermonitor\u001B[0m "
+                        + "\u001B[38;5;183mscan\u001B[0m \u001B[38;5;115mstat\u001B[0m",
+                PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor scan stat"));
+        assertEquals("Usage: \u001B[38;5;145mplayermonitor\u001B[0m "
+                        + "\u001B[38;5;183mscan\u001B[0m \u001B[38;5;115muuid\u001B[0m",
+                PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor scan uuid"));
+        assertEquals("Usage: \u001B[38;5;145mplayermonitor\u001B[0m "
+                        + "\u001B[38;5;183mstatus\u001B[0m [\u001B[38;5;115mfull\u001B[0m]",
+                PlayerMonitorManagementCommand.colorUsage("Usage: playermonitor status [full]"));
     }
 
     @Test
@@ -266,7 +276,7 @@ class PlayerMonitorManagementCommandTest {
     @Test
     void statusAndBackupCommandsUseExpectedStylesAndRejectInvalidTrailingArguments() {
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"status"}, 0));
-        assertStyle(0xE0B0FF,
+        assertStyle(0x87D7AF,
                 PlayerMonitorManagementCommand.styleForArgument(new String[]{"status", "full"}, 1));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 0));
         assertStyle(0xE0B0FF, PlayerMonitorManagementCommand.styleForArgument(new String[]{"backup", "now"}, 1));
@@ -292,6 +302,8 @@ class PlayerMonitorManagementCommandTest {
                 command.onTabComplete(null, "playermonitor", new String[]{"backup", ""}));
         assertEquals(List.of("full"),
                 command.onTabComplete(null, "playermonitor", new String[]{"status", ""}));
+        assertEquals(List.of("stat", "uuid"),
+                command.onTabComplete(null, "playermonitor", new String[]{"scan"}));
         assertEquals(List.of(),
                 command.onTabComplete(null, "playermonitor", new String[]{"backup", "now", ""}));
     }

@@ -655,7 +655,8 @@ final class PlayerMonitorListener implements Listener {
     UuidScanStatus uuidScanStatus() {
         synchronized (uuidScheduleLock) {
             int inFlight = (int) scheduledUuidChecks.values().stream().filter(ScheduledUuidCheck::inFlight).count();
-            return new UuidScanStatus(onlinePlayers.size(), scheduledUuidChecks.size() - inFlight,
+            int queued = (int) scheduledUuidChecks.values().stream().filter(ScheduledUuidCheck::queued).count();
+            return new UuidScanStatus(onlinePlayers.size(), queued,
                     activeUuidBatches, inFlight > 0);
         }
     }
@@ -1195,9 +1196,10 @@ final class PlayerMonitorListener implements Listener {
                 ScheduledFuture<?> future = uuidExecutor.schedule(
                         () -> runUuidCheck(playerName, serverUuid, generation, token, taskForce, taskAttempt),
                         effectiveDelay, TimeUnit.MILLISECONDS);
+                boolean queued = scheduledBatch != null || delayMillis <= 0L;
                 scheduledUuidChecks.put(normalized,
                         new ScheduledUuidCheck(playerName, serverUuid, token, future, completion, taskForce, taskAttempt,
-                                scheduledBatch, false));
+                                scheduledBatch, queued, false));
                 if (existing != null) {
                     if (existing.force()) {
                         completion.whenComplete((ignored, failure) -> existing.completion().complete(null));
@@ -1272,7 +1274,7 @@ final class PlayerMonitorListener implements Listener {
                 UuidBatch batch = current.batch() == null
                         ? beginUuidBatchLocked(List.of(playerName), false) : current.batch();
                 dispatched = new ScheduledUuidCheck(current.playerName(), current.serverUuid(), current.token(), current.future(),
-                        current.completion(), current.force(), current.attempt(), batch, true);
+                        current.completion(), current.force(), current.attempt(), batch, false, true);
                 scheduledUuidChecks.put(normalized, dispatched);
             }
             logger.info("Requested uuid for " + PLAYER_LOG_COLOR + "{}" + RESET + ".", playerName);
@@ -2221,7 +2223,7 @@ final class PlayerMonitorListener implements Listener {
 
     private record ScheduledUuidCheck(String playerName, UUID serverUuid, long token, ScheduledFuture<?> future,
                                       CompletableFuture<Void> completion, boolean force, int attempt,
-                                      UuidBatch batch, boolean inFlight) {
+                                      UuidBatch batch, boolean queued, boolean inFlight) {
     }
 
     private static final class UuidBatch {

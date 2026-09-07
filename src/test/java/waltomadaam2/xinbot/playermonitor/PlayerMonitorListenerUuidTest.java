@@ -65,6 +65,10 @@ class PlayerMonitorListenerUuidTest {
                 && context.listener.scheduledUuidCheckCountForTesting() == 1);
         assertTrue(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()));
         assertTrue(context.listener.manualUuidScanActiveForTesting());
+        PlayerMonitorListener.UuidScanStatus retry = context.listener.uuidScanStatus();
+        assertEquals(1, retry.queued());
+        assertEquals(1, retry.activeCycles());
+        assertFalse(retry.waitingResponse());
         assertEquals(-2, context.listener.scanAllOnlineUuidPlayers());
 
         context.listener.runScheduledUuidCheckForTesting(profile.getName());
@@ -74,6 +78,10 @@ class PlayerMonitorListenerUuidTest {
         assertEquals(profile.getId().toString(),
                 context.service.playerIdentity(profile.getName()).orElseThrow().serverUuid());
         assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+        PlayerMonitorListener.UuidScanStatus complete = context.listener.uuidScanStatus();
+        assertEquals(0, complete.queued());
+        assertEquals(0, complete.activeCycles());
+        assertFalse(complete.waitingResponse());
     }
 
     @Test
@@ -249,6 +257,30 @@ class PlayerMonitorListenerUuidTest {
         assertEquals(0, context.resolver.calls.get());
         assertEquals(1, context.listener.scheduledUuidCheckCountForTesting());
         assertFalse(context.listener.scheduledUuidCheckForcedForTesting(profile.getName()));
+        assertEquals(0, context.listener.uuidScanStatus().queued());
+    }
+
+    @Test
+    void futureCooldownTimersDoNotInflateIdleUuidQueue() throws Exception {
+        TestContext context = context(true, 336, 1_000L);
+        for (int index = 0; index < 20; index++) {
+            String playerName = "Cooldown" + index;
+            GameProfile profile = new GameProfile(UUID.nameUUIDFromBytes(playerName.getBytes()), playerName);
+            context.service.recordIdentityCheck(playerName,
+                    context.resolver.resolve(playerName, profile.getId(), null), 1_000L);
+            context.listener.onPlayerJoin(new PlayerJoinEvent(profile));
+        }
+        context.resolver.calls.set(0);
+
+        awaitUuidTasks(context);
+
+        assertEquals(20, context.listener.scheduledUuidCheckCountForTesting());
+        assertEquals(0, context.resolver.calls.get());
+        PlayerMonitorListener.UuidScanStatus idle = context.listener.uuidScanStatus();
+        assertEquals(20, idle.onlinePlayers());
+        assertEquals(0, idle.queued());
+        assertEquals(0, idle.activeCycles());
+        assertFalse(idle.waitingResponse());
     }
 
     @Test
@@ -265,6 +297,10 @@ class PlayerMonitorListenerUuidTest {
         assertEquals(1_000L, identity.uuidLastCheckedAt());
         assertEquals(1_000L, identity.uuidLastWrittenAt());
         assertEquals(1, context.resolver.calls.get());
+        PlayerMonitorListener.UuidScanStatus status = context.listener.uuidScanStatus();
+        assertEquals(0, status.queued());
+        assertEquals(0, status.activeCycles());
+        assertFalse(status.waitingResponse());
     }
 
     @Test
@@ -620,6 +656,10 @@ class PlayerMonitorListenerUuidTest {
     private static void assertManualRetryCancelled(TestContext context, String playerName) throws Exception {
         waitUntil(() -> !context.listener.manualUuidScanActiveForTesting());
         assertEquals(0, context.listener.scheduledUuidCheckCountForTesting());
+        PlayerMonitorListener.UuidScanStatus status = context.listener.uuidScanStatus();
+        assertEquals(0, status.queued());
+        assertEquals(0, status.activeCycles());
+        assertFalse(status.waitingResponse());
         context.listener.runScheduledUuidCheckForTesting(playerName);
         assertEquals(1, context.resolver.calls.get());
     }
