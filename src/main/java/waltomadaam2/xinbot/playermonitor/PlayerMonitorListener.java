@@ -54,7 +54,6 @@ final class PlayerMonitorListener implements Listener {
     private static final long ENTRY_ROSTER_POLL_MILLIS = 100L;
     private static final long ENTRY_ROSTER_STABLE_MILLIS = 500L;
     private static final long ENTRY_ROSTER_TIMEOUT_MILLIS = 5_000L;
-    private static final Pattern MINECRAFT_FORMAT_CODE = Pattern.compile("(?i)§[0-9a-fk-orx]");
     private static final Pattern PUBLIC_CHAT_TEXT = Pattern.compile(
             "^(?:§[0-9a-fk-orx])*\\s*<((?:(?:§[0-9a-fk-orx])|[^>])+)>(.*)$",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
@@ -459,7 +458,7 @@ final class PlayerMonitorListener implements Listener {
             chatRejected.incrementAndGet();
             return;
         }
-        message = stripMinecraftFormatting(message);
+        message = MinecraftFormatting.strip(message);
         String playerName = nameOf(event.getSender());
         chatAcceptedByPlayerMonitor.incrementAndGet();
         try {
@@ -534,12 +533,12 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         publicChatParsed.incrementAndGet();
-        String playerName = stripMinecraftFormatting(matcher.group(1)).trim();
+        String playerName = MinecraftFormatting.strip(matcher.group(1)).trim();
         String message = matcher.group(2);
         if (message.startsWith(" ")) {
             message = message.substring(1);
         }
-        message = stripMinecraftFormatting(message);
+        message = MinecraftFormatting.strip(message);
         if (playerName.isEmpty()) {
             chatRejected.incrementAndGet();
             return;
@@ -551,10 +550,6 @@ final class PlayerMonitorListener implements Listener {
             chatDbFailed.incrementAndGet();
             log.warn("failed to record fallback chat for " + playerName + ": " + error.getMessage());
         }
-    }
-
-    private static String stripMinecraftFormatting(String value) {
-        return MINECRAFT_FORMAT_CODE.matcher(value).replaceAll("");
     }
 
     private void scheduleStatWrite(StatResponseCollector.CapturedStat captured, long token) {

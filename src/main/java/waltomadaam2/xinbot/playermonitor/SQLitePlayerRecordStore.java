@@ -27,6 +27,8 @@ import java.sql.Statement;
 import java.sql.Types;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Collection;
@@ -58,6 +60,9 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 final class SQLitePlayerRecordStore implements PlayerRepository {
+    private static final String CHAT_FORMAT_REPAIR_KEY = "chat-formatting-v1.5.8";
+    private static final long CHAT_FORMAT_REPAIR_FROM = ZonedDateTime.of(
+            2026, 9, 11, 13, 0, 0, 0, ZoneOffset.ofHours(8)).toInstant().toEpochMilli();
     private static final long MIN_WRITER_RECOVERY_WINDOW_MILLIS = TimeUnit.MINUTES.toMillis(5);
     private static final long MAX_WRITER_RECOVERY_BACKOFF_MILLIS = TimeUnit.SECONDS.toMillis(5);
     private final Path directory;
@@ -165,6 +170,7 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
             SQLiteSchema.initialize(connection);
             new SQLiteLegacyMigrator(directory, gson, warningSink,
                     databaseSettings.allowPartialLegacyMigration).migrateIfNeeded(connection);
+            repairLegacyChatFormatting(connection);
             SQLiteSchema.verify(connection);
             FailedReplaySummary replaySummary = replayFailedEvents(connection);
             if (replaySummary.replayed() > 0) {
@@ -2013,6 +2019,76 @@ final class SQLitePlayerRecordStore implements PlayerRepository {
     private record StatEvent(String playerName, StatSnapshot snapshot) implements DatabaseEvent {
         public String operation() { return "stat"; }
         public String playerNameForLog() { return playerName; }
+    }
+
+    private void repairLegacyChatFormatting(Connection connection) throws SQLException {
+        long repairUntil;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT status, started_at FROM migration_state WHERE migration_key = ?")) {
+            statement.setString(1, CHAT_FORMAT_REPAIR_KEY);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    if ("COMPLETED".equals(resultSet.getString("status"))) {
+                        return;
+                    }
+                    repairUntil = resultSet.getLong("started_at");
+                } else {
+                    repairUntil = System.currentTimeMillis();
+                    try (PreparedStatement insert = connection.prepareStatement("""
+                            INSERT INTO migration_state(migration_key, status, started_at)
+                            VALUES(?, 'RUNNING', ?)
+                            """)) {
+                        insert.setString(1, CHAT_FORMAT_REPAIR_KEY);
+                        insert.setLong(2, repairUntil);
+                        insert.executeUpdate();
+                    }
+                }
+            }
+        }
+
+        info("Repairing legacy colored chat messages from 2026-09-11 13:00:00 UTC+8 to first v1.5.8 startup.");
+        int scanned = 0;
+        int repaired = 0;
+        connection.setAutoCommit(false);
+        try (PreparedStatement select = connection.prepareStatement("""
+                SELECT id, message FROM chat_messages
+                WHERE timestamp >= ? AND timestamp <= ? AND instr(message, '§') > 0
+                """);
+             PreparedStatement update = connection.prepareStatement(
+                     "UPDATE chat_messages SET message = ? WHERE id = ?")) {
+            select.setLong(1, CHAT_FORMAT_REPAIR_FROM);
+            select.setLong(2, repairUntil);
+            try (ResultSet rows = select.executeQuery()) {
+                while (rows.next()) {
+                    scanned++;
+                    String original = rows.getString("message");
+                    String cleaned = MinecraftFormatting.strip(original);
+                    if (!original.equals(cleaned)) {
+                        update.setString(1, cleaned);
+                        update.setLong(2, rows.getLong("id"));
+                        update.addBatch();
+                        repaired++;
+                    }
+                }
+            }
+            update.executeBatch();
+            try (PreparedStatement complete = connection.prepareStatement("""
+                    UPDATE migration_state SET status = 'COMPLETED', completed_at = ?, details = ?
+                    WHERE migration_key = ?
+                    """)) {
+                complete.setLong(1, System.currentTimeMillis());
+                complete.setString(2, "scanned=" + scanned + ", repaired=" + repaired);
+                complete.setString(3, CHAT_FORMAT_REPAIR_KEY);
+                complete.executeUpdate();
+            }
+            connection.commit();
+            info("Legacy colored chat repair completed: scanned=" + scanned + ", repaired=" + repaired + ".");
+        } catch (SQLException error) {
+            connection.rollback();
+            throw error;
+        } finally {
+            connection.setAutoCommit(true);
+        }
     }
 
     private record IdentityEvent(String playerName, IdentityResolution resolution, long checkedAt)

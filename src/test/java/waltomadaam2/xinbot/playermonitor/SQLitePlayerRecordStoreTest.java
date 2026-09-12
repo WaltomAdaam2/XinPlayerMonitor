@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -501,6 +502,65 @@ class SQLitePlayerRecordStoreTest {
             store.setWriteDelayForTesting(0L);
             store.close();
         }
+    }
+
+    @Test
+    void repairsLegacyColoredChatsOnceWithinTheV158Window() throws Exception {
+        Path directory = temporaryDirectory.resolve("playermonitor-chat-repair");
+        Path database = directory.resolve("xinpm.db");
+        Files.createDirectories(directory);
+        long from = 1_789_102_800_000L; // 2026-09-11 13:00:00 UTC+8
+        try (Connection connection = openRaw(database)) {
+            SQLiteSchema.initialize(connection);
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("""
+                        INSERT INTO players(normalized_name, display_name, first_seen_at, last_seen_at,
+                            online, created_at, updated_at)
+                        VALUES('colored', 'Colored', 1, 1, 0, 1, 1)
+                        """);
+            }
+            try (PreparedStatement insert = connection.prepareStatement(
+                    "INSERT INTO chat_messages(player_id, timestamp, message) VALUES(1, ?, ?)")) {
+                insert.setLong(1, from - 1);
+                insert.setString(2, "§cold");
+                insert.executeUpdate();
+                insert.setLong(1, from);
+                insert.setString(2, "§l*§l §l测§l试");
+                insert.executeUpdate();
+                insert.setLong(1, System.currentTimeMillis() + TimeUnit.DAYS.toMillis(1));
+                insert.setString(2, "§cfuture");
+                insert.executeUpdate();
+            }
+        }
+
+        List<String> logs = new ArrayList<>();
+        SQLitePlayerRecordStore store = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        store.setInfoSink(logs::add);
+        store.initialize();
+        store.close();
+
+        try (Connection connection = openRaw(database); Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT message FROM chat_messages ORDER BY id")) {
+            assertTrue(rows.next());
+            assertEquals("§cold", rows.getString(1));
+            assertTrue(rows.next());
+            assertEquals("* 测试", rows.getString(1));
+            assertTrue(rows.next());
+            assertEquals("§cfuture", rows.getString(1));
+            assertEquals("COMPLETED", scalar(connection,
+                    "SELECT status FROM migration_state WHERE migration_key = 'chat-formatting-v1.5.8'"));
+            assertEquals("scanned=1, repaired=1", scalar(connection,
+                    "SELECT details FROM migration_state WHERE migration_key = 'chat-formatting-v1.5.8'"));
+        }
+        assertTrue(logs.contains("Repairing legacy colored chat messages from 2026-09-11 13:00:00 UTC+8 to first v1.5.8 startup."));
+        assertTrue(logs.contains("Legacy colored chat repair completed: scanned=1, repaired=1."));
+
+        List<String> reopenLogs = new ArrayList<>();
+        SQLitePlayerRecordStore reopened = new SQLitePlayerRecordStore(directory, new MonitorSettings.Database());
+        reopened.setInfoSink(reopenLogs::add);
+        reopened.initialize();
+        reopened.close();
+        assertFalse(reopenLogs.stream().anyMatch(line -> line.startsWith("Repairing legacy colored chat messages")));
     }
 
     @Test

@@ -638,7 +638,7 @@ class PlayerMonitorManagementCommandTest {
             assertTrue(compactRendered.contains(
                     "> \u001B[92m会话=\u001B[0m\u001B[33m1970-01-01 00:00:03\u001B[0m"));
             String compactPlain = compactRendered.replaceAll("\\u001B\\[[0-9;]*m", "");
-            assertTrue(compactPlain.contains("Plugin Version: v1.5.7"));
+            assertTrue(compactPlain.contains("Plugin Version: v1.5.8"));
             assertTrue(compactPlain.contains("Database Version: v5"));
             assertTrue(compactRendered.contains(
                     "> \u001B[92mStat=\u001B[0m\u001B[33m1970-01-01 00:00:04\u001B[0m\n"

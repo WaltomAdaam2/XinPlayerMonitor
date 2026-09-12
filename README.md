@@ -2,7 +2,7 @@
 
 XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人进入 `Game` 状态后，插件会记录玩家登录、登出、公共聊天和 Stat，并将数据持续写入 SQLite。
 
-当前版本：**v1.5.7**
+当前版本：**v1.5.8**
 
 ## 主要功能
 
@@ -31,7 +31,7 @@ XinPlayerMonitor 是一个用于 XinBot 的玩家数据记录插件。机器人�
 
 1. 停止 XinBot。
 2. 备份完整的 `playermonitor/` 目录。
-3. 将 `XinPlayerMonitor-v1.5.7.jar` 放入 XinBot 插件目录并替换旧版本。
+3. 将 `XinPlayerMonitor-v1.5.8.jar` 放入 XinBot 插件目录并替换旧版本。
 4. 启动 XinBot。
 5. 执行 `playermonitor status` 检查数据库、writer、失败事件和备份状态。
 6. 执行 `playermonitor backup now` 创建一份升级后的人工备份。
@@ -354,7 +354,7 @@ mvn clean test package
 生成文件：
 
 ```text
-target/XinPlayerMonitor-v1.5.7.jar
+target/XinPlayerMonitor-v1.5.8.jar
 ```
 
 升级发布前至少验证：
