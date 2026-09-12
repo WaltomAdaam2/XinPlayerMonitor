@@ -54,9 +54,9 @@ final class PlayerMonitorListener implements Listener {
     private static final long ENTRY_ROSTER_POLL_MILLIS = 100L;
     private static final long ENTRY_ROSTER_STABLE_MILLIS = 500L;
     private static final long ENTRY_ROSTER_TIMEOUT_MILLIS = 5_000L;
-    private static final Pattern MINECRAFT_FORMAT_CODE = Pattern.compile("(?i)§[0-9a-fk-or]");
+    private static final Pattern MINECRAFT_FORMAT_CODE = Pattern.compile("(?i)§[0-9a-fk-orx]");
     private static final Pattern PUBLIC_CHAT_TEXT = Pattern.compile(
-            "^(?:§[0-9a-fk-or])*\\s*<((?:(?:§[0-9a-fk-or])|[^>])+)>(.*)$",
+            "^(?:§[0-9a-fk-orx])*\\s*<((?:(?:§[0-9a-fk-orx])|[^>])+)>(.*)$",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private final PlayerMonitorService service;
@@ -459,6 +459,7 @@ final class PlayerMonitorListener implements Listener {
             chatRejected.incrementAndGet();
             return;
         }
+        message = stripMinecraftFormatting(message);
         String playerName = nameOf(event.getSender());
         chatAcceptedByPlayerMonitor.incrementAndGet();
         try {
@@ -533,14 +534,12 @@ final class PlayerMonitorListener implements Listener {
             return;
         }
         publicChatParsed.incrementAndGet();
-        String playerName = MINECRAFT_FORMAT_CODE.matcher(matcher.group(1)).replaceAll("").trim();
+        String playerName = stripMinecraftFormatting(matcher.group(1)).trim();
         String message = matcher.group(2);
         if (message.startsWith(" ")) {
             message = message.substring(1);
         }
-        if (message.startsWith("§a")) {
-            message = message.substring(2);
-        }
+        message = stripMinecraftFormatting(message);
         if (playerName.isEmpty()) {
             chatRejected.incrementAndGet();
             return;
@@ -552,6 +551,10 @@ final class PlayerMonitorListener implements Listener {
             chatDbFailed.incrementAndGet();
             log.warn("failed to record fallback chat for " + playerName + ": " + error.getMessage());
         }
+    }
+
+    private static String stripMinecraftFormatting(String value) {
+        return MINECRAFT_FORMAT_CODE.matcher(value).replaceAll("");
     }
 
     private void scheduleStatWrite(StatResponseCollector.CapturedStat captured, long token) {
@@ -604,7 +607,7 @@ final class PlayerMonitorListener implements Listener {
             if (pendingStatDispatches.remove(normalizedName, token)) {
                 statAttempts.merge(normalizedName, 1, Integer::sum);
                 statResponses.expect(playerName, settings.statTimeoutMillis());
-                logger.info("Sent stat for {}.", playerName);
+                logger.info("Sent stat for " + PLAYER_LOG_COLOR + "{}" + RESET + ".", playerName);
             }
         }
     }

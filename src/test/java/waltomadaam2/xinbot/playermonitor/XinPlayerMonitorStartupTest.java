@@ -7,11 +7,18 @@ import xin.bbtt.mcbot.Bot;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class XinPlayerMonitorStartupTest {
+
+    @Test
+    void pluginLoggerNameUsesRequestedPrefixColor() {
+        assertEquals("\u001B[38;2;255;192;103mXinPlayerMonitor\u001B[0m", XinPlayerMonitor.LOGGER_NAME);
+    }
+
     @TempDir
     Path temporaryDirectory;
 

@@ -16,8 +16,9 @@ import java.util.function.Consumer;
 
 public final class XinPlayerMonitor implements Plugin {
     private static final String COMMAND_NAME = "playermonitor";
+    static final String LOGGER_NAME = "\u001B[38;2;255;192;103mXinPlayerMonitor\u001B[0m";
 
-    private final Logger logger = LoggerFactory.getLogger(XinPlayerMonitor.class.getSimpleName());
+    private final Logger logger = LoggerFactory.getLogger(LOGGER_NAME);
     private PlayerMonitorService service;
     private PlayerMonitorListener listener;
     private LoggerContext loggerContext;

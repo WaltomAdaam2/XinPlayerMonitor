@@ -90,6 +90,22 @@ class PlayerMonitorListenerChatLogTest {
     }
 
     @Test
+    void stripsMinecraftFormattingFromPublicChatWithoutChangingContent() throws Exception {
+        GameProfile profile = profile("ColoredChat");
+        listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));
+        listener.onPlayerJoin(new PlayerJoinEvent(profile));
+
+        listener.onPublicChat(new PublicChatEvent(profile, "§c^§ca§ck§cs§co§cv§cb"));
+        listener.onPublicChat(new PublicChatEvent(profile, ">§a §a1§a1§a1"));
+        listener.onPublicChat(new PublicChatEvent(profile, "§l*§l §l §l>§l §l1§l1§l1"));
+        listener.onPublicChat(new PublicChatEvent(profile, "§x§f§f§0§0§f§f彩色"));
+
+        var chats = service.recentChats("ColoredChat", 10);
+        assertEquals(List.of("彩色", "*  > 111", "> 111", "^aksovb"),
+                chats.stream().map(chat -> chat.message).toList());
+    }
+
+    @Test
     void recordsPublicChatEvenDuringReconnectWindow() throws Exception {
         GameProfile profile = profile("ReconnectChat");
         listener.onServerChange(new ServerChangeEvent(Server.Game, Server.Login));

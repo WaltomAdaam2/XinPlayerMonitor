@@ -306,6 +306,8 @@ class PlayerMonitorListenerBatchTest {
         context.listener.queueStatScanForTesting(List.of(profile), false);
         assertTrue(sent.await(2, TimeUnit.SECONDS));
         context.listener.onSendCommand(new SendCommandEvent("stat Complete"));
+        assertTrue(capture.appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                .anyMatch("Sent stat for \u001B[38;5;215mComplete\u001B[0m."::equals));
 
         SystemChatMessageEvent response = new SystemChatMessageEvent(Component.text(statText("Complete")), false);
         context.listener.onSystemChat(response);
